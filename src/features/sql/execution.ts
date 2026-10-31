@@ -1,0 +1,37 @@
+import { sqlStatements } from "./statements";
+export interface SqlResult {
+  sql: string;
+  rows: Record<string, unknown>[];
+  columns: string[];
+  status: string;
+  error?: boolean;
+}
+export async function executeSqlBatch(
+  sql: string,
+  query: (
+    sql: string,
+  ) => Promise<{ rows: Record<string, unknown>[]; columns: string[] }>,
+) {
+  const results: SqlResult[] = [];
+  for (const statement of sqlStatements(sql)) {
+    const start = performance.now();
+    try {
+      const result = await query(statement.sql);
+      results.push({
+        sql: statement.sql.trim(),
+        ...result,
+        status: `${result.rows.length} rows · ${Math.round(performance.now() - start)} ms`,
+      });
+    } catch (error) {
+      results.push({
+        sql: statement.sql.trim(),
+        rows: [],
+        columns: [],
+        status: String(error),
+        error: true,
+      });
+      break;
+    }
+  }
+  return results;
+}
