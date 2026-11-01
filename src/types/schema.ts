@@ -1,14 +1,11 @@
-export const dataTypes = [
-  "INTEGER",
-  "BIGINT",
-  "VARCHAR",
-  "DOUBLE",
-  "BOOLEAN",
-  "DATE",
-  "TIMESTAMP",
-] as const;
-export type DataType = (typeof dataTypes)[number];
+import type { MssqlConfig } from "../features/connections/model";
+import type { PostgresConfig } from "../features/postgres/model";
+export { duckTypes as dataTypes } from "../lib/duckdb/types";
+export type DataType = string;
 export interface ColumnDefinition {
+  generated?: boolean;
+  readOnly?: boolean;
+  nativeType?: string;
   id: string;
   name: string;
   type: DataType;
@@ -17,6 +14,8 @@ export interface ColumnDefinition {
   defaultValue: string;
 }
 export interface TableDefinition {
+  readOnly?: boolean;
+  namespace?: string;
   id: string;
   name: string;
   columns: ColumnDefinition[];
@@ -65,6 +64,9 @@ export interface WorkspaceDefinition {
   sqlTabs?: SqlTab[];
   activeSqlTabId?: string;
   sqlSnippets?: SqlSnippet[];
+  postgres?: PostgresConfig;
+  mssql?: MssqlConfig;
+  connectionId?: string;
   diagramPositions?: Record<string, { x: number; y: number }>;
   updatedAt: number;
 }

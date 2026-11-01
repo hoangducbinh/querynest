@@ -11,6 +11,125 @@ npm run dev
 
 Open the Vite URL. The workspace restores automatically, including its local DuckDB runtime. The initial commerce workspace includes customers, orders and order_items.
 
+## Desktop (Tauri 2)
+
+The same React app can run as a desktop application. The browser version remains available with `npm run dev`; the initial desktop release uses the existing DuckDB-Wasm engine locally. PostgreSQL uses native Rust/SQLx; SQL Server uses the native Tiberius TDS driver. A native DuckDB engine is not implemented; local workspaces continue to use DuckDB-Wasm.
+
+Prerequisites: Node.js/npm, stable Rust/Cargo and the platform build tools. On macOS, Xcode Command Line Tools are sufficient for desktop builds. See [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+
+```sh
+npm install
+npm run desktop:dev
+npm run desktop:check
+npm run desktop:build
+```
+
+`desktop:dev` starts Vite on `127.0.0.1:5173` and launches the native window. The port is fixed; stop any existing Vite server first. `desktop:build` builds the frontend and produces packages for the current platform (macOS `.app`/`.dmg`, Windows `.exe`/`.msi`) in `src-tauri/target/release/bundle/`. To build only the app, use `npm run desktop:build -- --bundles app`. Rust formatting: `cargo fmt --manifest-path src-tauri/Cargo.toml --check`.
+
+Desktop JSON export uses a native Save dialog and writes only to the path selected there. Import uses the existing file picker. Each browser origin and the packaged desktop app have separate local workspace storage and appearance settings: use JSON export/import to transfer workspaces. Window-close requests wait for saved workspace state and protect unsaved grid drafts. Keep JSON backups for important work.
+
+Build on the target OS (or its GitHub Actions runner). For Windows, install the MSVC build tools, WebView2 and Rust, then use `npm run desktop:build -- --bundles nsis`. Release signing/notarization and distribution are separate from these local builds. The app identifier is `dev.dbplayground.desktop`; keep it stable to retain the same desktop storage location.
+
+The native shell is in `src-tauri`. Frontend platform adapters are isolated in `src/lib/platform`; the web version does not call native APIs. Native capabilities are limited to the main window's close lifecycle and user-selected JSON export. Monaco, DuckDB workers and WASM assets are bundled locally.
+
+## Workspaces and saved connections
+
+**New workspace** opens a unified chooser. Enter an optional workspace name and choose **Local playground**, or choose **Open workspace** on a saved PostgreSQL/SQL Server connection. Add a connection using the engine buttons, name it, optionally test it, and save. Each open creates a separate workspace with independent SQL tabs, tests and diagram layout.
+
+To delete a workspace, choose **Open workspace**, click its trash button, and confirm. This removes only that workspace's local SQL, schema/sample data, tests, layout and settings; server databases and saved connection profiles are not deleted. Export JSON first if you need a backup. Deleting the active workspace switches to the most recently used remaining workspace; deleting the last one creates an empty local workspace. A deletion marker prevents queued autosaves/other windows from silently recreating the deleted ID. Importing a JSON backup creates a new workspace ID.
+
+**Connections** in the workspace menu lets you search, rename, edit, test and remove profiles. Settings are stored in Dexie on this device; passwords are never stored. Editing a profile affects new workspaces and the next Connection dialog/reconnect; an already-open session keeps its current settings until reconnecting. Removing a profile does not delete workspaces or disconnect active sessions; a workspace retains a non-secret settings snapshot. Existing PostgreSQL workspaces migrate to named saved profiles automatically. JSON export contains workspace connection settings, but not the separate profile list or any passwords. Profile IDs imported on another device fall back to the workspace snapshot when unavailable.
+
+Browser mode can manage settings and use local playgrounds; actual network connections require the desktop app. The connection form offers **Test connection** before opening a session. Each workspace switch closes its old native session; passwords must be entered again for SQL login.
+
+## PostgreSQL workspaces (desktop)
+
+1. Open **New workspace → PostgreSQL**, save the connection settings, then choose **Open workspace** on its connection card.
+2. Enter host, port, database, user and password. SSL defaults to certificate/hostname verification; use the local connection option only for a trusted local database without TLS.
+   Use **Test connection** to verify login and catalog access without opening a workspace session; the temporary connection closes after the check.
+
+3. **Read-only connection** is enabled by default. Connect to read schema, columns, native PostgreSQL types and foreign-key relationships.
+4. **SQL** supports multiple query tabs, selected-text execution, separate batch results, table/column/alias completion and PostgreSQL diagnostics. **Cancel query** cancels the current PostgreSQL query and stops the remaining batch.
+5. **Data** loads 100 rows/page and supports spreadsheet editing in read/write connections. It uses primary-key order where available, physical row order for ordinary tables without keys, and a next-page probe instead of an expensive COUNT. View ordering without a primary key is not guaranteed; concurrent changes can shift offset-based pages. Reconnect with read-only disabled to insert, update and delete directly in the grid (or use SQL).
+6. **Relations** displays the introspected foreign keys; diagram arrangement remains local. **Tests** executes checks against the connected database. Refresh the PostgreSQL schema after DDL changes using the refresh button next to Connection.
+
+Switching workspaces retains the existing native database session in memory, without saving the password or session handle to disk. Up to four inactive workspace sessions are retained; each expires 30 minutes after leaving it. Returning rechecks the catalog before enabling queries. Changed connection settings (including read-only permissions), an expired/closed session, or restarting the app require connecting again. Use **Disconnect** to close the current session explicitly. Removing a workspace also closes its retained session.
+
+Settings, SQL text and cached schema metadata are saved per workspace. Passwords and live session IDs are kept only in memory; reconnect after reopening the app. Query result rows are not snapshotted into workspace storage or JSON exports. Import strips unknown connection fields and remote row data. Browser workspaces and remote workspaces remain separate; PostgreSQL requires the desktop app.
+
+Read-only queries run inside a server-enforced read-only transaction and are rolled back after each execution. SELECT/WITH/VALUES/TABLE previews use a server cursor to fetch at most 1,001 rows, displaying at most 1,000. Other results are also limited to 1,000 displayed rows. In read/write mode, statements fully execute; results beyond the display cap are drained without storing them. Earlier successful writes remain applied if a later batch statement fails. Explicit BEGIN/COMMIT/ROLLBACK are supported on the dedicated read/write session. Default statement timeout is 60 seconds and lock timeout is 5 seconds.
+
+BIGINT values outside JavaScript's safe integer range, NUMERIC/DECIMAL, arrays, JSON and timestamps are returned as PostgreSQL text to preserve precision/format. Ordinary integers, finite floats and booleans retain JSON types; SQL NULL stays null. Tests should use corresponding expected values or explicit SQL casts. Duplicate result column names receive unique display names.
+
+Diagnostics prepare statements without executing them, on a separate connection. Uncommitted schema changes and custom session settings may not be reflected in live diagnostics. A non-default PostgreSQL port is supported; SSH tunneling, custom CA/client-certificate pickers are not included in this connection release.
+
+Rust unit tests: `cargo test --manifest-path src-tauri/Cargo.toml`. The ignored `live_postgres_driver` integration test requires the disposable fixture described in `scripts/postgres-qa.sh` and should never target a production database.
+
+## SQL Server workspaces (desktop)
+
+Choose **New workspace → SQL Server** (or add a profile from **Connections**). Set host, explicit TCP port (default 1433), database (default `master`) and authentication. **SQL Server login** works on both macOS and Windows. **Windows · current account** uses SSPI in the Windows build and needs no saved password; on macOS it reports that Windows is required. Named-instance discovery, SQL Browser, SQL LocalDB, domain/password impersonation and SSH tunnels are not included: use the actual host and TCP port.
+
+Encryption and certificate verification are enabled by default. For a local development server with a self-signed certificate, explicitly select **Trust server certificate**. On Windows, enable SQL Server TCP/IP and check the actual instance port; SQL login requires server-side SQL authentication to be enabled. Windows authentication requires the Windows account to have permission on that instance/database. See [Microsoft TCP/IP setup](https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/enable-or-disable-a-server-network-protocol) and [authentication modes](https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/change-server-authentication-mode).
+
+- Tables, views, native types, primary keys and composite foreign keys populate the shared sidebar and relation diagram. **Refresh schema** after DDL.
+- SQL supports selected text, multiple result sets, bracket-quoted name completion and T-SQL keywords. Use **GO alone on a line** between batches; semicolons stay inside each batch so DECLARE variables, stored procedure definitions and transactions keep their normal T-SQL scope. `GO n` repetition is not supported. Results are capped at 1,000 rows/set, 10,000 rows total and 50 sets; the driver still drains the complete response. Use `TOP`/filters for large queries. Commands without row results show **Completed** rather than an invented affected-row count.
+- **Data** fetches 100 rows/page via OFFSET/FETCH plus a next-page probe. Primary-key ordering is used where available; tables/views without a key have no guaranteed page order. Use the spreadsheet in read/write mode to edit ordinary tables, or write using SQL.
+- BIGINT beyond the JavaScript safe range, DECIMAL/NUMERIC and date/time values use strings; binary uses hex. SQL NULL remains null. Tests expect one result set and reject truncated results.
+- Live diagnostics use `sp_describe_first_result_set` on a separate connection without running user text. Procedures, temp tables, dynamic SQL, session settings and uncommitted schema changes may not be describable; those failures show warnings. SQL Server usually supplies a line, not an exact character position.
+- **Query-only guard** conservatively parses batches and blocks non-SELECT statements, SELECT INTO, sequence advancement and external-access clauses. This is an app guard, not a SQL Server permission boundary: use a restricted read-only login for server-enforced protection. Complex T-SQL unsupported by the parser must use a restricted account with the guard disabled.
+- Connection timeout is 12 seconds; queries have a 60-second timeout and 5-second lock timeout. **Cancel query** and execution timeouts close the dedicated SQL Server socket. Reconnect afterward; open transactions are rolled back by SQL Server when disconnect is processed. Previously committed statements remain committed; cancellation cannot undo them. Explicit BEGIN TRANSACTION/COMMIT/ROLLBACK otherwise use the pinned session.
+
+### Editing PostgreSQL and SQL Server data
+
+Turn off **Read-only connection** (PostgreSQL) or **Query-only guard** (SQL Server), reconnect, then choose a table in **Data**. The grid uses the same cell editor as local DuckDB: type into cells, paste TSV from Excel, add rows, select/delete rows, Set NULL, and **Save changes** or **Discard**. Use **Add column** beside Add row, or click a column header to open its native column editor.
+
+- Values remain text until the server converts them. Empty text stays empty; use **Set NULL**, Alt+Backspace or the clipboard `\N` marker for SQL NULL. Leaving a new-row cell untouched uses the database default/NULL. **Add row** can create a DEFAULT VALUES draft even when every column is generated or has a default.
+- Identity, computed/generated, rowversion and unsupported SQL Server column types are read-only. Ordinary tables without a primary key allow inserts only. Views, materialized views and foreign tables stay read-only in the grid. SQL permissions are always enforced by the server.
+- Save accepts up to 500 changed rows, with a 1 MB limit per edited cell, in one dedicated transaction. All validation/constraint failures roll back the batch and retain drafts. Grid transactions never commit a manual transaction opened in the SQL tab. Grid pages show committed data on separate connections; uncommitted SQL changes are not included.
+- Update/delete uses the original full primary key (including composite keys), then checks the full current row against its loaded snapshot under lock. Conflicting or missing rows abort the batch: discard and reload rather than overwrite concurrent changes. PostgreSQL locks edited rows; SQL Server uses a short exclusive table lock for the bounded save to protect both snapshot checks and writes. Busy tables can hit the five-second lock timeout.
+- Generated values are reloaded after saving. Inserts may sort onto another page. Pagination remains server-side, 100 rows/page; filtering searches only the loaded page. Changing pages, table, mode, connection or workspace checks for unsaved drafts. Native window-close and browser unload guards include remote drafts.
+- A save and its refresh are separate: if COMMIT succeeded but refreshing failed, drafts are cleared and the UI reports that data was saved. If COMMIT cannot be confirmed, Save stays disabled until drafts are discarded and data is refreshed, preventing accidental duplicate submissions.
+
+### Editing remote columns
+
+In a read/write PostgreSQL or SQL Server workspace, open **Data → Add column**, or click an existing column header. The popover supports name, native data type (including length/precision/scale), Required/nullable, SQL default expression, single-column Unique, and adding a primary key when the table has none. Save/discard pending row edits before editing the schema. Changes apply directly to the selected table, followed by automatic schema/grid refresh.
+
+DDL uses a dedicated transaction with a 60-second execution timeout and a short lock timeout; it does not commit transactions from the SQL tab. Fresh metadata is compared against the editor snapshot under a table lock to reject stale edits. Types are allowlisted, names quoted, and defaults must parse as one expression without additional statements. Existing collations and SQL Server default-constraint names are preserved when relevant. Adding a default applies it to existing rows on both engines (SQL Server uses WITH VALUES); changing an existing default affects future rows. NOT NULL, uniqueness and type conversions are validated by the database; failures roll back the whole change.
+
+Identity/computed/generated settings are read-only, with renaming supported. The last column cannot be deleted. Drop is disabled for columns used by primary/foreign keys, check/unique constraints or indexes; remove/manage those dependencies explicitly in SQL first. There is no CASCADE or automatic index/key rebuild in the editor. Existing/composite primary keys and custom types/casts (including PostgreSQL USING expressions) remain SQL operations. SQL Server indexed/constrained column types must be managed in SQL. SQL Server renames do not rewrite text in dependent views or procedures. Deleting an eligible column requires confirmation and removes its values permanently.
+
+If COMMIT cannot be confirmed, the editor blocks retry until it is closed and schema refreshed. If DDL committed but the metadata refresh failed, the editor closes and the grid stays disabled until schema refresh, preventing duplicate ADD/DROP attempts.
+
+The ignored integration tests `live_postgres_columns` and `live_sqlserver_columns` create isolated `columns_qa_*` schemas and remove them afterward. They cover add/backfill, rename, type/nullable/default changes, uniqueness failures and rollback, dropping columns with defaults, stale-schema rejection, protected keys/indexes, identity renames, adding a primary key, and collation/default-constraint preservation. The PostgreSQL fixture runs its test automatically; SQL Server uses the `SQLSERVER_TEST_*` variables below and `cargo test --manifest-path src-tauri/Cargo.toml live_sqlserver_columns -- --ignored`.
+
+`live_postgres_grid` and `live_sqlserver_grid` cover exact decimals/large IDs, defaults, generated values, composite-key updates, NULL/empty text, full-batch rollback, stale/deleted rows, keyless inserts and read-only protection. The PostgreSQL fixture script runs both PostgreSQL integration tests. The SQL Server grid test creates and removes a unique `grid_qa_*` schema in the configured **development** database; it needs CREATE SCHEMA/TABLE/VIEW permissions. Run it with the same `SQLSERVER_TEST_*` variables below and `cargo test --manifest-path src-tauri/Cargo.toml live_sqlserver_grid -- --ignored`.
+
+### Build and try on Windows
+
+Copy/clone the project onto Windows, install Node.js, Rust (MSVC), Visual Studio C++ build tools and WebView2 following [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/#windows). From the project root:
+
+```powershell
+npm ci
+npm run desktop:dev
+# Or create an installer:
+npm run desktop:build -- --bundles nsis
+```
+
+The installer is under `src-tauri/target/release/bundle/nsis/`. macOS cannot produce or run this Windows installer through the normal local build. Before distribution, validate on the actual Windows/SQL Server setup: Test connection with SQL login and Windows authentication, schema refresh, multi-result queries, table pagination, BEGIN/ROLLBACK, cancel/reconnect and relaunch (password must be blank).
+
+The ignored Rust integration test uses only session-local temp tables; point it at a development SQL Server with CREATE TABLE rights in tempdb, not production:
+
+```powershell
+$env:SQLSERVER_TEST_HOST = '127.0.0.1'
+$env:SQLSERVER_TEST_DATABASE = 'master'
+$env:SQLSERVER_TEST_AUTH = 'windows'
+# For a trusted local self-signed test server only:
+$env:SQLSERVER_TEST_TRUST_CERT = 'true'
+cargo test --manifest-path src-tauri/Cargo.toml live_sqlserver_driver -- --ignored
+```
+
+For SQL login, use `SQLSERVER_TEST_AUTH=sql`, `SQLSERVER_TEST_USER` and `SQLSERVER_TEST_PASSWORD` in your local environment. Optional port override: `SQLSERVER_TEST_PORT`. SQL Server integration and Windows compilation require those external environments; unit tests on macOS do not replace them.
+
 ## The workspace
 
 The compact interface uses a single 48px toolbar and three top-level tabs: **Data**, **SQL** and **Tests**. **Relations** is available directly above **TABLES** in the sidebar. Decorative headers, breadcrumbs, global footers, explanatory banners and duplicate table tabs have been removed. Dark appearance and the workspace menu remain in the top toolbar. Appearance is saved locally for this browser and restored on reload. Dialogs and popovers share the same theme; text inputs use a thin focus border.
@@ -21,7 +140,7 @@ The compact interface uses a single 48px toolbar and three top-level tabs: **Dat
 
 ### SQL query tabs
 
-Use **+** beside the SQL tab names to open another query. Click a tab to switch; double-click its name to rename it (Enter saves, Escape cancels). **×** closes a tab, with confirmation when it contains SQL. Closing the last tab creates an empty query. Query text, names and the selected tab autosave per workspace and travel with workspace JSON; legacy single-query workspaces open as `query.sql`. Each tab has its own results during the current session. Results are cleared on reload; Run and Cmd/Ctrl+Enter execute the selected SQL text, or the entire active tab when there is no nonempty selection. All tabs share the workspace database.
+Use **+** beside the SQL tab names to open another query. Click a tab to switch; double-click its name to rename it (Enter saves, Escape cancels). **×** closes a tab, with confirmation when it contains SQL. Closing the last tab creates an empty query. Query text, names and the selected tab autosave per workspace and travel with workspace JSON; legacy single-query workspaces open as `query.sql`. Each tab has its own results during the current session. Results are cleared on reload; Run and Cmd/Ctrl+Enter execute the selected SQL text, or the entire active tab when there is no nonempty selection. All tabs share the workspace database. Use **Split SQL editor** to open two panes side by side. Each pane selects its own tab and displays that tab's results. If only one tab exists, splitting creates an empty `split.sql` tab. Drag the divider to resize (or focus it and use Left/Right, Home/End). Run and Cmd/Ctrl+Enter target the focused pane; executions share the same database session and run one at a time. **Close SQL split** keeps the tabs and returns to one pane. The split layout lasts until leaving the SQL view.
 
 ### Run a selection or multiple statements
 
@@ -89,3 +208,12 @@ DuckDB selects a compatible single-threaded Wasm bundle, preferring native excep
 The MVP does not support cascading referential actions, cyclic physical foreign keys, physical self references, automatic SQL-to-diagram synchronization, formulas, merged cells, range selection or automatic type-changing data migrations. Logical relationships do not enforce constraints. Column defaults are DuckDB SQL expressions. Each successful grid transaction snapshots the canonical tables. Cell changes are saved explicitly; this is intentional to support complete rows and atomic multi-row validation.
 
 Production dependencies audit clean with the DOMPurify override. The full audit currently reports moderate development-tool findings in ESLint's minimatch dependency chain.
+
+
+### DuckDB column types and SQL type completion
+
+Local column and table editors accept editable type definitions, with suggestions for the bundled DuckDB 1.5 runtime: signed/unsigned integers through 128 bits, BIGNUM, FLOAT/DOUBLE, DECIMAL precision/scale, Unicode VARCHAR, BIT/BLOB, UUID/JSON, date/time and timestamp resolutions/zones, INTERVAL, GEOMETRY, ENUM, LIST/ARRAY, MAP, STRUCT, UNION and VARIANT. Enter definitions such as `DECIMAL(38,8)`, `INTEGER[3]`, `STRUCT(name VARCHAR, scores INTEGER[])` or `ENUM('draft','ready')`. A bounded type parser validates definitions before DDL generation; DuckDB then validates runtime constraints during sync or column Save. Existing workspace JSON remains compatible.
+
+The Data grid keeps exact wide numbers/decimals as text. Nested values use JSON with string leaves to preserve precision: lists `["1","2"]`, structs `{"n":"12345678901234567890"}`, maps `[{"key":"a","value":"1"}]` and unions `{"tag":"num","value":"42"}`. VARIANT snapshots include `$variantType` and `$variantJSON`; ordinary JSON values can also be entered. Hover a cell for its input format. Save and rebuild share the same validated conversion path. Large numbers inside JSON should be quoted. Custom named types and extension-defined types beyond these built-ins are managed through SQL.
+
+SQL autocomplete uses the current workspace engine. Type suggestions are prioritized in CREATE TABLE column declarations, ALTER TABLE ADD/ALTER TYPE, CAST/TRY_CAST, PostgreSQL `::`, and SQL Server DECLARE/CONVERT. Press Ctrl+Space to open suggestions and Tab to accept. Parameterized types insert editable snippet fields, e.g. SQL Server `NVARCHAR(255)`/`NVARCHAR(MAX)` and `DECIMAL(18,2)`. Version-specific SQL Server types carry an availability note; the connected server determines whether they can be used.

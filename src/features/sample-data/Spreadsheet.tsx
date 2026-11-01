@@ -1,3 +1,4 @@
+import { duckCellHint } from "../../lib/duckdb/values";
 import {
   useEffect,
   useLayoutEffect,
@@ -38,8 +39,15 @@ interface Props {
   disabled: boolean;
   onDirty: (dirty: boolean) => void;
   onSave: (rows: DraftRow[]) => Promise<Record<string, unknown>[]>;
-  onAddColumn: (anchor: HTMLButtonElement) => void;
-  onEditColumn: (columnId: string, anchor: HTMLButtonElement) => void;
+  onAddColumn?: (anchor: HTMLButtonElement) => void;
+  onEditColumn?: (columnId: string, anchor: HTMLButtonElement) => void;
+  serverPage?: {
+    index: number;
+    hasNext: boolean;
+    onChange: (page: number) => void;
+  };
+  readOnlyReason?: string;
+  onDiscard?: () => Promise<Record<string, unknown>[]>;
   structureDisabled: boolean;
 }
 export function Spreadsheet({
@@ -51,6 +59,9 @@ export function Spreadsheet({
   onAddColumn,
   onEditColumn,
   structureDisabled,
+  serverPage,
+  readOnlyReason,
+  onDiscard,
 }: Props) {
   const [drafts, setDrafts] = useState<DraftRow[]>(() => initialDrafts(rows));
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -59,6 +70,7 @@ export function Spreadsheet({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
+  const [requiresRefresh, setRequiresRefresh] = useState(false);
   const [filter, setFilter] = useState("");
   const [page, setPage] = useState(0);
   const root = useRef<HTMLDivElement>(null);
@@ -98,6 +110,16 @@ export function Spreadsheet({
           ? cellText(row.original[name])
           : undefined;
   function update(row: number, col: number, value: CellValue) {
+    const column = table.columns[col];
+    if (
+      disabled ||
+      saving ||
+      !column ||
+      column.generated ||
+      column.readOnly ||
+      (drafts[row]?.original && !table.primaryKey.length)
+    )
+      return;
     setError("");
     setNotice("");
     setDrafts((current) => {
@@ -117,7 +139,14 @@ export function Spreadsheet({
     const row = firstBlank < 0 ? drafts.length : firstBlank;
     if (firstBlank < 0) setDrafts((current) => [...current, makeDraft()]);
     setFilter("");
-    setFocus({ row, col: 0 });
+    if (serverPage)
+      setDrafts((current) =>
+        current.map((item, index) =>
+          index === row ? { ...item, insert: true } : item,
+        ),
+      );
+    const column = table.columns.findIndex((c) => !c.generated && !c.readOnly);
+    setFocus({ row, col: Math.max(0, column) });
   }
   function navigate(row: number, col: number) {
     if (col < 0) {
@@ -186,7 +215,7 @@ export function Spreadsheet({
     }
   }
   async function save() {
-    if (disabled || saving || !dirty) return;
+    if (disabled || saving || !dirty || requiresRefresh) return;
     if (
       removed &&
       !(await confirmAction(
@@ -202,6 +231,13 @@ export function Spreadsheet({
       setSelected(new Set());
       setNotice("Changes saved");
     } catch (e) {
+      if (
+        e &&
+        typeof e === "object" &&
+        "requiresRefresh" in e &&
+        e.requiresRefresh
+      )
+        setRequiresRefresh(true);
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
@@ -247,7 +283,9 @@ export function Spreadsheet({
       .map(({ row }) => row.id),
   );
   const visible = matching.filter(
-    ({ row }) => !row.original || displayedSaved.has(row.id),
+    ({ row }) =>
+      (!readOnlyReason || !!row.original) &&
+      (!row.original || displayedSaved.has(row.id)),
   );
   function changePage(next: number) {
     setPage(next);
@@ -265,14 +303,16 @@ export function Spreadsheet({
             <Plus size={15} />
             Add row
           </Button>
-          <Button
-            data-add-column
-            disabled={structureDisabled || saving}
-            onClick={(event) => onAddColumn(event.currentTarget)}
-          >
-            <Plus size={15} />
-            Add column
-          </Button>
+          {onAddColumn && (
+            <Button
+              data-add-column
+              disabled={structureDisabled || saving}
+              onClick={(event) => onAddColumn(event.currentTarget)}
+            >
+              <Plus size={15} />
+              Add column
+            </Button>
+          )}
           <Button
             title="Delete selected rows"
             disabled={
@@ -296,7 +336,9 @@ export function Spreadsheet({
               saving ||
               !selectedRow ||
               selectedRow.deleted ||
-              (!table.primaryKey.length && !!selectedRow.original)
+              (!table.primaryKey.length && !!selectedRow.original) ||
+              !!activeColumn?.generated ||
+              !!activeColumn?.readOnly
             }
             onClick={() => update(active.row, active.col, null)}
           >
@@ -307,8 +349,8 @@ export function Spreadsheet({
           <div className="sheet-search">
             <Search size={14} />
             <input
-              aria-label="Filter rows"
-              placeholder="Filter rows"
+              aria-label={serverPage ? "Filter loaded rows" : "Filter rows"}
+              placeholder={serverPage ? "Filter this page" : "Filter rows"}
               value={filter}
               onChange={(e) => {
                 setFilter(e.target.value);
@@ -321,10 +363,19 @@ export function Spreadsheet({
             disabled={!dirty || saving}
             onClick={async () => {
               if (await confirmAction("Discard unsaved cell changes?")) {
-                setDrafts(initialDrafts(rows));
-                setSelected(new Set());
-                setError("");
-                setNotice("");
+                setSaving(true);
+                try {
+                  const next = onDiscard ? await onDiscard() : rows;
+                  setDrafts(initialDrafts(next));
+                  setSelected(new Set());
+                  setError("");
+                  setNotice("");
+                  setRequiresRefresh(false);
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : String(e));
+                } finally {
+                  setSaving(false);
+                }
               }
             }}
           >
@@ -332,7 +383,7 @@ export function Spreadsheet({
           </Button>
           <Button
             className="primary"
-            disabled={disabled || saving || !dirty}
+            disabled={disabled || saving || !dirty || requiresRefresh}
             onClick={() => void save()}
           >
             {saving ? <span className="spinner" /> : <Check size={15} />}Save
@@ -361,8 +412,13 @@ export function Spreadsheet({
             ""
           )}
         </span>
-        <span className="formula-type">{activeColumn?.type.toLowerCase()}</span>
+        <span className="formula-type">
+          {activeColumn?.nativeType ?? activeColumn?.type.toLowerCase()}
+        </span>
       </div>
+      {readOnlyReason && (
+        <div className="sheet-readonly-notice">{readOnlyReason}</div>
+      )}
       {error && (
         <div className="sheet-error" role="alert">
           <span>{error}</span>
@@ -407,10 +463,22 @@ export function Spreadsheet({
                 >
                   <button
                     className="column-header-trigger"
-                    title={`Edit column ${c.name}`}
+                    title={
+                      structureDisabled
+                        ? `${c.name} · ${c.nativeType ?? c.type}`
+                        : `Double-click to edit column ${c.name}`
+                    }
                     disabled={structureDisabled || saving}
                     data-column-id={c.id}
-                    onClick={(event) => onEditColumn(c.id, event.currentTarget)}
+                    onDoubleClick={(event) =>
+                      onEditColumn?.(c.id, event.currentTarget)
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        onEditColumn?.(c.id, event.currentTarget);
+                      }
+                    }}
                   >
                     <span className="column-letter">{columnLetter(i)}</span>
                     <div className="sheet-column-name">
@@ -426,15 +494,19 @@ export function Spreadsheet({
                         </span>
                       )}
                       {c.name}
-                      <ChevronDown size={11} />
+                      {!structureDisabled && <ChevronDown size={11} />}
                     </div>
                     <span className="sheet-column-type">
-                      {c.type.toLowerCase()}
-                      {table.primaryKey.includes(c.id)
-                        ? " · primary key"
-                        : c.nullable
-                          ? " · nullable"
-                          : " · required"}
+                      {c.nativeType ?? c.type.toLowerCase()}
+                      {c.generated
+                        ? " · generated"
+                        : c.readOnly
+                          ? " · read only"
+                          : table.primaryKey.includes(c.id)
+                            ? " · primary key"
+                            : c.nullable
+                              ? " · nullable"
+                              : " · required"}
                     </span>
                   </button>
                 </th>
@@ -466,7 +538,13 @@ export function Spreadsheet({
                         })
                       }
                     />
-                    <span>{r + 1}</span>
+                    <span>
+                      {r +
+                        1 +
+                        (row.original
+                          ? (serverPage?.index ?? 0) * PAGE_SIZE
+                          : 0)}
+                    </span>
                     {!row.original && <Plus size={11} />}
                   </label>
                 </th>
@@ -487,6 +565,7 @@ export function Spreadsheet({
                     >
                       <input
                         aria-label={`${column.name}, row ${r + 1}`}
+                        title={duckCellHint(column.nativeType ?? column.type)}
                         data-row={r}
                         data-col={c}
                         value={value ?? ""}
@@ -494,21 +573,36 @@ export function Spreadsheet({
                           value === null
                             ? "NULL"
                             : !row.original
-                              ? column.defaultValue
-                                ? "Default"
-                                : column.nullable
-                                  ? "NULL"
-                                  : ""
+                              ? column.generated
+                                ? "Generated"
+                                : column.defaultValue
+                                  ? "Default"
+                                  : column.nullable
+                                    ? "NULL"
+                                    : ""
                               : ""
                         }
                         disabled={disabled || saving || row.deleted}
-                        readOnly={!!row.original && !table.primaryKey.length}
+                        readOnly={
+                          !!column.generated ||
+                          !!column.readOnly ||
+                          (!!row.original && !table.primaryKey.length)
+                        }
                         spellCheck={false}
                         autoComplete="off"
                         onFocus={() => setActive({ row: r, col: c })}
                         onChange={(e) => update(r, c, e.target.value)}
                         onKeyDown={(e) => handleKey(e, r, c)}
                         onPaste={(e) => {
+                          if (
+                            disabled ||
+                            saving ||
+                            readOnlyReason ||
+                            requiresRefresh
+                          ) {
+                            e.preventDefault();
+                            return;
+                          }
                           const text = e.clipboardData.getData("text/plain");
                           if (!/[\t\r\n]/.test(text)) return;
                           e.preventDefault();
@@ -562,30 +656,54 @@ export function Spreadsheet({
             </>
           )}
         </span>
-        <span>
-          {matchingSaved.length ? pageStart + 1 : 0}–
-          {Math.min(pageStart + PAGE_SIZE, matchingSaved.length)} /{" "}
-          {matchingSaved.length} rows
-          <Button
-            aria-label="Previous page"
-            disabled={disabled || saving || currentPage === 0}
-            onClick={() => changePage(currentPage - 1)}
-          >
-            Previous
-          </Button>
-          <span aria-live="polite">
-            Page {currentPage + 1} of {pageCount}
+        {serverPage ? (
+          <span>
+            {rows.length ? serverPage.index * PAGE_SIZE + 1 : 0}–
+            {serverPage.index * PAGE_SIZE + rows.length} rows
+            <Button
+              aria-label="Previous page"
+              disabled={saving || !serverPage.index}
+              onClick={() => serverPage.onChange(serverPage.index - 1)}
+            >
+              Previous
+            </Button>
+            <span aria-live="polite">Page {serverPage.index + 1}</span>
+            <Button
+              aria-label="Next page"
+              disabled={saving || !serverPage.hasNext}
+              onClick={() => serverPage.onChange(serverPage.index + 1)}
+            >
+              Next
+            </Button>
+            <span className="status-separator">·</span>
+            {table.columns.length} columns
           </span>
-          <Button
-            aria-label="Next page"
-            disabled={disabled || saving || currentPage + 1 >= pageCount}
-            onClick={() => changePage(currentPage + 1)}
-          >
-            Next
-          </Button>
-          <span className="status-separator">·</span>
-          {table.columns.length} columns
-        </span>
+        ) : (
+          <span>
+            {matchingSaved.length ? pageStart + 1 : 0}–
+            {Math.min(pageStart + PAGE_SIZE, matchingSaved.length)} /{" "}
+            {matchingSaved.length} rows
+            <Button
+              aria-label="Previous page"
+              disabled={disabled || saving || currentPage === 0}
+              onClick={() => changePage(currentPage - 1)}
+            >
+              Previous
+            </Button>
+            <span aria-live="polite">
+              Page {currentPage + 1} of {pageCount}
+            </span>
+            <Button
+              aria-label="Next page"
+              disabled={disabled || saving || currentPage + 1 >= pageCount}
+              onClick={() => changePage(currentPage + 1)}
+            >
+              Next
+            </Button>
+            <span className="status-separator">·</span>
+            {table.columns.length} columns
+          </span>
+        )}
       </div>
     </div>
   );

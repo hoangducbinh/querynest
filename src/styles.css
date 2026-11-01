@@ -2570,3 +2570,383 @@ select:focus {
 .monaco-editor textarea:focus {
   box-shadow: none;
 }
+
+.pg-workspace,
+.pg-data {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.pg-connection-bar {
+  min-height: 35px;
+  flex-shrink: 0;
+}
+.pg-connection-bar .toolbar-count {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pg-connection-bar .row {
+  flex-shrink: 0;
+}
+.pg-workspace > .design-view {
+  flex: 1;
+  min-height: 0;
+}
+.pg-connection-dialog {
+  width: min(470px, 94vw);
+  padding: 22px;
+}
+.pg-connection-dialog > .row {
+  justify-content: space-between;
+}
+.pg-connection-dialog h2 {
+  font-size: 18px;
+  margin-bottom: 0;
+}
+.pg-connection-dialog p {
+  margin: 10px 0 18px;
+}
+.pg-connection-dialog fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 0;
+  padding: 0;
+}
+.pg-connection-dialog label:not(.check-label) {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--secondary);
+  font-size: 11px;
+}
+.pg-form-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 90px;
+  gap: 12px;
+}
+.pg-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+.pg-connection-dialog .pg-error {
+  color: var(--danger);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+/* Workspace and connection settings share the app's compact, themed surfaces. */
+.connection-manager {
+  width: min(720px, calc(100vw - 48px));
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.connection-manager .row,
+.pg-connection-dialog > .row {
+  justify-content: space-between;
+}
+.workspace-name-label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+}
+.local-workspace-card {
+  width: 100%;
+  padding: 16px;
+  height: auto;
+  text-align: left;
+  gap: 14px;
+}
+.local-workspace-card span {
+  flex: 1;
+  display: grid;
+  gap: 4px;
+}
+.local-workspace-card small,
+.connection-card small,
+.connection-hint {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.connection-list-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  font-size: 12px;
+}
+.connection-list-heading input {
+  width: 180px;
+}
+.connection-list {
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  min-height: 70px;
+}
+.connection-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.connection-card-info {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+.connection-card-info strong,
+.connection-card-info small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.connection-card-info strong {
+  font-size: 13px;
+}
+.connection-manager-footer {
+  display: flex;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.connection-success {
+  color: var(--green, #278353);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.pg-connection-dialog .connection-hint {
+  margin: 0;
+}
+.connection-manager h2 {
+  margin: 0;
+  font-size: 20px;
+}
+.connection-manager > p {
+  margin: 0;
+}
+.sheet-readonly-notice {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--secondary);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.pg-data > .spreadsheet {
+  flex: 1;
+  min-height: 0;
+}
+.sheet-grid input[readonly] {
+  color: var(--secondary);
+  cursor: default;
+}
+.column-header-trigger:disabled {
+  opacity: 1;
+  cursor: default;
+}
+.column-header-trigger:disabled:hover .sheet-column-name {
+  color: inherit;
+}
+.workspace-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding-right: 8px;
+}
+.workspace-entry .workspace-option {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  margin: 0;
+  border: 0;
+  padding: 12px;
+  text-align: left;
+}
+.workspace-option-info {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.workspace-option-info strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.workspace-entry .workspace-option > span {
+  min-width: 0;
+}
+.workspace-delete {
+  flex-shrink: 0;
+}
+.remote-column-note {
+  margin: 0;
+  color: var(--secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.sidebar-divider {
+  width: 5px;
+  flex-shrink: 0;
+  margin-left: -3px;
+  margin-right: -2px;
+  z-index: 2;
+  cursor: col-resize;
+  touch-action: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sidebar-divider::after {
+  content: "";
+  width: 2px;
+  height: 31px;
+  border-radius: 2px;
+  background: var(--muted);
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+.sidebar-divider:hover,
+.sidebar-divider:active,
+.sidebar-divider:focus-visible {
+  outline: none;
+}
+.sidebar-divider:hover::after,
+.sidebar-divider:active::after,
+.sidebar-divider:focus-visible::after {
+  opacity: 0.4;
+}
+.result-query-details {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--line);
+}
+.result-query-details > summary {
+  padding: 5px 12px;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+.result-query-details .result-query {
+  margin: 0;
+  border-bottom: 0;
+}
+
+.workspace-switch-trigger {
+  margin-left: -7px;
+}
+.workspace-switcher {
+  z-index: 100;
+  width: 260px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 0 8px 28px #00000018;
+}
+.workspace-switch-list {
+  max-height: min(360px, 65vh);
+  overflow-y: auto;
+}
+.workspace-switch-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.workspace-switch-item:hover,
+.workspace-switch-item:focus-visible,
+.workspace-switch-item[aria-current] {
+  background: var(--accent-soft);
+}
+.workspace-switch-item > span {
+  flex: 1;
+  min-width: 0;
+}
+.workspace-switch-item strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+}
+.workspace-switch-item small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.sql-panes {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.sql-pane-container {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+}
+.sql-pane-container > .sql-workspace {
+  min-width: 0;
+}
+.sql-panes.is-split .compact-toolbar {
+  flex-wrap: wrap;
+  height: auto;
+  min-height: 38px;
+  gap: 4px;
+  padding: 5px 8px;
+}
+.sql-panes.is-split .sql-tabs {
+  flex-basis: 100%;
+}
+.sql-pane-divider {
+  width: 7px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  border-inline: 1px solid var(--line);
+  cursor: col-resize;
+  touch-action: none;
+}
+.sql-pane-divider span {
+  width: 2px;
+  height: 31px;
+  border-radius: 2px;
+  background: var(--muted);
+  opacity: 0.35;
+}
+.sql-pane-divider:hover span,
+.sql-pane-divider:focus-visible span {
+  opacity: 0.7;
+}

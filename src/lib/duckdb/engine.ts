@@ -1,4 +1,5 @@
-import { literal } from "./literals";
+import { decimalText } from "./decimal";
+import { duckValue, snapshotColumn } from "./values";
 import * as duckdb from "@duckdb/duckdb-wasm";
 import wasm from "@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url";
 import ehWasm from "@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url";
@@ -48,7 +49,7 @@ export async function rebuild(w: WorkspaceDefinition) {
               `Saved rows for ${t.name} contain columns removed or renamed in the schema. Export and migrate the saved rows before rebuilding.`,
             );
           await c.query(
-            `INSERT INTO ${quote(t.name)} (${t.columns.map((x) => quote(x.name)).join(",")}) VALUES (${t.columns.map((x) => (Object.hasOwn(row, x.name) ? literal(row[x.name]) : x.defaultValue.trim() || "NULL")).join(",")})`,
+            `INSERT INTO ${quote(t.name)} (${t.columns.map((x) => quote(x.name)).join(",")}) VALUES (${t.columns.map((x) => (Object.hasOwn(row, x.name) ? duckValue(x, row[x.name]) : x.defaultValue.trim() || "NULL")).join(",")})`,
           );
         }
       }
@@ -76,7 +77,12 @@ export async function query(sql: string) {
       for (const field of result.schema.fields) {
         const value = row[field.name];
         const type = field.type.toString();
-        if (
+        if (type.startsWith("Decimal") && ArrayBuffer.isView(value)) {
+          row[field.name] = decimalText(
+            value as unknown as ArrayLike<number>,
+            (field.type as unknown as { scale: number }).scale,
+          );
+        } else if (
           typeof value === "number" &&
           (type.startsWith("Timestamp") || type.startsWith("Date"))
         ) {
@@ -93,7 +99,11 @@ export async function query(sql: string) {
 export async function snapshot(w: WorkspaceDefinition) {
   const data: WorkspaceDefinition["data"] = {};
   for (const t of w.schema.tables)
-    data[t.id] = (await query(`SELECT * FROM ${quote(t.name)}`)).rows;
+    data[t.id] = (
+      await query(
+        `SELECT ${t.columns.map(snapshotColumn).join(", ")} FROM ${quote(t.name)}`,
+      )
+    ).rows;
   return data;
 }
 

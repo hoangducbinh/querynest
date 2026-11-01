@@ -7,7 +7,10 @@ export interface Token {
   closed: boolean;
 }
 
-export function tokenize(sql: string): Token[] {
+export function tokenize(
+  sql: string,
+  dialect: "default" | "mssql" = "default",
+): Token[] {
   const tokens: Token[] = [];
   const scope: number[] = [];
   let group = 0,
@@ -44,6 +47,25 @@ export function tokenize(sql: string): Token[] {
         } else i++;
       }
       push("comment", start, sql.slice(start, i), nesting === 0);
+      continue;
+    }
+    if (c === "[" && dialect === "mssql") {
+      let text = "",
+        closed = false;
+      i++;
+      while (i < sql.length) {
+        if (sql[i] === "]") {
+          if (sql[i + 1] === "]") {
+            text += "]";
+            i += 2;
+          } else {
+            i++;
+            closed = true;
+            break;
+          }
+        } else text += sql[i++];
+      }
+      push("identifier", start, text, closed);
       continue;
     }
     if (c === "'" || c === '"') {

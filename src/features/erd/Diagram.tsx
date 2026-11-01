@@ -25,7 +25,10 @@ function TableNode({ data, selected }: NodeProps) {
     <div className={"table-node " + (selected ? "selected" : "")}>
       <div className="node-heading">
         <Table2 size={15} />
-        <strong>{table.name}</strong>
+        <strong>
+          {table.namespace ? table.namespace + "." : ""}
+          {table.name}
+        </strong>
       </div>
       {table.columns.map((column) => (
         <div className="node-column" key={column.id}>
@@ -47,7 +50,7 @@ function TableNode({ data, selected }: NodeProps) {
             <span className="column-dot" />
           )}
           <span>{column.name}</span>
-          <code>{column.type.toLowerCase()}</code>
+          <code>{column.nativeType ?? column.type.toLowerCase()}</code>
           <Handle
             type="source"
             position={Position.Left}

@@ -1,6 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { sampleDuckValue } from "../lib/duckdb/values";
+import { invalidateSession } from "../features/connections/sessions";
 import { readDarkAppearance, saveDarkAppearance } from "./appearance";
 import * as Dialog from "@radix-ui/react-dialog";
+import * as Popover from "@radix-ui/react-popover";
 import {
   Check,
   ChevronDown,
@@ -23,6 +26,7 @@ import {
   Sun,
   Table2,
   Terminal,
+  Trash2,
   Undo2,
   Upload,
   X,
@@ -53,8 +57,17 @@ import type { DraftRow } from "../features/sample-data/model";
 import { Requirements } from "../features/test-cases/Requirements";
 import { compareResults } from "../features/test-cases/compare";
 import { generateDDL, orderedTables, quote } from "../lib/ddl/generate";
-import { literal, query, rebuild, snapshot } from "../lib/duckdb/engine";
-import { saveWorkspace, storage } from "../lib/storage/workspaces";
+import { query, rebuild, snapshot } from "../lib/duckdb/engine";
+import { RemoteWorkspace } from "../features/connections/RemoteWorkspace";
+import { WorkspaceManager } from "../features/connections/WorkspaceManager";
+import type { ConnectionProfile } from "../features/connections/model";
+import { saveJsonFile } from "../lib/platform/save-file";
+import { useDesktopClose } from "../lib/platform/use-desktop-close";
+import {
+  deleteWorkspace,
+  saveWorkspace,
+  storage,
+} from "../lib/storage/workspaces";
 import type { TableDefinition, WorkspaceDefinition } from "../types/schema";
 type Mode = "data" | "relations" | "sql" | "tests";
 const modes = [
@@ -81,6 +94,13 @@ export default function App() {
   const [dataTable, setDataTable] = useState("");
   const [search, setSearch] = useState("");
   const [left, setLeft] = useState(true);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(190);
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const resizeSidebar = (width: number) => {
+    const available = workspaceRef.current?.clientWidth ?? 1000;
+    setSidebarWidth(Math.max(160, Math.min(480, available - 420, width)));
+  };
   const [tableEditor, setTableEditor] = useState<{
     table: TableDefinition;
     isNew: boolean;
@@ -109,8 +129,11 @@ export default function App() {
   const [queryResults, setQueryResults] = useState<Record<string, SqlResult[]>>(
     {},
   );
+  const remoteRun = useRef<() => void>(() => {});
   const sqlSelection = useRef({ tabId: "", sql: "" });
 
+  const remote = !!(w.postgres || w.mssql);
+  const [manager, setManager] = useState<"create" | "connections" | null>(null);
   const [open, setOpen] = useState(false);
   const [ddl, setDdl] = useState(false);
   const [workspaces, setWorkspaces] = useState<WorkspaceDefinition[]>([]);
@@ -119,10 +142,10 @@ export default function App() {
   const file = useRef<HTMLInputElement>(null);
   const runRef = useRef<() => void>(() => {});
   const schemaSignature = signature(w);
-  const stale = runtime !== schemaSignature;
+  const stale = !remote && runtime !== schemaSignature;
   const activeTable =
     w.schema.tables.find((t) => t.id === dataTable) || w.schema.tables[0];
-  const errors = validateSchema(w.schema);
+  const errors = remote ? [] : validateSchema(w.schema);
   const selectedRelationship = w.schema.relationships.find(
     (r) => r.id === selected,
   );
@@ -152,16 +175,24 @@ export default function App() {
   useEffect(() => {
     if (!ready) return;
     setSaved("Saving…");
+    let active = true;
     const timer = setTimeout(() => {
       saveWorkspace(w)
-        .then(() => setSaved("Saved on this device"))
+        .then((saved) => {
+          if (active)
+            setSaved(saved ? "Saved on this device" : "Workspace deleted");
+        })
         .catch((e) => {
+          if (!active) return;
           setSaved("Save failed");
           setMessage(String(e));
           setError(true);
         });
     }, 500);
-    return () => clearTimeout(timer);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
   }, [w, ready]);
   // Reconstruct a workspace once on open; later design changes require an explicit sync.
   useEffect(() => {
@@ -171,6 +202,10 @@ export default function App() {
     setRuntime("");
     setQueryResults({});
     setTestResults({});
+    if (remote) {
+      setBusy(false);
+      return;
+    }
     rebuild(w)
       .then(() => {
         if (active) setRuntime(signature(w));
@@ -249,12 +284,23 @@ export default function App() {
     if (
       dirty &&
       !(await confirmAction(
-        "You have unsaved cells. Discard these changes and continue?",
+        "You have unsaved changes. Discard them and continue?",
       ))
     )
       return false;
     return true;
   }
+  useDesktopClose(
+    async () => {
+      if (!ready || !(await leaveDraft())) return false;
+      await saveWorkspace(w);
+      return true;
+    },
+    (error) => {
+      setMessage(String(error));
+      setError(true);
+    },
+  );
   async function changeMode(next: Mode) {
     if (next === mode || !(await leaveDraft())) return;
     setMode(next);
@@ -285,12 +331,14 @@ export default function App() {
       setMessage("Your database is up to date.");
     });
   }
-  async function run() {
+  async function run(tabId?: string, sql?: string) {
     if (stale || busy) return;
     await task(async () => {
-      const tab = activeSqlTab(w);
+      const tab =
+        sqlTabs(w).find((item) => item.id === tabId) ?? activeSqlTab(w);
       const selected =
-        sqlSelection.current.tabId === tab.id ? sqlSelection.current.sql : "";
+        sql ??
+        (sqlSelection.current.tabId === tab.id ? sqlSelection.current.sql : "");
       const results = await executeSqlBatch(
         selected.trim() ? selected : tab.sql,
         query,
@@ -312,7 +360,10 @@ export default function App() {
     });
   }
   runRef.current = () => {
-    if (mode === "sql") void run();
+    if (mode === "sql") {
+      if (remote) remoteRun.current();
+      else void run();
+    }
   };
   async function saveRows(rows: DraftRow[]) {
     if (stale || busy || !activeTable)
@@ -382,19 +433,51 @@ export default function App() {
     }
   }
   async function newWorkspace() {
-    if (
-      !(await leaveDraft()) ||
-      !(await confirmAction(
-        "Create a new workspace? The current workspace will be saved.",
-      ))
-    )
-      return;
+    if (!(await leaveDraft())) return;
+    setManager("create");
+  }
+  async function createFromConnection(
+    profile?: ConnectionProfile,
+    name?: string,
+  ) {
+    if (!(await leaveDraft())) return false;
+    await saveWorkspace(w);
+    const next = createWorkspace(false);
+    next.sql = "";
+    next.name = name || profile?.name || "Untitled workspace";
+    if (profile) {
+      next.sql = "";
+      next.connectionId = profile.id;
+      if (profile.engine === "postgres") next.postgres = profile.config;
+      else next.mssql = profile.config;
+    }
+    load(next);
+    setMode("sql");
+    setSelected("");
+    setDataTable("");
+  }
+  async function openSwitcher() {
     await task(async () => {
       await saveWorkspace(w);
-      load(createWorkspace(false));
+      setWorkspaces(
+        await storage.workspaces.orderBy("updatedAt").reverse().toArray(),
+      );
+      setSwitcherOpen(true);
+    });
+  }
+  async function switchWorkspace(item: WorkspaceDefinition) {
+    if (item.id === w.id) {
+      setSwitcherOpen(false);
+      return;
+    }
+    if (!(await leaveDraft())) return;
+    await task(async () => {
+      await saveWorkspace(w);
+      load(item);
       setSelected("");
       setDataTable("");
-      setMode("data");
+      setTableEditor(null);
+      setSwitcherOpen(false);
     });
   }
   async function openWorkspaces() {
@@ -407,15 +490,36 @@ export default function App() {
       setOpen(true);
     });
   }
-  function exportWorkspace() {
-    const url = URL.createObjectURL(
-      new Blob([JSON.stringify(w, null, 2)], { type: "application/json" }),
-    );
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = w.name + ".json";
-    link.click();
-    URL.revokeObjectURL(url);
+  async function removeWorkspace(item: WorkspaceDefinition) {
+    if (busy) return;
+    const detail =
+      item.postgres || item.mssql
+        ? "Its saved SQL, tests, layout and workspace settings will be removed from this device."
+        : "Its saved SQL, tables, sample data, tests and layout will be removed from this device.";
+    if (
+      !(await confirmAction(
+        `Delete workspace “${item.name}”? ${detail} Databases on the server and saved connections will not be deleted. Export JSON first if you need a backup.`,
+      ))
+    )
+      return;
+    await task(async () => {
+      const result = await deleteWorkspace(item.id, w.id);
+      invalidateSession(item.id);
+      setWorkspaces(result.workspaces);
+      if (result.replacement) {
+        load(result.replacement);
+        setSelected("");
+        setDataTable("");
+        setSearch("");
+        setDirty(false);
+        setMode("sql");
+        setOpen(false);
+      }
+      setMessage(`Deleted workspace “${item.name}”.`);
+    });
+  }
+  async function exportWorkspace() {
+    await task(() => saveJsonFile(w.name, JSON.stringify(w, null, 2)));
   }
   async function generateData() {
     if (stale || busy || dirty) return;
@@ -441,15 +545,7 @@ export default function App() {
               )!;
               return `(SELECT ${quote(target.columns.find((c) => c.id === r.targetColumns[r.sourceColumns.indexOf(column.id)])!.name)} FROM ${quote(target.name)} LIMIT 1)`;
             }
-            return column.type === "VARCHAR"
-              ? literal(column.name + " sample")
-              : column.type === "BOOLEAN"
-                ? "TRUE"
-                : column.type === "DATE"
-                  ? "DATE '2026-01-01'"
-                  : column.type === "TIMESTAMP"
-                    ? "TIMESTAMP '2026-01-01 00:00:00'"
-                    : String(index + 1);
+            return sampleDuckValue(column, index);
           });
           await query(
             `INSERT INTO ${quote(table.name)} VALUES (${values.join(",")})`,
@@ -520,6 +616,58 @@ export default function App() {
               })
             }
           />
+          <Popover.Root
+            open={switcherOpen}
+            onOpenChange={(next) => {
+              if (next) void openSwitcher();
+              else setSwitcherOpen(false);
+            }}
+          >
+            <Popover.Trigger asChild>
+              <Button
+                className="workspace-switch-trigger"
+                title="Switch workspace"
+                aria-label="Switch workspace"
+                disabled={busy}
+              >
+                <ChevronDown size={14} />
+              </Button>
+            </Popover.Trigger>
+            <Popover.Portal>
+              <Popover.Content
+                className={"workspace-switcher " + (dark ? "dark" : "")}
+                align="start"
+                sideOffset={8}
+                collisionPadding={12}
+                aria-label="Switch workspace"
+              >
+                <div className="workspace-switch-list">
+                  {workspaces.map((item) => (
+                    <button
+                      key={item.id}
+                      className="workspace-switch-item"
+                      disabled={busy}
+                      aria-current={item.id === w.id ? "true" : undefined}
+                      onClick={() => void switchWorkspace(item)}
+                    >
+                      <Database size={15} />
+                      <span>
+                        <strong>{item.id === w.id ? w.name : item.name}</strong>
+                        <small>
+                          {item.mssql
+                            ? "SQL Server"
+                            : item.postgres
+                              ? "PostgreSQL"
+                              : "Local · DuckDB"}
+                        </small>
+                      </span>
+                      {item.id === w.id && <Check size={14} />}
+                    </button>
+                  ))}
+                </div>
+              </Popover.Content>
+            </Popover.Portal>
+          </Popover.Root>
         </div>
         <nav className="mode-switch" aria-label="Workspace mode">
           {modes.map((item) => (
@@ -570,6 +718,10 @@ export default function App() {
                 <Plus size={15} />
                 New workspace
               </Button>
+              <Button disabled={busy} onClick={() => setManager("connections")}>
+                <Database size={15} />
+                Connections
+              </Button>
               <Button disabled={busy} onClick={() => void openWorkspaces()}>
                 <FolderOpen size={15} />
                 Open workspace
@@ -584,6 +736,7 @@ export default function App() {
                 Import JSON
               </Button>
               <Button
+                disabled={remote}
                 onClick={() => {
                   try {
                     generateDDL(w.schema);
@@ -602,11 +755,17 @@ export default function App() {
                 Export workspace
               </Button>
               <hr />
-              <Button disabled={!past.length || busy || dirty} onClick={undo}>
+              <Button
+                disabled={remote || !past.length || busy || dirty}
+                onClick={undo}
+              >
                 <Undo2 size={15} />
                 Undo design change
               </Button>
-              <Button disabled={!future.length || busy || dirty} onClick={redo}>
+              <Button
+                disabled={remote || !future.length || busy || dirty}
+                onClick={redo}
+              >
                 <Redo2 size={15} />
                 Redo design change
               </Button>
@@ -633,9 +792,9 @@ export default function App() {
           });
         }}
       />
-      <div className="workspace">
+      <div className="workspace" ref={workspaceRef}>
         {left && (
-          <aside className="explorer">
+          <aside className="explorer" style={{ width: sidebarWidth }}>
             <div className="search">
               <Search size={15} />
               <input
@@ -663,7 +822,7 @@ export default function App() {
               <span>{w.schema.tables.length}</span>
               <Button
                 title="Create table"
-                disabled={busy}
+                disabled={busy || remote}
                 style={mode === "relations" ? { display: "none" } : undefined}
                 onClick={() => void addTable()}
               >
@@ -686,14 +845,18 @@ export default function App() {
                       }
                       onClick={() => void chooseTable(table.id)}
                       onDoubleClick={() => {
-                        if (mode === "data") void editTable(table.id);
+                        if (mode === "data" && !remote)
+                          void editTable(table.id);
                       }}
                     >
                       <span className="table-icon">
                         <Table2 size={17} />
                       </span>
                       <span className="table-label">
-                        <strong>{table.name}</strong>
+                        <strong>
+                          {table.namespace ? table.namespace + "." : ""}
+                          {table.name}
+                        </strong>
                       </span>
                       <ChevronDown size={12} />
                     </button>
@@ -703,8 +866,8 @@ export default function App() {
                           {table.columns.map((c) => (
                             <button
                               key={c.id}
-                              disabled={mode === "sql"}
-                              title={`${table.name}.${c.name} · ${c.type}${table.primaryKey.includes(c.id) ? " · Primary key" : ""}${!c.nullable ? " · Required" : ""}`}
+                              disabled={mode === "sql" || remote}
+                              title={`${table.name}.${c.name} · ${c.nativeType ?? c.type}${table.primaryKey.includes(c.id) ? " · Primary key" : ""}${!c.nullable ? " · Required" : ""}`}
                               onClick={(event) =>
                                 void openColumn(
                                   table.id,
@@ -723,7 +886,9 @@ export default function App() {
                                 <span className="column-dot" />
                               )}
                               <span>{c.name}</span>
-                              <code>{c.type.toLowerCase()}</code>
+                              <code>
+                                {c.nativeType ?? c.type.toLowerCase()}
+                              </code>
                             </button>
                           ))}
                         </div>
@@ -740,159 +905,225 @@ export default function App() {
             </div>
           </aside>
         )}
+        {left && (
+          <div
+            className="sidebar-divider"
+            role="separator"
+            aria-label="Resize sidebar"
+            aria-orientation="vertical"
+            aria-valuemin={160}
+            aria-valuemax={480}
+            aria-valuenow={sidebarWidth}
+            tabIndex={0}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.currentTarget.setPointerCapture(event.pointerId);
+            }}
+            onPointerMove={(event) => {
+              if (!event.currentTarget.hasPointerCapture(event.pointerId))
+                return;
+              resizeSidebar(
+                event.clientX -
+                  workspaceRef.current!.getBoundingClientRect().left,
+              );
+            }}
+            onPointerUp={(event) => {
+              if (event.currentTarget.hasPointerCapture(event.pointerId))
+                event.currentTarget.releasePointerCapture(event.pointerId);
+            }}
+            onKeyDown={(event) => {
+              if (
+                !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
+              )
+                return;
+              event.preventDefault();
+              resizeSidebar(
+                event.key === "Home"
+                  ? 160
+                  : event.key === "End"
+                    ? 480
+                    : sidebarWidth + (event.key === "ArrowLeft" ? -16 : 16),
+              );
+            }}
+          />
+        )}
         <main className={"main-view mode-" + mode}>
-          {stale && !busy && mode !== "relations" && (
-            <div className="sync-banner">
-              <RefreshCw size={13} />
-              <span>Schema changes pending</span>
-              <Button disabled={dirty} onClick={() => void apply()}>
-                Sync database
-              </Button>
-            </div>
-          )}
-          {mode === "data" ? (
-            activeTable ? (
-              <section className="data-view">
-                <div className="compact-toolbar">
-                  <div className="row">
-                    <Table2 size={14} />
-                    <select
-                      className="table-selector"
-                      aria-label="Selected table"
-                      value={activeTable.id}
-                      onChange={(e) => void chooseTable(e.target.value)}
-                    >
-                      {w.schema.tables.map((table) => (
-                        <option key={table.id} value={table.id}>
-                          {table.name}
-                        </option>
-                      ))}
-                    </select>
-                    <span className="toolbar-count">
-                      {(w.data[activeTable.id] ?? []).length} rows
-                    </span>
-                  </div>
-                  <div className="row">
-                    <Button
-                      disabled={busy}
-                      onClick={async () => {
-                        if (await leaveDraft())
-                          setRelationshipsTable(activeTable.id);
-                      }}
-                    >
-                      <Link2 size={14} />
-                      Relationships
-                    </Button>
-                    <Button
-                      disabled={busy || stale || dirty}
-                      onClick={() => void generateData()}
-                    >
-                      Sample data
-                    </Button>
-                    <Button
-                      disabled={busy}
-                      onClick={() => void editTable(activeTable.id)}
-                    >
-                      <Settings2 size={14} />
-                      Edit table
-                    </Button>
-                  </div>
-                </div>
-                <Spreadsheet
-                  key={w.id + activeTable.id + schemaSignature}
-                  table={activeTable}
-                  rows={w.data[activeTable.id] ?? EMPTY_ROWS}
-                  disabled={busy || stale}
-                  onDirty={setDirty}
-                  onSave={saveRows}
-                  onAddColumn={(anchor) =>
-                    void openColumn(activeTable.id, undefined, anchor)
-                  }
-                  onEditColumn={(columnId, anchor) =>
-                    void openColumn(activeTable.id, columnId, anchor)
-                  }
-                  structureDisabled={busy}
-                />
-              </section>
-            ) : (
-              <div className="empty-state">
-                <Database size={32} />
-                <h2>No tables yet</h2>
-                <Button
-                  className="primary"
-                  disabled={busy}
-                  onClick={() => void addTable()}
-                >
-                  <Plus size={14} />
-                  Create table
-                </Button>
-              </div>
-            )
-          ) : mode === "relations" ? (
-            <div className="design-view">
-              <div className="design-workspace">
-                <div className="compact-toolbar">
-                  <span className="toolbar-count">
-                    {w.schema.tables.length} tables ·{" "}
-                    {w.schema.relationships.length} relationships
-                  </span>
-                  <span className="toolbar-count">Drag tables to arrange</span>
-                </div>
-                <div className="diagram">
-                  <Diagram select={inspect} selected={selected} />
-                </div>
-              </div>
-              {selectedRelationship && (
-                <aside className="property-panel">
-                  <div className="panel-title">
-                    <span>Relationship</span>
-                    <Button
-                      title="Close relationship details"
-                      onClick={() => setSelected("")}
-                    >
-                      <X size={14} />
-                    </Button>
-                  </div>
-                  <RelationshipDetails
-                    schema={w.schema}
-                    relationship={selectedRelationship}
-                  />
-                </aside>
-              )}
-            </div>
-          ) : mode === "sql" ? (
-            <SqlWorkspace
+          {remote ? (
+            <RemoteWorkspace
               key={w.id}
-              tabs={sqlTabs(w)}
-              activeId={activeSqlTab(w).id}
-              onTabsChange={(tabs, active) =>
-                edit((d) => {
-                  setSqlTabs(d, tabs, active);
-                })
-              }
-              value={activeSqlTab(w).sql}
-              onChange={(sql) =>
-                edit((d) => {
-                  const tabs = sqlTabs(d);
-                  tabs.find((tab) => tab.id === activeSqlTab(d).id)!.sql = sql;
-                  setSqlTabs(d, tabs, activeSqlTab(d).id);
-                })
-              }
-              onRun={() => void run()}
-              disabled={busy || stale}
-              busy={busy}
+              workspace={w}
+              mode={mode}
               dark={dark}
-              queryResults={queryResults[activeSqlTab(w).id]}
-              onSelection={(sql) => {
-                sqlSelection.current = { tabId: activeSqlTab(w).id, sql };
-              }}
+              activeTable={activeTable}
+              selected={selected}
+              onSelect={inspect}
+              runRef={remoteRun}
+              onBusy={setBusy}
+              onDirty={setDirty}
             />
           ) : (
-            <Requirements
-              results={testResults}
-              onRun={(testId) => void runTests(testId)}
-              disabled={busy || stale}
-            />
+            <>
+              {stale && !busy && mode !== "relations" && (
+                <div className="sync-banner">
+                  <RefreshCw size={13} />
+                  <span>Schema changes pending</span>
+                  <Button disabled={dirty} onClick={() => void apply()}>
+                    Sync database
+                  </Button>
+                </div>
+              )}
+              {mode === "data" ? (
+                activeTable ? (
+                  <section className="data-view">
+                    <div className="compact-toolbar">
+                      <div className="row">
+                        <Table2 size={14} />
+                        <select
+                          className="table-selector"
+                          aria-label="Selected table"
+                          value={activeTable.id}
+                          onChange={(e) => void chooseTable(e.target.value)}
+                        >
+                          {w.schema.tables.map((table) => (
+                            <option key={table.id} value={table.id}>
+                              {table.name}
+                            </option>
+                          ))}
+                        </select>
+                        <span className="toolbar-count">
+                          {(w.data[activeTable.id] ?? []).length} rows
+                        </span>
+                      </div>
+                      <div className="row">
+                        <Button
+                          disabled={busy}
+                          onClick={async () => {
+                            if (await leaveDraft())
+                              setRelationshipsTable(activeTable.id);
+                          }}
+                        >
+                          <Link2 size={14} />
+                          Relationships
+                        </Button>
+                        <Button
+                          disabled={busy || stale || dirty}
+                          onClick={() => void generateData()}
+                        >
+                          Sample data
+                        </Button>
+                        <Button
+                          disabled={busy}
+                          onClick={() => void editTable(activeTable.id)}
+                        >
+                          <Settings2 size={14} />
+                          Edit table
+                        </Button>
+                      </div>
+                    </div>
+                    <Spreadsheet
+                      key={w.id + activeTable.id + schemaSignature}
+                      table={activeTable}
+                      rows={w.data[activeTable.id] ?? EMPTY_ROWS}
+                      disabled={busy || stale}
+                      onDirty={setDirty}
+                      onSave={saveRows}
+                      onAddColumn={(anchor) =>
+                        void openColumn(activeTable.id, undefined, anchor)
+                      }
+                      onEditColumn={(columnId, anchor) =>
+                        void openColumn(activeTable.id, columnId, anchor)
+                      }
+                      structureDisabled={busy}
+                    />
+                  </section>
+                ) : (
+                  <div className="empty-state">
+                    <Database size={32} />
+                    <h2>No tables yet</h2>
+                    <Button
+                      className="primary"
+                      disabled={busy}
+                      onClick={() => void addTable()}
+                    >
+                      <Plus size={14} />
+                      Create table
+                    </Button>
+                  </div>
+                )
+              ) : mode === "relations" ? (
+                <div className="design-view">
+                  <div className="design-workspace">
+                    <div className="compact-toolbar">
+                      <span className="toolbar-count">
+                        {w.schema.tables.length} tables ·{" "}
+                        {w.schema.relationships.length} relationships
+                      </span>
+                      <span className="toolbar-count">
+                        Drag tables to arrange
+                      </span>
+                    </div>
+                    <div className="diagram">
+                      <Diagram select={inspect} selected={selected} />
+                    </div>
+                  </div>
+                  {selectedRelationship && (
+                    <aside className="property-panel">
+                      <div className="panel-title">
+                        <span>Relationship</span>
+                        <Button
+                          title="Close relationship details"
+                          onClick={() => setSelected("")}
+                        >
+                          <X size={14} />
+                        </Button>
+                      </div>
+                      <RelationshipDetails
+                        schema={w.schema}
+                        relationship={selectedRelationship}
+                      />
+                    </aside>
+                  )}
+                </div>
+              ) : mode === "sql" ? (
+                <SqlWorkspace
+                  key={w.id}
+                  tabs={sqlTabs(w)}
+                  activeId={activeSqlTab(w).id}
+                  onTabsChange={(tabs, active) =>
+                    edit((d) => {
+                      setSqlTabs(d, tabs, active);
+                    })
+                  }
+                  value={activeSqlTab(w).sql}
+                  onChange={(sql) =>
+                    edit((d) => {
+                      const tabs = sqlTabs(d);
+                      tabs.find((tab) => tab.id === activeSqlTab(d).id)!.sql =
+                        sql;
+                      setSqlTabs(d, tabs, activeSqlTab(d).id);
+                    })
+                  }
+                  onRun={(tabId, sql) => void run(tabId, sql)}
+                  disabled={busy || stale}
+                  busy={busy}
+                  dark={dark}
+                  allResults={queryResults}
+                  queryResults={queryResults[activeSqlTab(w).id]}
+                  onSelection={(sql, tabId) => {
+                    sqlSelection.current = {
+                      tabId: tabId ?? activeSqlTab(w).id,
+                      sql,
+                    };
+                  }}
+                />
+              ) : (
+                <Requirements
+                  results={testResults}
+                  onRun={(testId) => void runTests(testId)}
+                  disabled={busy || stale}
+                />
+              )}
+            </>
           )}
         </main>
       </div>
@@ -946,34 +1177,65 @@ export default function App() {
           }}
         />
       )}
-      <Dialog.Root open={open} onOpenChange={setOpen}>
+      {manager && (
+        <WorkspaceManager
+          mode={manager}
+          onCreate={createFromConnection}
+          onClose={() => setManager(null)}
+        />
+      )}
+      <Dialog.Root
+        open={open}
+        onOpenChange={(open) => {
+          if (!busy) setOpen(open);
+        }}
+      >
         <Dialog.Portal>
           <Dialog.Overlay className="modal-overlay" />
           <Dialog.Content className="modal">
             <Dialog.Title>Your workspaces</Dialog.Title>
-            <Dialog.Description>
-              Saved privately in this browser.
-            </Dialog.Description>
+            <Dialog.Description>Saved on this device.</Dialog.Description>
             {workspaces.map((item) => (
-              <Button
-                className="workspace-option"
-                key={item.id}
-                onClick={() => {
-                  load(item);
-                  setSelected("");
-                  setDataTable("");
-                  setOpen(false);
-                }}
-              >
-                <span>
-                  <Database size={18} />
-                  {item.name}
-                </span>
-                <small>{new Date(item.updatedAt).toLocaleDateString()}</small>
-              </Button>
+              <div className="workspace-entry" key={item.id}>
+                <Button
+                  className="workspace-option"
+                  disabled={busy}
+                  onClick={() => {
+                    load(item);
+                    setSelected("");
+                    setDataTable("");
+                    setOpen(false);
+                  }}
+                >
+                  <span>
+                    <Database size={18} />
+                    <span className="workspace-option-info">
+                      <strong>{item.name}</strong>
+                      <small>
+                        {item.mssql
+                          ? "SQL Server"
+                          : item.postgres
+                            ? "PostgreSQL"
+                            : "Local · DuckDB"}
+                        {item.id === w.id ? " · Current" : ""}
+                      </small>
+                    </span>
+                  </span>
+                  <small>{new Date(item.updatedAt).toLocaleDateString()}</small>
+                </Button>
+                <Button
+                  className="workspace-delete danger"
+                  title={`Delete workspace ${item.name}`}
+                  aria-label={`Delete workspace ${item.name}`}
+                  disabled={busy}
+                  onClick={() => void removeWorkspace(item)}
+                >
+                  <Trash2 size={16} />
+                </Button>
+              </div>
             ))}
             <Dialog.Close asChild>
-              <Button>Done</Button>
+              <Button disabled={busy}>Done</Button>
             </Dialog.Close>
           </Dialog.Content>
         </Dialog.Portal>

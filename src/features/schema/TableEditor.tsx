@@ -193,19 +193,23 @@ export function TableEditor({
                       />
                     </td>
                     <td>
-                      <select
+                      <input
                         aria-label={`Column type ${index + 1}`}
+                        list="duckdb-table-types"
                         value={column.type}
+                        autoComplete="off"
+                        spellCheck={false}
                         onChange={(e) =>
-                          patch(column.id, {
-                            type: e.target.value as typeof column.type,
-                          })
+                          patch(column.id, { type: e.target.value })
                         }
-                      >
-                        {dataTypes.map((type) => (
-                          <option key={type}>{type}</option>
-                        ))}
-                      </select>
+                      />
+                      {index === 0 && (
+                        <datalist id="duckdb-table-types">
+                          {dataTypes.map((type) => (
+                            <option key={type} value={type} />
+                          ))}
+                        </datalist>
+                      )}
                     </td>
                     <td>
                       <label className="pk-control">

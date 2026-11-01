@@ -3,6 +3,7 @@ import type {
   SqlSnippet,
   TableDefinition,
 } from "../../types/schema";
+import { sqlDataTypes, type SqlDialect } from "./data-types";
 import { quote } from "../../lib/ddl/generate";
 import { tokenize, type Token } from "./lexer";
 const KEYWORDS = [
@@ -80,8 +81,29 @@ const RESERVED = new Set(
     "USER",
   ].map((word) => word.toLowerCase()),
 );
+const MSSQL_RESERVED = new Set([
+  ...RESERVED,
+  ...[
+    "ASC",
+    "DESC",
+    "CHECK",
+    "INDEX",
+    "IDENTITY",
+    "DATABASE",
+    "SCHEMA",
+    "TOP",
+    "GO",
+    "EXEC",
+    "PROCEDURE",
+    "TRIGGER",
+    "VIEW",
+    "TRANSACTION",
+    "COMMIT",
+    "ROLLBACK",
+  ].map((word) => word.toLowerCase()),
+]);
 const sqlName = (name: string) =>
-  /^[_a-zA-Z][_a-zA-Z0-9]*$/.test(name) && !RESERVED.has(name.toLowerCase())
+  /^[_a-z][_a-z0-9]*$/.test(name) && !RESERVED.has(name.toLowerCase())
     ? name
     : quote(name);
 const identifier = (token: Token | undefined): token is Token =>
@@ -103,6 +125,7 @@ function bindings(
   tokens: Token[],
   schema: DatabaseSchema,
   scope: number[],
+  dialect: SqlDialect,
 ): Binding[] {
   const result: Binding[] = [];
   for (let i = 0; i < tokens.length; i++) {
@@ -121,24 +144,47 @@ function bindings(
         !sameScope(tokens[cursor].scope, head.scope)
       )
         break;
-      let tableName = tokens[cursor++].text;
+      let namespace: string | undefined;
+      let tableToken = tokens[cursor++];
+      let tableName = tableToken.text;
       while (tokens[cursor]?.text === "." && identifier(tokens[cursor + 1])) {
-        tableName = tokens[cursor + 1].text;
+        namespace =
+          tableToken.kind === "identifier"
+            ? tableName
+            : tableName.toLowerCase();
+        tableToken = tokens[cursor + 1];
+        tableName = tableToken.text;
         cursor += 2;
       }
-      const table = schema.tables.find(
-        (table) => table.name.toLowerCase() === tableName.toLowerCase(),
+      const table = schema.tables.find((table) =>
+        table.namespace && dialect !== "mssql"
+          ? table.name ===
+              (tableToken.kind === "identifier"
+                ? tableName
+                : tableName.toLowerCase()) &&
+            (!namespace || table.namespace === namespace)
+          : table.name.toLowerCase() === tableName.toLowerCase() &&
+            (!namespace ||
+              table.namespace?.toLowerCase() === namespace.toLowerCase()),
       );
       if (tokens[cursor]?.text === "(") break;
       if (keyword(tokens[cursor], "AS")) cursor++;
-      let alias = tableName;
+      let alias =
+        table?.namespace && tableToken.kind === "word"
+          ? tableName.toLowerCase()
+          : tableName;
       const next = tokens[cursor];
       if (
         identifier(next) &&
         sameScope(next.scope, head.scope) &&
         (next.kind === "identifier" || !RESERVED.has(next.text.toLowerCase()))
-      )
-        alias = tokens[cursor++].text;
+      ) {
+        const token = tokens[cursor++];
+        alias =
+          table?.namespace && token.kind === "word"
+            ? token.text.toLowerCase()
+            : token.text;
+      }
       if (table) result.push({ alias, table, scope: head.scope });
       if (
         tokens[cursor]?.text !== "," ||
@@ -150,7 +196,10 @@ function bindings(
   }
   const scoped = new Map<string, Binding>();
   for (const binding of result.sort((a, b) => a.scope.length - b.scope.length))
-    scoped.set(binding.alias.toLowerCase(), binding);
+    scoped.set(
+      binding.table.namespace ? binding.alias : binding.alias.toLowerCase(),
+      binding,
+    );
   return [...scoped.values()];
 }
 export interface SqlSuggestion {
@@ -158,7 +207,7 @@ export interface SqlSuggestion {
   detail: string;
   description?: string;
   insertText: string;
-  kind: "table" | "column" | "keyword" | "function" | "snippet";
+  kind: "table" | "column" | "keyword" | "function" | "snippet" | "type";
   snippet?: boolean;
   sortText: string;
 }
@@ -173,9 +222,17 @@ export function sqlCompletions(
   offset: number,
   schema: DatabaseSchema,
   snippets: SqlSnippet[],
+  dialect: SqlDialect = "default",
 ): SqlCompletions {
   offset = Math.max(0, Math.min(offset, sql.length));
-  const all = tokenize(sql);
+  const all = tokenize(sql, dialect === "mssql" ? "mssql" : "default");
+  const name = (value: string) =>
+    dialect === "mssql"
+      ? /^[a-z_][a-z0-9_]*$/i.test(value) &&
+        !MSSQL_RESERVED.has(value.toLowerCase())
+        ? value
+        : `[${value.replaceAll("]", "]]")}]`
+      : sqlName(value);
   const blocked = all.some(
     (token) =>
       (token.kind === "comment" || token.kind === "string") &&
@@ -210,7 +267,7 @@ export function sqlCompletions(
         : (current?.end ?? offset);
   const prefix = sql
     .slice(start, offset)
-    .replace(/^"/, "")
+    .replace(dialect === "mssql" ? /^\[/ : /^"/, "")
     .replaceAll('""', '"')
     .toLowerCase();
   const before = tokens.filter((token) => token.end <= start);
@@ -223,7 +280,60 @@ export function sqlCompletions(
         ? (tokens.find((next) => next.start >= token.end)?.scope ?? token.scope)
         : token.scope;
   }
-  const refs = bindings(tokens, schema, scope);
+  const refs = bindings(tokens, schema, scope, dialect);
+  const opening = [...before]
+    .reverse()
+    .find(
+      (token) =>
+        token.text === "(" &&
+        token.scope.length === scope.length - 1 &&
+        containsScope(token.scope, scope),
+    );
+  const functionName = opening
+    ? before[before.indexOf(opening) - 1]?.text.toUpperCase()
+    : "";
+  const ddl = before.some(
+    (token, index) =>
+      ["CREATE", "ALTER"].includes(token.text.toUpperCase()) &&
+      keyword(before[index + 1], "TABLE"),
+  );
+  const tail = before
+    .slice(-5)
+    .map((token) => token.text.toUpperCase())
+    .join(" ");
+  const typeContext =
+    (previous?.text === ":" && before.at(-2)?.text === ":") ||
+    (keyword(previous, "AS") &&
+      ["CAST", "TRY_CAST", "SAFE_CAST"].includes(functionName ?? "")) ||
+    (previous?.text === "(" &&
+      ["CONVERT", "TRY_CONVERT"].includes(functionName ?? "")) ||
+    (ddl &&
+      identifier(previous) &&
+      (["(", ","].includes(before.at(-2)?.text ?? "") ||
+        /(?:ADD|COLUMN) [^ ]+$/.test(tail) ||
+        keyword(previous, "TYPE"))) ||
+    (dialect === "mssql" && /(?:DECLARE|,) @ [^ ]+$/.test(tail));
+  const types: SqlSuggestion[] = sqlDataTypes(dialect).map((item) => ({
+    label: item.label,
+    description: "data type",
+    detail:
+      item.detail ??
+      `${dialect === "mssql" ? "SQL Server" : dialect === "postgres" ? "PostgreSQL" : "DuckDB"} data type`,
+    insertText: sql.slice(replaceEnd).trimStart().startsWith("(")
+      ? item.label
+      : (item.body ?? item.label),
+    kind: "type",
+    snippet: !!item.body && !sql.slice(replaceEnd).trimStart().startsWith("("),
+    sortText: "0_type_" + item.label,
+  }));
+  if (typeContext)
+    return {
+      start,
+      end: replaceEnd,
+      suggestions: types.filter(
+        (item) => !prefix || item.label.toLowerCase().startsWith(prefix),
+      ),
+    };
   let suggestions: SqlSuggestion[] = [];
   const columns = (
     table: TableDefinition,
@@ -232,38 +342,67 @@ export function sqlCompletions(
     table.columns.map((column) => ({
       label: column.name,
       description: qualifier ?? table.name,
-      detail: `${column.type}${table.primaryKey.includes(column.id) ? " · PK" : ""}${column.nullable ? " · nullable" : ""} — ${table.name}.${column.name}`,
-      insertText:
-        (qualifier ? sqlName(qualifier) + "." : "") + sqlName(column.name),
+      detail: `${column.nativeType ?? column.type}${table.primaryKey.includes(column.id) ? " · PK" : ""}${column.nullable ? " · nullable" : ""} — ${table.name}.${column.name}`,
+      insertText: (qualifier ? name(qualifier) + "." : "") + name(column.name),
       kind: "column",
       sortText: "1_" + column.name,
     }));
-  const tables = () =>
-    schema.tables.map((table) => ({
-      label: table.name,
-      description: "table",
-      detail: `${table.columns.length} columns`,
-      insertText: sqlName(table.name),
-      kind: "table" as const,
-      sortText: "2_" + table.name,
-    }));
+  const tables = (namespace?: string) =>
+    schema.tables
+      .filter(
+        (table) =>
+          !namespace ||
+          (dialect === "mssql"
+            ? table.namespace?.toLowerCase() === namespace.toLowerCase()
+            : table.namespace === namespace),
+      )
+      .map((table) => ({
+        label: table.name,
+        description: table.namespace ?? "table",
+        detail: `${table.columns.length} columns`,
+        insertText:
+          table.namespace &&
+          !(dialect === "mssql" && table.namespace.toLowerCase() === "dbo")
+            ? `${name(table.namespace)}.${name(table.name)}`
+            : name(table.name),
+        kind: "table" as const,
+        sortText: "2_" + table.name,
+      }));
   const qualifier =
     previous?.text === "." && identifier(before.at(-2))
       ? before.at(-2)!.text
       : undefined;
   if (qualifier) {
-    const binding = refs.find(
-      (ref) => ref.alias.toLowerCase() === qualifier.toLowerCase(),
+    const normalizedQualifier =
+      before.at(-2)?.kind === "identifier"
+        ? qualifier
+        : qualifier.toLowerCase();
+    const binding = refs.find((ref) =>
+      ref.table.namespace && dialect !== "mssql"
+        ? ref.alias === normalizedQualifier
+        : ref.alias.toLowerCase() === qualifier.toLowerCase(),
     );
     const table =
       binding?.table ??
-      schema.tables.find(
-        (table) => table.name.toLowerCase() === qualifier.toLowerCase(),
+      schema.tables.find((table) =>
+        table.namespace && dialect !== "mssql"
+          ? table.name === normalizedQualifier
+          : table.name.toLowerCase() === qualifier.toLowerCase(),
       );
     suggestions = table
       ? columns(table)
-      : qualifier.toLowerCase() === "main"
-        ? tables()
+      : qualifier.toLowerCase() === "main" ||
+          schema.tables.some((table) =>
+            dialect === "mssql"
+              ? table.namespace?.toLowerCase() ===
+                normalizedQualifier.toLowerCase()
+              : table.namespace === normalizedQualifier,
+          )
+        ? tables(
+            qualifier.toLowerCase() === "main"
+              ? undefined
+              : normalizedQualifier,
+          ).map((item) => ({ ...item, insertText: name(item.label) }))
         : [];
   } else {
     const tableContext =
@@ -295,7 +434,22 @@ export function sqlCompletions(
               columns(ref.table, refs.length > 1 ? ref.alias : undefined),
             )
           : schema.tables.flatMap((table) => columns(table, table.name))),
-        ...KEYWORDS.map((word) => ({
+        ...(dialect === "mssql"
+          ? [
+              ...KEYWORDS.filter(
+                (word) => !["LIMIT", "RETURNING", "QUALIFY"].includes(word),
+              ),
+              "TOP",
+              "FETCH NEXT",
+              "ROWS ONLY",
+              "GO",
+              "BEGIN TRANSACTION",
+              "COMMIT",
+              "ROLLBACK",
+              "DECLARE",
+            ]
+          : KEYWORDS
+        ).map((word) => ({
           label: word,
           detail: "SQL keyword",
           insertText: word,
@@ -312,6 +466,7 @@ export function sqlCompletions(
         })),
       );
     }
+    if (!tableContext && prefix) suggestions.push(...types);
     suggestions.push(
       ...snippets.map((snippet) => ({
         label: snippet.prefix,

@@ -167,3 +167,39 @@ describe("schema-aware SQL completion", () => {
     ]);
   });
 });
+
+describe("concise SQL Server identifiers", () => {
+  const current = structuredClone(schema);
+  current.tables[0].namespace = "dbo";
+  current.tables[0].name = "Customers";
+  const suggest = (sql: string) =>
+    sqlCompletions(sql, sql.length, current, [], "mssql").suggestions;
+  it("inserts plain table and column names without dbo or brackets", () => {
+    expect(suggest("SELECT * FROM Cust")[0].insertText).toBe("Customers");
+    expect(suggest("SELECT * FROM dbo.Cust")[0].insertText).toBe("Customers");
+    const sql = "SELECT c. FROM Customers c";
+    expect(
+      sqlCompletions(sql, 9, current, [], "mssql").suggestions[0].insertText,
+    ).toBe("id");
+  });
+  it("keeps non-default schemas and required identifier escaping", () => {
+    const custom = structuredClone(current);
+    custom.tables[0].namespace = "sales";
+    custom.tables[0].name = "Order Details";
+    expect(
+      sqlCompletions("SELECT * FROM ", 14, custom, [], "mssql").suggestions[0]
+        .insertText,
+    ).toBe("sales.[Order Details]");
+    custom.tables[0].namespace = "dbo";
+    custom.tables[0].name = "Order";
+    expect(
+      sqlCompletions("SELECT * FROM ", 14, custom, [], "mssql").suggestions[0]
+        .insertText,
+    ).toBe("[Order]");
+    custom.tables[0].name = "a]b";
+    expect(
+      sqlCompletions("SELECT * FROM ", 14, custom, [], "mssql").suggestions[0]
+        .insertText,
+    ).toBe("[a]]b]");
+  });
+});

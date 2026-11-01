@@ -1,0 +1,33 @@
+[package]
+name = "database-design-playground"
+version = "1.0.0"
+description = "A local SQL and database design workspace"
+edition = "2024"
+rust-version = "1.90"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[dependencies]
+log = "0.4"
+tauri = { version = "2.12.5", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-native-tls", "postgres", "json"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread", "net"] }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
+
+tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls", "chrono", "bigdecimal", "winauth"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+sqlparser = "0.53"
+chrono = "0.4"

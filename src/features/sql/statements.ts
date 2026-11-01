@@ -94,3 +94,37 @@ export function sqlStatements(sql: string) {
   emit(sql.length);
   return statements;
 }
+
+// SQL Server keeps semicolons inside a batch so variables, procedures and transactions work.
+// GO is a client-side batch separator, recognized only alone on a line outside quoted text/comments.
+export function mssqlBatches(sql: string) {
+  const tokens = tokenize(sql, "mssql");
+  const result: { sql: string; start: number }[] = [];
+  let start = 0;
+  for (const token of tokens) {
+    if (
+      token.kind !== "word" ||
+      token.text.toUpperCase() !== "GO" ||
+      token.scope.length
+    )
+      continue;
+    const lineStart = sql.lastIndexOf("\n", token.start - 1) + 1;
+    const newline = sql.indexOf("\n", token.end);
+    const lineEnd = newline < 0 ? sql.length : newline;
+    if (
+      sql.slice(lineStart, token.start).trim() ||
+      !/^(?:[ \t\r]*)(?:--[^\n]*)?$/.test(sql.slice(token.end, lineEnd))
+    )
+      continue;
+    if (
+      tokens.some(
+        (t) => t.start >= start && t.end <= lineStart && t.kind !== "comment",
+      )
+    )
+      result.push({ sql: sql.slice(start, lineStart), start });
+    start = newline < 0 ? sql.length : newline + 1;
+  }
+  if (tokens.some((t) => t.start >= start && t.kind !== "comment"))
+    result.push({ sql: sql.slice(start), start });
+  return result;
+}

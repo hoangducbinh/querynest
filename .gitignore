@@ -2,3 +2,16 @@ node_modules/
 dist/
 *.tsbuildinfo
 .DS_Store
+
+# Desktop build outputs
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Local desktop QA screenshot
+/preview-tauri-desktop.png
+
+# PostgreSQL desktop QA screenshots
+/preview-postgres-*.png
+
+# Connection UI QA screenshots
+/preview-connections*.png

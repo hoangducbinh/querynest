@@ -1,15 +1,21 @@
 import type { ColumnDefinition, TableDefinition } from "../../types/schema";
 import { quote } from "../../lib/ddl/generate";
-import { literal } from "../../lib/duckdb/literals";
+import { parseDuckType } from "../../lib/duckdb/types";
+import { duckValue } from "../../lib/duckdb/values";
 export type CellValue = string | null | undefined;
 export interface DraftRow {
   id: string;
   original?: Record<string, unknown>;
   cells: Record<string, CellValue>;
   deleted: boolean;
+  insert?: boolean;
 }
 export function cellText(value: unknown): string {
-  return value === null || value === undefined ? "" : String(value);
+  return value === null || value === undefined
+    ? ""
+    : typeof value === "object"
+      ? JSON.stringify(value)
+      : String(value);
 }
 export const makeDraft = (row?: Record<string, unknown>): DraftRow => ({
   id: crypto.randomUUID(),
@@ -18,10 +24,13 @@ export const makeDraft = (row?: Record<string, unknown>): DraftRow => ({
   deleted: false,
 });
 export const isChanged = (row: DraftRow) =>
-  row.deleted || Object.keys(row.cells).length > 0;
+  !!row.insert || row.deleted || Object.keys(row.cells).length > 0;
 export function parseCell(value: CellValue, column: ColumnDefinition): unknown {
   if (value === undefined) return undefined;
-  if (value === null || (value === "" && column.type !== "VARCHAR")) {
+  if (
+    value === null ||
+    (value === "" && parseDuckType(column.type).name !== "VARCHAR")
+  ) {
     if (!column.nullable) throw Error(`${column.name} is required.`);
     return null;
   }
@@ -56,6 +65,16 @@ export function parseCell(value: CellValue, column: ColumnDefinition): unknown {
       throw Error(`${column.name} must be a valid YYYY-MM-DD date.`);
     return value;
   }
+  if (column.type !== "TIMESTAMP") {
+    const type = parseDuckType(column.type);
+    if (
+      ["LIST", "ARRAY", "STRUCT", "MAP", "UNION", "VARIANT"].includes(type.name)
+    )
+      duckValue(column, value);
+    // DuckDB validates and casts additional native types transactionally on Save.
+    // Keep decimal and wide integer values as text to avoid JS precision loss.
+    return value;
+  }
   if (
     !/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(value) ||
     Number.isNaN(Date.parse(value))
@@ -79,7 +98,7 @@ export function rowPredicate(
         throw Error(
           "The original primary key is missing. Refresh the table before editing.",
         );
-      return `${quote(column.name)} IS NOT DISTINCT FROM ${literal(original[column.name])}`;
+      return `${quote(column.name)} IS NOT DISTINCT FROM ${duckValue(column, original[column.name])}`;
     })
     .join(" AND ");
 }
@@ -112,7 +131,15 @@ export function mutationSQL(
     if (row.original) {
       if (!cells.length) return [];
       return [
-        `UPDATE ${quote(table.name)} SET ${cells.map(([name, value]) => `${quote(name)}=${literal(value)}`).join(", ")} WHERE ${rowPredicate(table, row.original)}`,
+        `UPDATE ${quote(table.name)} SET ${cells
+          .map(
+            ([name, value]) =>
+              `${quote(name)}=${duckValue(
+                table.columns.find((c) => c.name === name)!,
+                value,
+              )}`,
+          )
+          .join(", ")} WHERE ${rowPredicate(table, row.original)}`,
       ];
     }
     for (const column of table.columns) {
@@ -125,7 +152,14 @@ export function mutationSQL(
     }
     return [
       cells.length
-        ? `INSERT INTO ${quote(table.name)} (${cells.map(([name]) => quote(name)).join(", ")}) VALUES (${cells.map(([, value]) => literal(value)).join(", ")})`
+        ? `INSERT INTO ${quote(table.name)} (${cells.map(([name]) => quote(name)).join(", ")}) VALUES (${cells
+            .map(([name, value]) =>
+              duckValue(
+                table.columns.find((c) => c.name === name)!,
+                value,
+              ),
+            )
+            .join(", ")})`
         : `INSERT INTO ${quote(table.name)} DEFAULT VALUES`,
     ];
   });
@@ -188,8 +222,12 @@ export function pasteCells(
         "A primary key is required to edit existing rows. Paste into a new row instead.",
       );
     row.forEach((value, c) => {
-      next[i].cells[table.columns[startCol + c].name] =
-        value === "\\N" ? null : value;
+      const column = table.columns[startCol + c];
+      if (column.generated || column.readOnly)
+        throw Error(
+          `${column.name} is generated or read-only. Paste into editable columns instead.`,
+        );
+      next[i].cells[column.name] = value === "\\N" ? null : value;
     });
   });
   if (next.length && isChanged(next.at(-1)!)) next.push(makeDraft());

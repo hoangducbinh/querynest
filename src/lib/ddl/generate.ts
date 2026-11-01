@@ -1,3 +1,4 @@
+import { duckTypeSQL, parseDuckType } from "../duckdb/types";
 import type { DatabaseSchema, TableDefinition } from "../../types/schema";
 import { validateSchema } from "../../features/schema/core";
 export const quote = (s: string) => '"' + s.replaceAll('"', '""') + '"';
@@ -29,7 +30,7 @@ export function generateDDL(s: DatabaseSchema): string {
     .map((t) => {
       const defs = t.columns.map(
         (c) =>
-          `${quote(c.name)} ${c.type}${!c.nullable ? " NOT NULL" : ""}${c.unique ? " UNIQUE" : ""}${c.defaultValue.trim() ? " DEFAULT " + c.defaultValue : ""}`,
+          `${quote(c.name)} ${duckTypeSQL(parseDuckType(c.type))}${!c.nullable ? " NOT NULL" : ""}${c.unique ? " UNIQUE" : ""}${c.defaultValue.trim() ? " DEFAULT " + c.defaultValue : ""}`,
       );
       if (t.primaryKey.length)
         defs.push(

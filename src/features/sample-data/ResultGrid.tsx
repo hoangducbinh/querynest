@@ -1,3 +1,4 @@
+import { cellText } from "./model";
 import { Terminal } from "lucide-react";
 
 export function ResultGrid({
@@ -25,7 +26,7 @@ export function ResultGrid({
                 <td className="muted">{i + 1}</td>
                 {columns.map((c) => (
                   <td key={c}>
-                    {r[c] === null ? <em>NULL</em> : String(r[c] ?? "")}
+                    {r[c] === null ? <em>NULL</em> : cellText(r[c])}
                   </td>
                 ))}
               </tr>

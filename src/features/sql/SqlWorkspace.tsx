@@ -1,26 +1,40 @@
 import { SnippetSettings } from "./SnippetSettings";
 import { useRef, useState } from "react";
-import { LoaderCircle, PanelBottom, Play, Braces } from "lucide-react";
+import {
+  LoaderCircle,
+  PanelBottom,
+  Play,
+  Braces,
+  Columns2,
+  X,
+} from "lucide-react";
 import type { SqlTab } from "../../types/schema";
 import { QueryTabs } from "./QueryTabs";
 import { Button } from "../../components/ui/button";
 import { ResultGrid } from "../sample-data/ResultGrid";
 import { SqlEditor } from "./Editor";
 import type { SqlResult } from "./execution";
+import type { SqlDiagnostic } from "./diagnostics";
 interface Props {
   tabs: SqlTab[];
   activeId: string;
   onTabsChange: (tabs: SqlTab[], activeId: string) => void;
   value: string;
   onChange: (sql: string) => void;
-  onRun: () => void;
+  onRun: (tabId?: string, sql?: string) => void;
   disabled: boolean;
   busy: boolean;
   dark: boolean;
   queryResults?: SqlResult[];
-  onSelection: (sql: string) => void;
+  onSelection: (sql: string, tabId?: string) => void;
+  allResults?: Record<string, SqlResult[]>;
+  onSplit?: () => void;
+  splitOpen?: boolean;
+  validate?: (sql: string) => Promise<SqlDiagnostic[]>;
+  validationSource?: string;
+  onCancel?: () => void;
 }
-export function SqlWorkspace({
+function SqlPane({
   tabs,
   activeId,
   onTabsChange,
@@ -32,6 +46,11 @@ export function SqlWorkspace({
   dark,
   queryResults,
   onSelection,
+  validate,
+  validationSource,
+  onCancel,
+  onSplit,
+  splitOpen,
 }: Props) {
   const [selection, setSelection] = useState<{ tab: string; sql: string }>({
     tab: "",
@@ -50,7 +69,12 @@ export function SqlWorkspace({
   const [results, setResults] = useState(true);
   const split = useRef<HTMLDivElement>(null);
   return (
-    <section className="sql-workspace">
+    <section
+      className="sql-workspace"
+      onFocusCapture={() =>
+        onSelection(selection.tab === activeId ? selection.sql : "")
+      }
+    >
       <div className="compact-toolbar">
         <QueryTabs
           tabs={tabs}
@@ -62,10 +86,18 @@ export function SqlWorkspace({
           <span
             className="sql-validation-status"
             role="status"
-            title="DuckDB checks SQL without executing it"
+            title={`${validationSource ?? "DuckDB"} checks SQL without executing it`}
           >
             {validationStatus}
           </span>
+          <Button
+            title={splitOpen ? "Close SQL split" : "Split SQL editor"}
+            aria-label={splitOpen ? "Close SQL split" : "Split SQL editor"}
+            onClick={onSplit}
+            disabled={busy}
+          >
+            {splitOpen ? <X size={14} /> : <Columns2 size={14} />}
+          </Button>
           <Button
             title="Configure SQL abbreviations"
             onClick={() => setSettings(true)}
@@ -80,11 +112,18 @@ export function SqlWorkspace({
           >
             <PanelBottom size={15} />
           </Button>
+          {busy && onCancel && <Button onClick={onCancel}>Cancel query</Button>}
           <Button
-            title="Run selected SQL or the whole tab. Separate SELECT queries with a blank line or semicolon."
+            title={
+              validationSource === "SQL Server"
+                ? "Run selected T-SQL or the whole tab. Use GO on its own line to separate batches."
+                : "Run selected SQL or the whole tab. Separate SELECT queries with a blank line or semicolon."
+            }
             className="primary"
             disabled={disabled}
-            onClick={onRun}
+            onClick={() =>
+              onRun(activeId, hasSelection ? selection.sql : value)
+            }
           >
             {busy ? (
               <LoaderCircle className="spin" size={14} />
@@ -104,6 +143,8 @@ export function SqlWorkspace({
           <SqlEditor
             key={activeId}
             validationEnabled={!disabled}
+            validate={validate}
+            validationSource={validationSource}
             onValidation={setValidationStatus}
             onSelection={(sql) => {
               setSelection({ tab: activeId, sql });
@@ -199,7 +240,12 @@ export function SqlWorkspace({
                     : result?.status || "No results"}
                 </span>
               </div>
-              {result && <pre className="result-query">{result.sql}</pre>}
+              {result && (
+                <details className="result-query-details" key={result.sql}>
+                  <summary>SQL</summary>
+                  <pre className="result-query">{result.sql}</pre>
+                </details>
+              )}
               {result?.error ? (
                 <pre className="sheet-error" role="alert">
                   {result.status}
@@ -216,5 +262,142 @@ export function SqlWorkspace({
       </div>
       {settings && <SnippetSettings onClose={() => setSettings(false)} />}
     </section>
+  );
+}
+
+export function SqlWorkspace(props: Props) {
+  const [paneIds, setPaneIds] = useState([props.activeId, ""]);
+  const [width, setWidth] = useState(50);
+  const container = useRef<HTMLDivElement>(null);
+  const splitOpen = !!paneIds[1];
+  function toggleSplit() {
+    if (splitOpen) {
+      const active = paneIds.find((id) => id === props.activeId) ?? paneIds[0];
+      setPaneIds([active, ""]);
+      return;
+    }
+    const other = props.tabs.find((tab) => tab.id !== paneIds[0]);
+    const next = other ?? {
+      id: crypto.randomUUID(),
+      name: "split.sql",
+      sql: "",
+    };
+    if (!other) props.onTabsChange([...props.tabs, next], props.activeId);
+    setPaneIds([paneIds[0], next.id]);
+  }
+  return (
+    <div
+      className={"sql-panes " + (splitOpen ? "is-split" : "")}
+      ref={container}
+    >
+      {paneIds.filter(Boolean).map((id, index) => {
+        const tab =
+          props.tabs.find((item) => item.id === id) ??
+          props.tabs.find((item) => item.id === props.activeId) ??
+          props.tabs[0];
+        return (
+          <div
+            key={index}
+            className="sql-pane-container"
+            style={{
+              flex: splitOpen
+                ? index === 0
+                  ? `0 0 ${width}%`
+                  : "1 1 0"
+                : "1 1 0",
+            }}
+            onFocusCapture={() => {
+              if (props.activeId !== tab.id)
+                props.onTabsChange(props.tabs, tab.id);
+            }}
+          >
+            <SqlPane
+              {...props}
+              activeId={tab.id}
+              value={tab.sql}
+              splitOpen={splitOpen}
+              onSplit={toggleSplit}
+              queryResults={
+                props.allResults?.[tab.id] ??
+                (tab.id === props.activeId ? props.queryResults : undefined)
+              }
+              onTabsChange={(tabs, active) => {
+                setPaneIds((ids) =>
+                  ids.map((value, i) => (i === index ? active : value)),
+                );
+                props.onTabsChange(tabs, active);
+              }}
+              onChange={(sql) =>
+                props.onTabsChange(
+                  props.tabs.map((item) =>
+                    item.id === tab.id ? { ...item, sql } : item,
+                  ),
+                  tab.id,
+                )
+              }
+              onSelection={(sql) => props.onSelection(sql, tab.id)}
+            />
+            {splitOpen && index === 0 && (
+              <div
+                className="sql-pane-divider"
+                role="separator"
+                aria-label="Resize SQL split"
+                aria-orientation="vertical"
+                aria-valuemin={25}
+                aria-valuemax={75}
+                aria-valuenow={Math.round(width)}
+                tabIndex={0}
+                onPointerDown={(event) => {
+                  event.preventDefault();
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                }}
+                onPointerMove={(event) => {
+                  if (!event.currentTarget.hasPointerCapture(event.pointerId))
+                    return;
+                  const rect = container.current!.getBoundingClientRect();
+                  setWidth(
+                    Math.max(
+                      25,
+                      Math.min(
+                        75,
+                        ((event.clientX - rect.left) / rect.width) * 100,
+                      ),
+                    ),
+                  );
+                }}
+                onPointerUp={(event) => {
+                  if (event.currentTarget.hasPointerCapture(event.pointerId))
+                    event.currentTarget.releasePointerCapture(event.pointerId);
+                }}
+                onKeyDown={(event) => {
+                  if (
+                    !["ArrowLeft", "ArrowRight", "Home", "End"].includes(
+                      event.key,
+                    )
+                  )
+                    return;
+                  event.preventDefault();
+                  setWidth((value) =>
+                    event.key === "Home"
+                      ? 25
+                      : event.key === "End"
+                        ? 75
+                        : Math.max(
+                            25,
+                            Math.min(
+                              75,
+                              value + (event.key === "ArrowLeft" ? -5 : 5),
+                            ),
+                          ),
+                  );
+                }}
+              >
+                <span />
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }

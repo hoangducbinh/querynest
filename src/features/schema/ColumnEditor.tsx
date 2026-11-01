@@ -19,15 +19,6 @@ interface Props {
   onClose: () => void;
   onCommit: (plan: ReturnType<typeof planTableEdit>) => Promise<void>;
 }
-const typeLabels: Record<ColumnDefinition["type"], string> = {
-  VARCHAR: "Text",
-  INTEGER: "Integer",
-  BIGINT: "Big integer",
-  DOUBLE: "Number",
-  BOOLEAN: "Boolean",
-  DATE: "Date",
-  TIMESTAMP: "Date & time",
-};
 export function ColumnEditor({
   workspace,
   table,
@@ -228,20 +219,21 @@ export function ColumnEditor({
                 onChange={(event) => patch({ name: event.target.value })}
               />
               <label htmlFor="column-type">Data type</label>
-              <select
+              <input
                 id="column-type"
+                list="duckdb-column-types"
                 disabled={saving}
                 value={column.type}
-                onChange={(event) =>
-                  patch({ type: event.target.value as typeof column.type })
-                }
-              >
+                spellCheck={false}
+                autoComplete="off"
+                placeholder="e.g. DECIMAL(18,2), INTEGER[]"
+                onChange={(event) => patch({ type: event.target.value })}
+              />
+              <datalist id="duckdb-column-types">
                 {dataTypes.map((type) => (
-                  <option key={type} value={type}>
-                    {typeLabels[type]} · {type}
-                  </option>
+                  <option key={type} value={type} />
                 ))}
-              </select>
+              </datalist>
               <button
                 type="button"
                 className="column-options-toggle"

@@ -1,6 +1,8 @@
+import { validDuckType } from "../../lib/duckdb/types";
+import { parseMssqlConfig } from "../connections/model";
+import { parsePostgresConfig } from "../postgres/model";
 import { validateSnippets } from "../sql/snippets";
 import {
-  dataTypes,
   type DatabaseSchema,
   type RelationshipDefinition,
   type WorkspaceDefinition,
@@ -65,7 +67,10 @@ export function validateSchema(s: DatabaseSchema): string[] {
       if (!c.name.trim() || cols.has(c.name.toLowerCase()))
         errors.push(`${t.name}: column names must be nonempty and unique.`);
       cols.add(c.name.toLowerCase());
-      if (!dataTypes.includes(c.type)) errors.push("Unsupported data type.");
+      if (!validDuckType(c.type))
+        errors.push(
+          `${t.name}.${c.name}: invalid or unsupported DuckDB data type.`,
+        );
     }
     if (t.primaryKey.some((k) => !t.columns.some((c) => c.id === k)))
       errors.push("Invalid primary key.");
@@ -96,6 +101,8 @@ export function parseWorkspace(text: string): WorkspaceDefinition {
         !t ||
         typeof t.id !== "string" ||
         typeof t.name !== "string" ||
+        (t.readOnly !== undefined && typeof t.readOnly !== "boolean") ||
+        (t.namespace !== undefined && typeof t.namespace !== "string") ||
         !Array.isArray(t.columns) ||
         !Array.isArray(t.primaryKey) ||
         !t.primaryKey.every((k) => typeof k === "string") ||
@@ -106,6 +113,9 @@ export function parseWorkspace(text: string): WorkspaceDefinition {
             !c ||
             typeof c.id !== "string" ||
             typeof c.name !== "string" ||
+            (c.readOnly !== undefined && typeof c.readOnly !== "boolean") ||
+            (c.generated !== undefined && typeof c.generated !== "boolean") ||
+            (c.nativeType !== undefined && typeof c.nativeType !== "string") ||
             typeof c.nullable !== "boolean" ||
             typeof c.unique !== "boolean" ||
             typeof c.defaultValue !== "string",
@@ -181,7 +191,19 @@ export function parseWorkspace(text: string): WorkspaceDefinition {
     const snippetErrors = validateSnippets(w.sqlSnippets);
     if (snippetErrors.length) throw Error(snippetErrors.join(" "));
   }
-  const errors = validateSchema(w.schema);
+  if (w.postgres && w.mssql)
+    throw Error("A workspace must use one database engine.");
+  if (w.connectionId !== undefined && typeof w.connectionId !== "string")
+    throw Error("Invalid connection reference.");
+  if (w.mssql !== undefined) {
+    w.mssql = parseMssqlConfig(w.mssql);
+    w.data = {};
+  }
+  if (w.postgres !== undefined) {
+    w.postgres = parsePostgresConfig(w.postgres);
+    w.data = {};
+  }
+  const errors = w.postgres || w.mssql ? [] : validateSchema(w.schema);
   if (errors.length) throw Error(errors.join("\n"));
   return w;
 }

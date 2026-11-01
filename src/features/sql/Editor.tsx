@@ -7,6 +7,7 @@ import "monaco-editor/editor/contrib/snippet/browser/snippetController2";
 import "monaco-editor/editor/contrib/hover/browser/hoverContribution";
 import "monaco-editor/editor/contrib/comment/browser/comment";
 import { withSqlValidator } from "../../lib/duckdb/engine";
+import type { SqlDiagnostic } from "./diagnostics";
 import { validateSql } from "./diagnostics";
 import EditorWorker from "monaco-editor/editor/editor.worker.js?worker";
 import { useStore } from "../schema/store";
@@ -20,6 +21,7 @@ const kinds = {
   keyword: monaco.languages.CompletionItemKind.Keyword,
   function: monaco.languages.CompletionItemKind.Function,
   snippet: monaco.languages.CompletionItemKind.Snippet,
+  type: monaco.languages.CompletionItemKind.TypeParameter,
 };
 export function SqlEditor({
   value,
@@ -28,10 +30,14 @@ export function SqlEditor({
   validationEnabled = true,
   onValidation,
   onSelection,
+  validate,
+  validationSource = "DuckDB",
 }: {
   value: string;
   dark?: boolean;
   validationEnabled?: boolean;
+  validate?: (sql: string) => Promise<SqlDiagnostic[]>;
+  validationSource?: string;
   onSelection?: (sql: string) => void;
   onValidation?: (status: string) => void;
   onChange: (sql: string) => void;
@@ -39,11 +45,18 @@ export function SqlEditor({
   const [editorInstance, setEditorInstance] =
     useState<monaco.editor.IStandaloneCodeEditor | null>(null);
   const schema = useStore((s) => s.workspace.schema);
+  const dialect = useStore((s) =>
+    s.workspace.mssql
+      ? ("mssql" as const)
+      : s.workspace.postgres
+        ? ("postgres" as const)
+        : ("default" as const),
+  );
   const snippets = useStore((s) => s.workspace.sqlSnippets ?? DEFAULT_SNIPPETS);
   const selectionCallback = useRef(onSelection);
   selectionCallback.current = onSelection;
-  const context = useRef({ schema, snippets });
-  context.current = { schema, snippets };
+  const context = useRef({ schema, snippets, dialect });
+  context.current = { schema, snippets, dialect };
   const provider = useRef<monaco.IDisposable | null>(null);
   useEffect(
     () => () => {
@@ -57,19 +70,19 @@ export function SqlEditor({
     if (!model) return;
     let cancelled = false;
     const version = model.getVersionId();
-    monaco.editor.setModelMarkers(model, "duckdb-validation", []);
+    monaco.editor.setModelMarkers(model, "sql-validation", []);
     onValidation?.(validationEnabled ? (value.trim() ? "Checking…" : "") : "");
     const timer = setTimeout(async () => {
       if (!validationEnabled || !value.trim()) return;
       try {
-        const diagnostics = await withSqlValidator((prepare) =>
-          validateSql(value, prepare),
-        );
+        const diagnostics = validate
+          ? await validate(value)
+          : await withSqlValidator((prepare) => validateSql(value, prepare));
         if (cancelled || model.isDisposed() || model.getVersionId() !== version)
           return;
         monaco.editor.setModelMarkers(
           model,
-          "duckdb-validation",
+          "sql-validation",
           diagnostics.map((item) => {
             const start = model.getPositionAt(
               Math.min(value.length, item.start),
@@ -84,7 +97,7 @@ export function SqlEditor({
                 end.column,
               ),
               message: item.message,
-              source: "DuckDB",
+              source: validationSource,
               severity: item.warning
                 ? monaco.MarkerSeverity.Warning
                 : monaco.MarkerSeverity.Error,
@@ -104,9 +117,17 @@ export function SqlEditor({
       cancelled = true;
       clearTimeout(timer);
       if (!model.isDisposed())
-        monaco.editor.setModelMarkers(model, "duckdb-validation", []);
+        monaco.editor.setModelMarkers(model, "sql-validation", []);
     };
-  }, [value, schema, validationEnabled, editorInstance, onValidation]);
+  }, [
+    value,
+    schema,
+    validationEnabled,
+    editorInstance,
+    onValidation,
+    validate,
+    validationSource,
+  ]);
   return (
     <Editor
       height="100%"
@@ -139,7 +160,7 @@ export function SqlEditor({
         provider.current = monaco.languages.registerCompletionItemProvider(
           "sql",
           {
-            triggerCharacters: [".", " ", '"'],
+            triggerCharacters: [".", " ", '"', "["],
             provideCompletionItems(model, position) {
               if (model !== editor.getModel()) return { suggestions: [] };
               const result = sqlCompletions(
@@ -147,6 +168,7 @@ export function SqlEditor({
                 model.getOffsetAt(position),
                 context.current.schema,
                 context.current.snippets,
+                context.current.dialect,
               );
               const start = model.getPositionAt(result.start),
                 end = model.getPositionAt(result.end);
