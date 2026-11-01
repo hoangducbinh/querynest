@@ -1,3 +1,5 @@
+import type { DatabaseSchema } from "../../types/schema";
+import type { SqlDialect } from "./data-types";
 import { useEffect, useRef, useState } from "react";
 import Editor, { loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor/editor/editor.api";
@@ -12,7 +14,9 @@ import { validateSql } from "./diagnostics";
 import EditorWorker from "monaco-editor/editor/editor.worker.js?worker";
 import { useStore } from "../schema/store";
 import { sqlCompletions } from "./completions";
-import { DEFAULT_SNIPPETS } from "./snippets";
+import { effectiveAbbreviations } from "./snippets";
+import { useSnippetPreferences } from "./snippet-preferences";
+const NO_SNIPPETS: import("../../types/schema").SqlSnippet[] = [];
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() };
 loader.config({ monaco });
 const kinds = {
@@ -25,6 +29,9 @@ const kinds = {
 };
 export function SqlEditor({
   value,
+  autoFocus = false,
+  schema: suppliedSchema,
+  dialect: suppliedDialect,
   onChange,
   dark = false,
   validationEnabled = true,
@@ -34,6 +41,9 @@ export function SqlEditor({
   validationSource = "DuckDB",
 }: {
   value: string;
+  autoFocus?: boolean;
+  schema?: DatabaseSchema;
+  dialect?: SqlDialect;
   dark?: boolean;
   validationEnabled?: boolean;
   validate?: (sql: string) => Promise<SqlDiagnostic[]>;
@@ -44,15 +54,29 @@ export function SqlEditor({
 }) {
   const [editorInstance, setEditorInstance] =
     useState<monaco.editor.IStandaloneCodeEditor | null>(null);
-  const schema = useStore((s) => s.workspace.schema);
-  const dialect = useStore((s) =>
+  const storedSchema = useStore((s) => s.workspace.schema);
+  const storedDialect = useStore((s) =>
     s.workspace.mssql
       ? ("mssql" as const)
       : s.workspace.postgres
         ? ("postgres" as const)
         : ("default" as const),
   );
-  const snippets = useStore((s) => s.workspace.sqlSnippets ?? DEFAULT_SNIPPETS);
+  const schema = suppliedSchema ?? storedSchema;
+  const dialect = suppliedDialect ?? storedDialect;
+  const workspaceSnippets = useStore((s) => s.workspace.sqlSnippets);
+  const workspaceEnabled = useStore((s) => s.workspace.sqlAbbreviationsEnabled);
+  const globalSnippets = useSnippetPreferences((s) => s.settings);
+  const abbreviationSettings = effectiveAbbreviations(
+    {
+      sqlSnippets: workspaceSnippets,
+      sqlAbbreviationsEnabled: workspaceEnabled,
+    },
+    globalSnippets,
+  );
+  const snippets = abbreviationSettings.enabled
+    ? abbreviationSettings.snippets
+    : NO_SNIPPETS;
   const selectionCallback = useRef(onSelection);
   selectionCallback.current = onSelection;
   const context = useRef({ schema, snippets, dialect });
@@ -137,6 +161,7 @@ export function SqlEditor({
       onChange={(next) => onChange(next ?? "")}
       onMount={(editor) => {
         setEditorInstance(editor);
+        if (autoFocus) editor.focus();
         selectionCallback.current?.("");
         editor.onDidChangeCursorSelection(() => {
           const selection = editor.getSelection();

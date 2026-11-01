@@ -1,4 +1,8 @@
-import type { SqlSnippet } from "../../types/schema";
+import type {
+  SqlSnippet,
+  SqlAbbreviationSettings,
+  WorkspaceDefinition,
+} from "../../types/schema";
 export const DEFAULT_SNIPPETS: SqlSnippet[] = [
   {
     id: "builtin-select",
@@ -52,4 +56,17 @@ export function validateSnippets(value: unknown): string[] {
       errors.push(`Abbreviation ${index + 1}: invalid description.`);
   }
   return [...new Set(errors)];
+}
+
+export function effectiveAbbreviations(
+  workspace: Pick<
+    WorkspaceDefinition,
+    "sqlSnippets" | "sqlAbbreviationsEnabled"
+  >,
+  global: SqlAbbreviationSettings,
+): SqlAbbreviationSettings {
+  return {
+    enabled: workspace.sqlAbbreviationsEnabled ?? global.enabled,
+    snippets: workspace.sqlSnippets ?? global.snippets,
+  };
 }

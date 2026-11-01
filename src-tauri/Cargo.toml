@@ -1,5 +1,5 @@
 [package]
-name = "database-design-playground"
+name = "max-learning"
 version = "1.0.0"
 description = "A local SQL and database design workspace"
 edition = "2024"

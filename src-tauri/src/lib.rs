@@ -9,6 +9,8 @@ pub fn run() {
         .manage(mssql::MsState::default())
         .invoke_handler(tauri::generate_handler![
             mssql::ms_connect,
+            mssql::ms_databases,
+            mssql::ms_open_database,
             mssql::ms_test_connection,
             mssql::ms_disconnect,
             mssql::ms_catalog,
@@ -20,6 +22,8 @@ pub fn run() {
             mssql::ms_change_column,
             mssql::ms_cancel,
             postgres::pg_connect,
+            postgres::pg_databases,
+            postgres::pg_open_database,
             postgres::pg_test_connection,
             postgres::pg_disconnect,
             postgres::pg_catalog,

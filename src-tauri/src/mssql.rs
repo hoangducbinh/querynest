@@ -151,7 +151,7 @@ fn options(c: &MsConfig, password: String) -> Result<Config, Failure> {
         }
         _ => return Err(Failure::message("Invalid SQL Server authentication mode.")),
     }
-    config.application_name("Database Design Playground");
+    config.application_name("Max Learning");
     config.encryption(if c.encrypt {
         EncryptionLevel::Required
     } else {
@@ -425,6 +425,9 @@ pub async fn ms_connect(
     password: String,
 ) -> Result<Value, Failure> {
     let opts = options(&config, password)?;
+    connect_options(&state, opts, config.read_only).await
+}
+async fn connect_options(state: &MsState, opts: Config, read_only: bool) -> Result<Value, Failure> {
     let (version, catalog, client) = metadata(opts.clone()).await?;
     let id = uuid::Uuid::new_v4().to_string();
     state.sessions.lock().await.insert(
@@ -432,13 +435,48 @@ pub async fn ms_connect(
         Arc::new(Session {
             config: opts,
             client: Mutex::new(Some(client)),
-            read_only: config.read_only,
+            read_only,
             running: AtomicBool::new(false),
             cancel: Notify::new(),
             validation: Mutex::new(()),
         }),
     );
     Ok(json!({"sessionId":id,"serverVersion":version,"catalog":catalog}))
+}
+#[tauri::command]
+pub async fn ms_databases(
+    state: tauri::State<'_, MsState>,
+    session_id: String,
+) -> Result<Vec<String>, Failure> {
+    let s = session(&state, &session_id).await?;
+    // Discovery has its own socket so it never changes the editor's transaction or database.
+    let mut client = open(s.config.clone()).await?;
+    let rows = client.simple_query("SELECT name FROM sys.databases WHERE state = 0 AND HAS_DBACCESS(name) = 1 ORDER BY name").await?.into_first_result().await?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.get::<&str, _>(0).map(str::to_owned))
+        .collect())
+}
+#[tauri::command]
+pub async fn ms_open_database(
+    state: tauri::State<'_, MsState>,
+    session_id: String,
+    database: String,
+) -> Result<Value, Failure> {
+    open_database(&state, &session_id, &database).await
+}
+async fn open_database(
+    state: &MsState,
+    session_id: &str,
+    database: &str,
+) -> Result<Value, Failure> {
+    if database.is_empty() || database.contains('\0') {
+        return Err(Failure::message("Invalid database name."));
+    }
+    let s = session(&state, &session_id).await?;
+    let mut opts = s.config.clone();
+    opts.database(database);
+    connect_options(&state, opts, s.read_only).await
 }
 #[tauri::command]
 pub async fn ms_disconnect(
@@ -1175,6 +1213,66 @@ mod tests {
         setup.simple_query(format!("DROP TABLE IF EXISTS [{schema}].items;DROP TABLE IF EXISTS [{schema}].no_key;DROP SCHEMA IF EXISTS [{schema}]")).await.unwrap().into_results().await.unwrap();
         if let Err(error) = result {
             std::panic::resume_unwind(error);
+        }
+    }
+    #[tokio::test]
+    #[ignore = "requires SQLSERVER_TEST_PASSWORD and isolated codex_multidb_qa database"]
+    async fn live_sqlserver_database_contexts() {
+        let state = MsState::default();
+        let config = MsConfig {
+            auth: "sql".into(),
+            host: "127.0.0.1".into(),
+            port: 1433,
+            database: "master".into(),
+            user: "sa".into(),
+            encrypt: true,
+            trust_certificate: true,
+            read_only: true,
+        };
+        let opts = options(
+            &config,
+            std::env::var("SQLSERVER_TEST_PASSWORD").expect("Set SQLSERVER_TEST_PASSWORD"),
+        )
+        .unwrap();
+        let first = connect_options(&state, opts, true).await.unwrap();
+        let first_id = first["sessionId"].as_str().unwrap();
+        let second = open_database(&state, first_id, "codex_multidb_qa")
+            .await
+            .unwrap();
+        let second_id = second["sessionId"].as_str().unwrap();
+        assert_ne!(first_id, second_id);
+        let a = session(&state, first_id).await.unwrap();
+        let b = session(&state, second_id).await.unwrap();
+        assert!(b.read_only);
+        let (ra, rb) = tokio::join!(
+            run(&a, "SELECT DB_NAME() AS db", 10),
+            run(&b, "SELECT DB_NAME() AS db", 10)
+        );
+        assert_eq!(ra.unwrap()[0].rows[0]["db"], json!("master"));
+        assert_eq!(rb.unwrap()[0].rows[0]["db"], json!("codex_multidb_qa"));
+        assert!(
+            run(&b, "CREATE TABLE forbidden(id integer)", 10)
+                .await
+                .is_err()
+        );
+        assert!(
+            open_database(&state, first_id, "absent_db_codex_qa")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            run(&a, "SELECT DB_NAME() AS db", 10).await.unwrap()[0].rows[0]["db"],
+            json!("master")
+        );
+        assert!(
+            second["catalog"]["tables"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "database_marker")
+        );
+        for s in [a, b] {
+            s.client.lock().await.take();
         }
     }
 }

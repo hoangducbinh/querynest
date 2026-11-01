@@ -1,0 +1,21 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "app": {
+    "windows": [
+      {
+        "title": "",
+        "width": 1280,
+        "height": 850,
+        "resizable": true,
+        "fullscreen": false,
+        "label": "main",
+        "minWidth": 900,
+        "minHeight": 620,
+        "backgroundColor": "#f6f6f8",
+        "dragDropEnabled": false,
+        "decorations": false,
+        "shadow": true
+      }
+    ]
+  }
+}

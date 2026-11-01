@@ -622,28 +622,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "database-design-playground"
-version = "1.0.0"
-dependencies = [
- "chrono",
- "futures-util",
- "log",
- "serde",
- "serde_json",
- "sqlparser",
- "sqlx",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-fs",
- "tauri-plugin-log",
- "tiberius",
- "tokio",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
 name = "dbus"
 version = "0.9.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2142,6 +2120,28 @@ dependencies = [
  "log",
  "tendril",
  "web_atoms",
+]
+
+[[package]]
+name = "max-learning"
+version = "1.0.0"
+dependencies = [
+ "chrono",
+ "futures-util",
+ "log",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "sqlx",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-log",
+ "tiberius",
+ "tokio",
+ "tokio-util",
+ "uuid",
 ]
 
 [[package]]

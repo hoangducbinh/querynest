@@ -1,14 +1,19 @@
+import { captureActiveSource } from "../../features/connections/sources";
 import { createWorkspace } from "../../features/schema/core";
 import {
   parseProfile,
   type ConnectionProfile,
 } from "../../features/connections/model";
 import Dexie, { type EntityTable } from "dexie";
-import type { WorkspaceDefinition } from "../../types/schema";
-export const storage = new Dexie("database-design-playground") as Dexie & {
+import type {
+  WorkspaceDefinition,
+  SqlAbbreviationSettings,
+} from "../../types/schema";
+export const storage = new Dexie("max-learning") as Dexie & {
   workspaces: EntityTable<WorkspaceDefinition, "id">;
   connections: EntityTable<ConnectionProfile, "id">;
   deletedWorkspaces: EntityTable<{ id: string }, "id">;
+  settings: EntityTable<SqlAbbreviationSettings & { id: string }, "id">;
 };
 storage.version(1).stores({ workspaces: "id,name,updatedAt" });
 storage
@@ -41,10 +46,17 @@ storage.version(3).stores({
   connections: "id,name,engine,updatedAt",
   deletedWorkspaces: "id",
 });
+storage.version(4).stores({
+  workspaces: "id,name,updatedAt",
+  connections: "id,name,engine,updatedAt",
+  deletedWorkspaces: "id",
+  settings: "id",
+});
 export const saveConnection = (profile: ConnectionProfile) =>
   storage.connections.put(parseProfile(profile));
 export const saveWorkspace = (w: WorkspaceDefinition) => {
   const snapshot = structuredClone(w);
+  captureActiveSource(snapshot);
   return storage.transaction(
     "rw",
     storage.workspaces,

@@ -17,7 +17,7 @@ export function WorkspaceManager({
   onCreate,
   onClose,
 }: {
-  mode: "create" | "connections";
+  mode: "create" | "connections" | "attach";
   onCreate: (
     profile?: ConnectionProfile,
     name?: string,
@@ -88,7 +88,11 @@ export function WorkspaceManager({
         >
           <div className="row">
             <Dialog.Title>
-              {mode === "create" ? "New workspace" : "Connections"}
+              {mode === "create"
+                ? "New workspace"
+                : mode === "attach"
+                  ? "Add connection"
+                  : "Connections"}
             </Dialog.Title>
             <Button
               title="Close workspace manager"
@@ -208,7 +212,9 @@ export function WorkspaceManager({
                         disabled={busy || !isTauri()}
                         onClick={() => void create(profile)}
                       >
-                        Open workspace
+                        {mode === "attach"
+                          ? "Add to workspace"
+                          : "Open workspace"}
                       </Button>
                     </>
                   )}

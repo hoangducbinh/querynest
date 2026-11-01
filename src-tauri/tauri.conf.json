@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Database Design Playground",
+  "productName": "Max Learning",
   "version": "1.0.0",
   "identifier": "dev.dbplayground.desktop",
   "build": {
@@ -21,7 +21,13 @@
         "minWidth": 900,
         "minHeight": 620,
         "backgroundColor": "#f6f6f8",
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 12,
+          "y": 21
+        }
       }
     ],
     "security": {

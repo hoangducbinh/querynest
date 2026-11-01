@@ -1,3 +1,4 @@
+import type { RemoteConfig } from "../features/connections/model";
 import type { MssqlConfig } from "../features/connections/model";
 import type { PostgresConfig } from "../features/postgres/model";
 export { duckTypes as dataTypes } from "../lib/duckdb/types";
@@ -42,16 +43,40 @@ export interface TestCase {
   expected: string;
   ordered: boolean;
 }
+export interface SqlAbbreviationSettings {
+  enabled: boolean;
+  snippets: SqlSnippet[];
+}
 export interface SqlSnippet {
   id: string;
   prefix: string;
   description: string;
   body: string;
 }
+export interface WorkspaceSource {
+  parentSourceId?: string;
+  databases?: string[];
+  id: string;
+  name: string;
+  connectionId?: string;
+  connection?: RemoteConfig;
+  schema: DatabaseSchema;
+  data?: Record<string, Record<string, unknown>[]>;
+  diagramPositions?: Record<string, { x: number; y: number }>;
+}
 export interface SqlTab {
+  sourceId?: string;
   id: string;
   name: string;
   sql: string;
+}
+export interface SqlPaneGroup {
+  ids: string[];
+  activeId: string;
+}
+export interface SqlLayout {
+  groups: SqlPaneGroup[];
+  width: number;
 }
 export interface WorkspaceDefinition {
   version: 1;
@@ -63,7 +88,11 @@ export interface WorkspaceDefinition {
   tests: TestCase[];
   sqlTabs?: SqlTab[];
   activeSqlTabId?: string;
+  sqlLayout?: SqlLayout;
+  sources?: WorkspaceSource[];
+  activeSourceId?: string;
   sqlSnippets?: SqlSnippet[];
+  sqlAbbreviationsEnabled?: boolean;
   postgres?: PostgresConfig;
   mssql?: MssqlConfig;
   connectionId?: string;

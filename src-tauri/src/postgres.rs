@@ -233,27 +233,9 @@ async fn open_pool(config: &PgConfig, password: &str) -> Result<PgPool, PgFailur
         .username(&config.user)
         .password(password)
         .ssl_mode(ssl)
-        .application_name("Database Design Playground")
+        .application_name("Max Learning")
         .disable_statement_logging();
-    let pool = PgPoolOptions::new()
-        .max_connections(3)
-        .acquire_timeout(Duration::from_secs(10))
-        .after_connect(|c, _| {
-            Box::pin(async move {
-                sqlx::query("SET statement_timeout = '60s'")
-                    .execute(&mut *c)
-                    .await?;
-                sqlx::query("SET lock_timeout = '5s'")
-                    .execute(&mut *c)
-                    .await?;
-                sqlx::query("SET standard_conforming_strings = on")
-                    .execute(c)
-                    .await?;
-                Ok(())
-            })
-        })
-        .connect_with(options.clone())
-        .await;
+    let pool = pool_options().connect_with(options.clone()).await;
     let pool = match pool {
         Ok(pool) => pool,
         Err(sqlx::Error::PoolTimedOut) => {
@@ -279,6 +261,54 @@ async fn open_pool(config: &PgConfig, password: &str) -> Result<PgPool, PgFailur
     };
     Ok(pool)
 }
+fn pool_options() -> PgPoolOptions {
+    PgPoolOptions::new()
+        .max_connections(3)
+        .acquire_timeout(Duration::from_secs(10))
+        .after_connect(|c, _| {
+            Box::pin(async move {
+                sqlx::query("SET statement_timeout = '60s'")
+                    .execute(&mut *c)
+                    .await?;
+                sqlx::query("SET lock_timeout = '5s'")
+                    .execute(&mut *c)
+                    .await?;
+                sqlx::query("SET standard_conforming_strings = on")
+                    .execute(c)
+                    .await?;
+                Ok(())
+            })
+        })
+}
+#[tauri::command]
+pub async fn pg_databases(
+    state: tauri::State<'_, PgState>,
+    session_id: String,
+) -> Result<Vec<String>, PgFailure> {
+    let s = session(&state, &session_id).await?;
+    Ok(sqlx::query_scalar("SELECT datname::text FROM pg_database WHERE datallowconn AND NOT datistemplate AND has_database_privilege(oid, 'CONNECT') ORDER BY datname").fetch_all(&s.pool).await?)
+}
+#[tauri::command]
+pub async fn pg_open_database(
+    state: tauri::State<'_, PgState>,
+    session_id: String,
+    database: String,
+) -> Result<Value, PgFailure> {
+    open_database(&state, &session_id, &database).await
+}
+async fn open_database(
+    state: &PgState,
+    session_id: &str,
+    database: &str,
+) -> Result<Value, PgFailure> {
+    if database.is_empty() || database.contains('\0') {
+        return Err(PgFailure::message("Invalid database name."));
+    }
+    let source = session(&state, &session_id).await?;
+    let options = (*source.pool.connect_options()).clone().database(&database);
+    let pool = pool_options().connect_with(options).await?;
+    connect_pool(&state, pool, source.read_only).await
+}
 #[tauri::command]
 pub async fn pg_test_connection(config: PgConfig, password: String) -> Result<Value, PgFailure> {
     let pool = open_pool(&config, &password).await?;
@@ -295,6 +325,9 @@ pub async fn pg_test_connection(config: PgConfig, password: String) -> Result<Va
 }
 async fn connect(state: &PgState, config: PgConfig, password: String) -> Result<Value, PgFailure> {
     let pool = open_pool(&config, &password).await?;
+    connect_pool(state, pool, config.read_only).await
+}
+async fn connect_pool(state: &PgState, pool: PgPool, read_only: bool) -> Result<Value, PgFailure> {
     let mut connection = pool.acquire().await?;
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *connection)
@@ -310,7 +343,7 @@ async fn connect(state: &PgState, config: PgConfig, password: String) -> Result<
             pool,
             connection: Mutex::new(Some(connection)),
             pid,
-            read_only: config.read_only,
+            read_only,
             running: AtomicBool::new(false),
         }),
     );
@@ -1014,6 +1047,65 @@ mod tests {
         pool.close().await;
         if let Err(error) = result {
             std::panic::resume_unwind(error);
+        }
+    }
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL fixture on localhost:55440"]
+    async fn live_postgres_database_contexts() {
+        let state = PgState::default();
+        let config = PgConfig {
+            host: "127.0.0.1".into(),
+            port: 55440,
+            database: "postgres".into(),
+            user: "postgres".into(),
+            ssl_mode: "disable".into(),
+            read_only: true,
+        };
+        let first = connect(&state, config, "multidb_qa_only".into())
+            .await
+            .unwrap();
+        let first_id = first["sessionId"].as_str().unwrap();
+        let second = open_database(&state, first_id, "analytics_qa")
+            .await
+            .unwrap();
+        let second_id = second["sessionId"].as_str().unwrap();
+        assert_ne!(first_id, second_id);
+        let a = session(&state, first_id).await.unwrap();
+        let b = session(&state, second_id).await.unwrap();
+        assert!(b.read_only);
+        let (ra, rb) = tokio::join!(
+            run(&a, "SELECT current_database() AS db", 10),
+            run(&b, "SELECT current_database() AS db", 10)
+        );
+        assert_eq!(ra.unwrap().rows[0]["db"], json!("postgres"));
+        assert_eq!(rb.unwrap().rows[0]["db"], json!("analytics_qa"));
+        assert!(
+            run(&b, "CREATE TABLE forbidden(id integer)", 10)
+                .await
+                .is_err()
+        );
+        assert!(
+            open_database(&state, first_id, "absent_db_qa")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            run(&a, "SELECT current_database() AS db", 10)
+                .await
+                .unwrap()
+                .rows[0]["db"],
+            json!("postgres")
+        );
+        assert!(
+            second["catalog"]["tables"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "database_marker")
+        );
+        for s in [a, b] {
+            s.connection.lock().await.take();
+            s.pool.close().await;
         }
     }
 }

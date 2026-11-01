@@ -1,7 +1,15 @@
 import { isTauri } from "../postgres/client";
 import { useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { X } from "lucide-react";
+import {
+  X,
+  Database,
+  ChevronRight,
+  CheckCircle2,
+  AlertCircle,
+  LoaderCircle,
+  Plug,
+} from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { pgError } from "../postgres/model";
 import { testRemoteConnection } from "./client";
@@ -32,6 +40,8 @@ export function ConnectionDialog({
   const [success, setSuccess] = useState("");
   const busy = action !== null;
   const config = value.config;
+  const windowsAuth =
+    value.engine === "mssql" && value.config.auth === "windows";
   function update(patch: Partial<RemoteConfig["config"]>) {
     setValue(
       (current) =>
@@ -47,6 +57,7 @@ export function ConnectionDialog({
       config: { ...config, port: Number(port) },
     } as RemoteConfig);
   async function submit(test: boolean) {
+    if (busy) return;
     setError("");
     setSuccess("");
     setAction(test ? "test" : "connect");
@@ -54,7 +65,7 @@ export function ConnectionDialog({
       if (test) {
         const result = await testRemoteConnection(parsed(), password);
         setSuccess(
-          `Connection successful · ${engineName(value.engine)} ${result.serverVersion}`,
+          `Connected · ${engineName(value.engine)} ${result.serverVersion}`,
         );
       } else {
         await onConnect(
@@ -71,6 +82,18 @@ export function ConnectionDialog({
       setAction(null);
     }
   }
+  const securityLabel =
+    value.engine === "postgres"
+      ? value.config.sslMode === "verify-full"
+        ? "Verified SSL"
+        : value.config.sslMode === "require"
+          ? "Encrypted SSL"
+          : "SSL off"
+      : value.config.encrypt
+        ? value.config.trustCertificate
+          ? "TLS · verification off"
+          : "Verified TLS"
+        : "TLS off";
   return (
     <Dialog.Root
       open
@@ -82,39 +105,47 @@ export function ConnectionDialog({
         <Dialog.Overlay className="modal-overlay" />
         <Dialog.Content
           className="modal pg-connection-dialog"
-          onEscapeKeyDown={(e) => {
-            if (busy) e.preventDefault();
+          onEscapeKeyDown={(event) => {
+            if (busy) event.preventDefault();
           }}
-          onPointerDownOutside={(e) => {
-            if (busy) e.preventDefault();
+          onPointerDownOutside={(event) => {
+            if (busy) event.preventDefault();
           }}
         >
-          <div className="row">
-            <Dialog.Title>
-              {profileMode
-                ? "Connection settings"
-                : `Connect to ${engineName(value.engine)}`}
-            </Dialog.Title>
+          <div className="connection-dialog-heading">
+            <span className="connection-dialog-icon">
+              <Database size={19} />
+            </span>
+            <div>
+              <Dialog.Title>
+                {profileMode
+                  ? "Connection settings"
+                  : `Connect to ${engineName(value.engine)}`}
+              </Dialog.Title>
+              <Dialog.Description>
+                {profileMode
+                  ? `${engineName(value.engine)} · reusable connection`
+                  : "Passwords are never saved."}
+              </Dialog.Description>
+            </div>
             <Button
+              className="connection-close"
               title="Close connection settings"
+              aria-label="Close connection settings"
               disabled={busy}
               onClick={onClose}
             >
               <X size={15} />
             </Button>
           </div>
-          <Dialog.Description>
-            {profileMode
-              ? "Save a reusable connection. Passwords are never saved."
-              : "Passwords are never saved. Connections stay available while switching workspaces; inactive sessions expire after 30 minutes."}
-          </Dialog.Description>
           <form
-            onSubmit={(e) => {
-              e.preventDefault();
+            onSubmit={(event) => {
+              event.preventDefault();
               void submit(false);
             }}
           >
             <fieldset
+              className="connection-fields"
               disabled={busy}
               onChange={() => {
                 setError("");
@@ -127,7 +158,7 @@ export function ConnectionDialog({
                   <input
                     autoFocus
                     value={name}
-                    onChange={(e) => setName(e.target.value)}
+                    onChange={(event) => setName(event.target.value)}
                     placeholder={`${config.database} · ${engineName(value.engine)}`}
                     maxLength={100}
                   />
@@ -139,8 +170,10 @@ export function ConnectionDialog({
                   <input
                     autoFocus={!profileMode}
                     autoComplete="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
                     value={config.host}
-                    onChange={(e) => update({ host: e.target.value })}
+                    onChange={(event) => update({ host: event.target.value })}
                     placeholder="localhost or server IP"
                   />
                 </label>
@@ -151,7 +184,7 @@ export function ConnectionDialog({
                     min={1}
                     max={65535}
                     value={port}
-                    onChange={(e) => setPort(e.target.value)}
+                    onChange={(event) => setPort(event.target.value)}
                   />
                 </label>
               </div>
@@ -159,8 +192,10 @@ export function ConnectionDialog({
                 Database
                 <input
                   autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
                   value={config.database}
-                  onChange={(e) => update({ database: e.target.value })}
+                  onChange={(event) => update({ database: event.target.value })}
                 />
               </label>
               {value.engine === "mssql" && (
@@ -168,8 +203,8 @@ export function ConnectionDialog({
                   Authentication
                   <select
                     value={value.config.auth || "sql"}
-                    onChange={(e) =>
-                      update({ auth: e.target.value as "sql" | "windows" })
+                    onChange={(event) =>
+                      update({ auth: event.target.value as "sql" | "windows" })
                     }
                   >
                     <option value="sql">SQL Server login</option>
@@ -177,114 +212,157 @@ export function ConnectionDialog({
                   </select>
                 </label>
               )}
-              {!(
-                value.engine === "mssql" && value.config.auth === "windows"
-              ) && (
-                <>
+              {!windowsAuth && (
+                <div className="connection-credentials">
                   <label>
                     {value.engine === "mssql" ? "SQL login" : "User"}
                     <input
                       autoComplete="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
                       value={config.user}
-                      onChange={(e) => update({ user: e.target.value })}
+                      onChange={(event) => update({ user: event.target.value })}
                     />
                   </label>
                   <label>
-                    Password{profileMode && " (for testing only)"}
+                    <span>
+                      Password{profileMode && <small> · test only</small>}
+                    </span>
                     <input
                       type="password"
                       autoComplete="new-password"
                       value={password}
-                      onChange={(e) => setPassword(e.target.value)}
+                      onChange={(event) => setPassword(event.target.value)}
                     />
                   </label>
-                </>
+                </div>
               )}
-              {value.engine === "postgres" ? (
-                <label>
-                  SSL
-                  <select
-                    value={value.config.sslMode}
-                    onChange={(e) =>
-                      update({
-                        sslMode: e.target.value as
-                          "verify-full" | "require" | "disable",
-                      })
-                    }
-                  >
-                    <option value="verify-full">
-                      Verify certificate and hostname
-                    </option>
-                    <option value="require">
-                      Encryption only (no certificate check)
-                    </option>
-                    <option value="disable">Disabled — local connection</option>
-                  </select>
-                </label>
-              ) : (
-                <>
-                  <label className="check-label">
-                    <input
-                      type="checkbox"
-                      checked={value.config.encrypt}
-                      onChange={(e) => update({ encrypt: e.target.checked })}
-                    />
-                    Encrypt connection
-                  </label>
-                  <label className="check-label">
-                    <input
-                      type="checkbox"
-                      checked={value.config.trustCertificate}
-                      disabled={!value.config.encrypt}
-                      onChange={(e) =>
-                        update({ trustCertificate: e.target.checked })
-                      }
-                    />
-                    Trust server certificate (local/self-signed)
-                  </label>
-                </>
-              )}
-              <label className="check-label">
-                <input
-                  type="checkbox"
-                  checked={config.readOnly}
-                  onChange={(e) => update({ readOnly: e.target.checked })}
-                />
-                {value.engine === "mssql"
-                  ? "Query-only guard"
-                  : "Read-only connection"}
-              </label>
-              {value.engine === "mssql" && (
-                <p className="connection-hint">
-                  TCP port required. Windows authentication uses your current
-                  account in the Windows app. Query-only blocks write
-                  statements; use a database account with read-only permissions
-                  for enforced protection.
+              {windowsAuth && (
+                <p className="connection-inline-hint">
+                  Uses the current account in the Windows app.
                 </p>
               )}
+              <label className="connection-readonly">
+                <span>
+                  <strong>
+                    {value.engine === "mssql"
+                      ? "Query-only guard"
+                      : "Read-only connection"}
+                  </strong>
+                  <small>
+                    {value.engine === "mssql"
+                      ? "Block write statements in this app."
+                      : "Prevent changes to database data."}
+                  </small>
+                </span>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  aria-label={
+                    value.engine === "mssql"
+                      ? "Query-only guard"
+                      : "Read-only connection"
+                  }
+                  checked={config.readOnly}
+                  onChange={(event) =>
+                    update({ readOnly: event.target.checked })
+                  }
+                />
+              </label>
+              <details className="connection-security">
+                <summary>
+                  <ChevronRight size={13} />
+                  <span>Security</span>
+                  <small>{securityLabel}</small>
+                </summary>
+                <div className="connection-security-fields">
+                  {value.engine === "postgres" ? (
+                    <label>
+                      SSL
+                      <select
+                        value={value.config.sslMode}
+                        onChange={(event) =>
+                          update({
+                            sslMode: event.target.value as
+                              "verify-full" | "require" | "disable",
+                          })
+                        }
+                      >
+                        <option value="verify-full">
+                          Verify certificate and hostname
+                        </option>
+                        <option value="require">
+                          Encryption only (no certificate check)
+                        </option>
+                        <option value="disable">
+                          Disabled — local connection
+                        </option>
+                      </select>
+                    </label>
+                  ) : (
+                    <>
+                      <label className="check-label">
+                        <input
+                          type="checkbox"
+                          checked={value.config.encrypt}
+                          onChange={(event) =>
+                            update({ encrypt: event.target.checked })
+                          }
+                        />
+                        Encrypt connection
+                      </label>
+                      <label className="check-label">
+                        <input
+                          type="checkbox"
+                          checked={value.config.trustCertificate}
+                          disabled={!value.config.encrypt}
+                          onChange={(event) =>
+                            update({ trustCertificate: event.target.checked })
+                          }
+                        />
+                        Trust server certificate{" "}
+                        <span className="connection-inline-hint">
+                          Local / self-signed
+                        </span>
+                      </label>
+                    </>
+                  )}
+                </div>
+              </details>
             </fieldset>
             {error && (
-              <p role="alert" className="pg-error">
-                {error}
-              </p>
+              <div role="alert" className="connection-feedback is-error">
+                <AlertCircle size={14} />
+                <span>{error}</span>
+              </div>
             )}
             {success && (
-              <p role="status" className="connection-success">
-                {success}
-              </p>
+              <div role="status" className="connection-feedback is-success">
+                <CheckCircle2 size={14} />
+                <span>{success}</span>
+              </div>
             )}
             <div className="pg-dialog-actions">
               <Button
+                className="connection-test"
                 disabled={busy || !isTauri()}
                 title={!isTauri() ? "Test in the desktop app" : undefined}
                 onClick={() => void submit(true)}
               >
+                {action === "test" ? (
+                  <LoaderCircle className="spin" size={13} />
+                ) : (
+                  <Plug size={13} />
+                )}{" "}
                 {action === "test" ? "Testing…" : "Test connection"}
               </Button>
               <Button disabled={busy} onClick={onClose}>
                 Cancel
               </Button>
               <Button className="primary" type="submit" disabled={busy}>
+                {action === "connect" && (
+                  <LoaderCircle className="spin" size={13} />
+                )}{" "}
                 {action === "connect"
                   ? profileMode
                     ? "Saving…"

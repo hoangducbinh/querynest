@@ -1,5 +1,6 @@
-import { useState } from "react";
-import { Code2, Plus, X } from "lucide-react";
+import * as Popover from "@radix-ui/react-popover";
+import { useEffect, useRef, useState } from "react";
+import { Code2, MoreHorizontal, Plus, X, Check } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { confirmAction } from "../../lib/dialogs";
 import type { SqlTab } from "../../types/schema";
@@ -8,13 +9,48 @@ interface Props {
   activeId: string;
   onTabsChange: (tabs: SqlTab[], activeId: string) => void;
   busy: boolean;
+  newTabConnectionName?: string;
 }
-export function QueryTabs({ tabs, activeId, onTabsChange, busy }: Props) {
+export function QueryTabs({
+  tabs,
+  activeId,
+  onTabsChange,
+  busy,
+  newTabConnectionName,
+}: Props) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [tabName, setTabName] = useState("");
+  const container = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(0);
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  useEffect(() => {
+    const element = container.current;
+    if (!element) return;
+    const observer = new ResizeObserver(([entry]) =>
+      setWidth(entry.contentRect.width),
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const capacity = Math.max(1, Math.floor((width - 64) / 153));
+  const overflowing = tabs.length > capacity;
+  const visible = overflowing
+    ? tabs
+        .filter((tab, index) => index < capacity || tab.id === activeId)
+        .slice(0, capacity)
+    : tabs;
+  if (overflowing && !visible.some((tab) => tab.id === activeId))
+    visible[visible.length - 1] =
+      tabs.find((tab) => tab.id === activeId) ?? tabs[0];
   return (
-    <div className="sql-tabs" role="tablist" aria-label="SQL queries">
-      {tabs.map((tab) => (
+    <div
+      ref={container}
+      className="sql-tabs"
+      role="tablist"
+      aria-label="SQL queries"
+    >
+      {visible.map((tab) => (
         <div
           className={"sql-tab " + (tab.id === activeId ? "active" : "")}
           key={tab.id}
@@ -57,7 +93,7 @@ export function QueryTabs({ tabs, activeId, onTabsChange, busy }: Props) {
               }}
             >
               <Code2 size={13} />
-              {tab.name}
+              <span>{tab.name}</span>
             </button>
           )}
           <button
@@ -97,8 +133,69 @@ export function QueryTabs({ tabs, activeId, onTabsChange, busy }: Props) {
           </button>
         </div>
       ))}
+      {overflowing && (
+        <Popover.Root
+          open={open}
+          onOpenChange={(value) => {
+            setOpen(value);
+            if (!value) setSearch("");
+          }}
+        >
+          <Popover.Trigger asChild>
+            <Button
+              aria-label="List SQL tabs"
+              title={`All SQL tabs (${tabs.length})`}
+            >
+              <MoreHorizontal size={16} />
+            </Button>
+          </Popover.Trigger>
+          <Popover.Portal>
+            <Popover.Content
+              className="sql-tab-menu"
+              sideOffset={6}
+              align="start"
+              onOpenAutoFocus={(e) => e.preventDefault()}
+            >
+              <input
+                aria-label="Find SQL tab"
+                placeholder="Find a tab…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+              <div className="sql-tab-menu-list">
+                {tabs
+                  .filter((tab) =>
+                    tab.name.toLowerCase().includes(search.toLowerCase()),
+                  )
+                  .map((tab) => (
+                    <button
+                      key={tab.id}
+                      onClick={() => {
+                        onTabsChange(tabs, tab.id);
+                        setOpen(false);
+                        setSearch("");
+                      }}
+                    >
+                      <Code2 size={14} />
+                      <span>{tab.name}</span>
+                      {tab.id === activeId && <Check size={14} />}
+                    </button>
+                  ))}
+                {!tabs.some((tab) =>
+                  tab.name.toLowerCase().includes(search.toLowerCase()),
+                ) && <span className="snippet-status">No matching tabs</span>}
+              </div>
+            </Popover.Content>
+          </Popover.Portal>
+        </Popover.Root>
+      )}
       <Button
-        title="New SQL tab"
+        title={
+          newTabConnectionName
+            ? `New SQL tab · ${newTabConnectionName}`
+            : "New SQL tab"
+        }
+        aria-label="New SQL tab"
         onClick={() => {
           let number = 1;
           while (tabs.some((tab) => tab.name === `query-${number}.sql`))

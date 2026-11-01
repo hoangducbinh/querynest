@@ -1,24 +1,60 @@
-import { SnippetSettings } from "./SnippetSettings";
+import * as Popover from "@radix-ui/react-popover";
+import { createPortal } from "react-dom";
+import { bindNewTabs } from "./tabs";
+import {
+  initialPane,
+  updatePaneTabs,
+  splitPane,
+  movePaneTab,
+  restoreSqlLayout,
+} from "./panes";
 import { useRef, useState } from "react";
 import {
   LoaderCircle,
+  MoreHorizontal,
   PanelBottom,
   Play,
-  Braces,
   Columns2,
+  ArrowLeftRight,
   X,
+  Plug,
 } from "lucide-react";
-import type { SqlTab } from "../../types/schema";
+import type { SqlDialect } from "./data-types";
+import type { SqlTab, SqlLayout, DatabaseSchema } from "../../types/schema";
 import { QueryTabs } from "./QueryTabs";
 import { Button } from "../../components/ui/button";
 import { ResultGrid } from "../sample-data/ResultGrid";
 import { SqlEditor } from "./Editor";
 import type { SqlResult } from "./execution";
 import type { SqlDiagnostic } from "./diagnostics";
+export interface TabContext {
+  connectionRootId?: string;
+  database?: string;
+  databases?: string[];
+  sourceId: string;
+  schema: DatabaseSchema;
+  dialect: SqlDialect;
+  label: string;
+  remote: boolean;
+}
 interface Props {
+  connectionHost?: HTMLElement | null;
+  connectionOptions?: { id: string; name: string }[];
+  newTabSourceId?: string;
+  newTabConnectionName?: string;
+  autoFocus?: boolean;
+  getTabContext?: (tabId: string) => TabContext;
+  tabContext?: TabContext;
+  onTabConnectionChange?: (tabId: string, sourceId: string) => void;
+  onConnectTab?: (tabId: string) => void;
+  onTabDatabaseChange?: (tabId: string, database: string) => void;
+  onDiscoverTabDatabases?: (tabId: string) => void;
+  validateTab?: (tabId: string, sql: string) => Promise<SqlDiagnostic[]>;
   tabs: SqlTab[];
   activeId: string;
-  onTabsChange: (tabs: SqlTab[], activeId: string) => void;
+  onTabsChange: (tabs: SqlTab[], activeId: string, layout?: SqlLayout) => void;
+  layout?: SqlLayout;
+  onLayoutChange: (layout: SqlLayout) => void;
   value: string;
   onChange: (sql: string) => void;
   onRun: (tabId?: string, sql?: string) => void;
@@ -29,13 +65,90 @@ interface Props {
   onSelection: (sql: string, tabId?: string) => void;
   allResults?: Record<string, SqlResult[]>;
   onSplit?: () => void;
+  onMoveTab?: () => void;
   splitOpen?: boolean;
   validate?: (sql: string) => Promise<SqlDiagnostic[]>;
   validationSource?: string;
   onCancel?: () => void;
 }
+function SqlConnectionControls({
+  tabContext,
+  connectionOptions,
+  busy,
+  activeId,
+  onTabConnectionChange,
+  onTabDatabaseChange,
+  onDiscoverTabDatabases,
+  onConnectTab,
+}: Pick<
+  Props,
+  | "tabContext"
+  | "connectionOptions"
+  | "busy"
+  | "activeId"
+  | "onTabConnectionChange"
+  | "onTabDatabaseChange"
+  | "onDiscoverTabDatabases"
+  | "onConnectTab"
+>) {
+  return (
+    tabContext &&
+    connectionOptions && (
+      <>
+        <select
+          className="sql-connection-select"
+          aria-label="SQL tab connection"
+          value={tabContext.connectionRootId ?? tabContext.sourceId}
+          disabled={busy}
+          onChange={(event) =>
+            onTabConnectionChange?.(activeId, event.target.value)
+          }
+        >
+          {connectionOptions.map((source) => (
+            <option value={source.id} key={source.id}>
+              {source.name}
+            </option>
+          ))}
+        </select>
+        {
+          <select
+            className="sql-database-select"
+            aria-label="SQL tab database"
+            value={tabContext.database ?? "main"}
+            disabled={busy || !tabContext.remote}
+            onFocus={() => onDiscoverTabDatabases?.(activeId)}
+            onChange={(event) =>
+              onTabDatabaseChange?.(activeId, event.target.value)
+            }
+          >
+            {(tabContext.databases ?? ["main"]).map((database) => (
+              <option value={database} key={database}>
+                {database}
+              </option>
+            ))}
+          </select>
+        }
+        {tabContext.remote && (
+          <Button
+            title="Connect or configure this tab's database"
+            aria-label="Connect tab database"
+            disabled={busy}
+            onClick={() => onConnectTab?.(activeId)}
+          >
+            <Plug size={14} />
+          </Button>
+        )}
+      </>
+    )
+  );
+}
+
 function SqlPane({
+  connectionHost,
   tabs,
+  autoFocus,
+  newTabSourceId,
+  newTabConnectionName,
   activeId,
   onTabsChange,
   value,
@@ -50,6 +163,13 @@ function SqlPane({
   validationSource,
   onCancel,
   onSplit,
+  connectionOptions,
+  tabContext,
+  onTabConnectionChange,
+  onConnectTab,
+  onTabDatabaseChange,
+  onDiscoverTabDatabases,
+  onMoveTab,
   splitOpen,
 }: Props) {
   const [selection, setSelection] = useState<{ tab: string; sql: string }>({
@@ -64,7 +184,6 @@ function SqlPane({
   const result = queryResults?.[resultIndex];
   const hasSelection = selection.tab === activeId && !!selection.sql.trim();
   const [validationStatus, setValidationStatus] = useState("");
-  const [settings, setSettings] = useState(false);
   const [ratio, setRatio] = useState(0.7);
   const [results, setResults] = useState(true);
   const split = useRef<HTMLDivElement>(null);
@@ -81,37 +200,87 @@ function SqlPane({
           activeId={activeId}
           onTabsChange={onTabsChange}
           busy={busy}
+          newTabConnectionName={
+            newTabConnectionName ??
+            connectionOptions?.find((source) => source.id === newTabSourceId)
+              ?.name
+          }
         />
         <div className="row">
+          {!connectionHost && (
+            <SqlConnectionControls
+              tabContext={tabContext}
+              connectionOptions={connectionOptions}
+              busy={busy}
+              activeId={activeId}
+              onTabConnectionChange={onTabConnectionChange}
+              onTabDatabaseChange={onTabDatabaseChange}
+              onDiscoverTabDatabases={onDiscoverTabDatabases}
+              onConnectTab={onConnectTab}
+            />
+          )}
           <span
             className="sql-validation-status"
             role="status"
-            title={`${validationSource ?? "DuckDB"} checks SQL without executing it`}
+            title={
+              validationStatus ||
+              `${validationSource ?? "DuckDB"} checks SQL without executing it`
+            }
           >
             {validationStatus}
           </span>
-          <Button
-            title={splitOpen ? "Close SQL split" : "Split SQL editor"}
-            aria-label={splitOpen ? "Close SQL split" : "Split SQL editor"}
-            onClick={onSplit}
-            disabled={busy}
-          >
-            {splitOpen ? <X size={14} /> : <Columns2 size={14} />}
-          </Button>
-          <Button
-            title="Configure SQL abbreviations"
-            onClick={() => setSettings(true)}
-          >
-            <Braces size={14} />
-            Abbreviations
-          </Button>
-          <Button
-            title={results ? "Hide results" : "Show results"}
-            aria-pressed={results}
-            onClick={() => setResults(!results)}
-          >
-            <PanelBottom size={15} />
-          </Button>
+          <Popover.Root>
+            <Popover.Trigger asChild>
+              <Button title="SQL pane options" aria-label="SQL pane options">
+                <MoreHorizontal size={15} />
+              </Button>
+            </Popover.Trigger>
+            <Popover.Portal>
+              <Popover.Content
+                className="sql-pane-menu"
+                sideOffset={6}
+                align="end"
+                onCloseAutoFocus={(event) => event.preventDefault()}
+              >
+                {splitOpen && (
+                  <Popover.Close asChild>
+                    <Button
+                      title="Move current tab to other split"
+                      aria-label="Move current tab to other split"
+                      onClick={onMoveTab}
+                      disabled={busy}
+                    >
+                      <ArrowLeftRight size={14} />
+                      Move tab to other pane
+                    </Button>
+                  </Popover.Close>
+                )}
+                <Popover.Close asChild>
+                  <Button
+                    title={splitOpen ? "Close SQL split" : "Split SQL editor"}
+                    aria-label={
+                      splitOpen ? "Close SQL split" : "Split SQL editor"
+                    }
+                    onClick={onSplit}
+                    disabled={busy}
+                  >
+                    {splitOpen ? <X size={14} /> : <Columns2 size={14} />}
+                    {splitOpen ? "Close split" : "Split editor"}
+                  </Button>
+                </Popover.Close>
+                <Popover.Close asChild>
+                  <Button
+                    title={results ? "Hide results" : "Show results"}
+                    aria-pressed={results}
+                    onClick={() => setResults(!results)}
+                  >
+                    <PanelBottom size={15} />
+                    {results ? "Hide results" : "Show results"}
+                  </Button>
+                </Popover.Close>
+              </Popover.Content>
+            </Popover.Portal>
+          </Popover.Root>
           {busy && onCancel && <Button onClick={onCancel}>Cancel query</Button>}
           <Button
             title={
@@ -119,7 +288,8 @@ function SqlPane({
                 ? "Run selected T-SQL or the whole tab. Use GO on its own line to separate batches."
                 : "Run selected SQL or the whole tab. Separate SELECT queries with a blank line or semicolon."
             }
-            className="primary"
+            className="primary sql-run-button"
+            aria-label={hasSelection ? "Run selected SQL" : "Run SQL"}
             disabled={disabled}
             onClick={() =>
               onRun(activeId, hasSelection ? selection.sql : value)
@@ -130,7 +300,7 @@ function SqlPane({
             ) : (
               <Play size={13} />
             )}
-            {hasSelection ? "Run selection" : "Run"}
+            <span>{hasSelection ? "Run selection" : "Run"}</span>
             <kbd>⌘ ↵</kbd>
           </Button>
         </div>
@@ -142,6 +312,9 @@ function SqlPane({
         >
           <SqlEditor
             key={activeId}
+            autoFocus={autoFocus}
+            schema={tabContext?.schema}
+            dialect={tabContext?.dialect}
             validationEnabled={!disabled}
             validate={validate}
             validationSource={validationSource}
@@ -260,45 +433,79 @@ function SqlPane({
           </>
         )}
       </div>
-      {settings && <SnippetSettings onClose={() => setSettings(false)} />}
     </section>
   );
 }
 
 export function SqlWorkspace(props: Props) {
-  const [paneIds, setPaneIds] = useState([props.activeId, ""]);
-  const [width, setWidth] = useState(50);
+  const [focusTabId, setFocusTabId] = useState("");
+  const layout = restoreSqlLayout(props.tabs, props.activeId, props.layout);
+  const { groups, width } = layout;
+  const setWidth = (width: number) =>
+    props.onLayoutChange({ ...layout, width });
   const container = useRef<HTMLDivElement>(null);
-  const splitOpen = !!paneIds[1];
+  const splitOpen = groups.length === 2;
   function toggleSplit() {
     if (splitOpen) {
-      const active = paneIds.find((id) => id === props.activeId) ?? paneIds[0];
-      setPaneIds([active, ""]);
+      props.onLayoutChange({
+        ...layout,
+        groups: [initialPane(props.tabs, props.activeId)],
+      });
       return;
     }
-    const other = props.tabs.find((tab) => tab.id !== paneIds[0]);
-    const next = other ?? {
-      id: crypto.randomUUID(),
-      name: "split.sql",
-      sql: "",
-    };
-    if (!other) props.onTabsChange([...props.tabs, next], props.activeId);
-    setPaneIds([paneIds[0], next.id]);
+    const next = splitPane(props.tabs, groups[0]);
+    props.onTabsChange(
+      bindNewTabs(
+        next.tabs,
+        props.tabs,
+        props.newTabSourceId ?? props.getTabContext?.(props.activeId).sourceId,
+      ),
+      props.activeId,
+      {
+        ...layout,
+        groups: next.groups,
+      },
+    );
   }
   return (
     <div
       className={"sql-panes " + (splitOpen ? "is-split" : "")}
       ref={container}
     >
-      {paneIds.filter(Boolean).map((id, index) => {
+      {props.connectionHost &&
+        createPortal(
+          <div
+            className="titlebar-connection-controls"
+            role="group"
+            aria-label="Active SQL tab database"
+            title={`Database for ${props.tabs.find((tab) => tab.id === props.activeId)?.name ?? "active SQL tab"}`}
+          >
+            <SqlConnectionControls
+              {...props}
+              tabContext={
+                props.getTabContext?.(props.activeId) ?? props.tabContext
+              }
+            />
+          </div>,
+          props.connectionHost,
+        )}
+      {groups.map((group, index) => {
+        const paneTabs = group.ids.flatMap((id) => {
+          const tab = props.tabs.find((tab) => tab.id === id);
+          return tab ? [tab] : [];
+        });
         const tab =
-          props.tabs.find((item) => item.id === id) ??
-          props.tabs.find((item) => item.id === props.activeId) ??
-          props.tabs[0];
+          paneTabs.find((item) => item.id === group.activeId) ?? paneTabs[0];
+        if (!tab) return null;
         return (
           <div
             key={index}
-            className="sql-pane-container"
+            className={
+              "sql-pane-container " +
+              (props.activeId === tab.id ? "is-active" : "")
+            }
+            role="region"
+            aria-label={`SQL pane ${index + 1}`}
             style={{
               flex: splitOpen
                 ? index === 0
@@ -313,19 +520,68 @@ export function SqlWorkspace(props: Props) {
           >
             <SqlPane
               {...props}
+              tabs={paneTabs}
+              autoFocus={focusTabId === tab.id}
+              tabContext={props.getTabContext?.(tab.id)}
+              validate={
+                props.validateTab
+                  ? (sql) => props.validateTab!(tab.id, sql)
+                  : props.validate
+              }
+              validationSource={
+                props.getTabContext?.(tab.id).label ?? props.validationSource
+              }
               activeId={tab.id}
               value={tab.sql}
               splitOpen={splitOpen}
               onSplit={toggleSplit}
+              onMoveTab={() => {
+                const next = movePaneTab(props.tabs, groups, index);
+                props.onTabsChange(
+                  bindNewTabs(
+                    next.tabs,
+                    props.tabs,
+                    props.newTabSourceId ??
+                      props.getTabContext?.(tab.id).sourceId,
+                  ),
+                  next.activeId,
+                  {
+                    ...layout,
+                    groups: next.groups,
+                  },
+                );
+                requestAnimationFrame(() => {
+                  container.current
+                    ?.querySelectorAll(".sql-pane-container")
+                    [1 - index]?.querySelector<HTMLElement>(
+                      '[role="tab"][aria-selected="true"]',
+                    )
+                    ?.focus();
+                });
+              }}
               queryResults={
                 props.allResults?.[tab.id] ??
                 (tab.id === props.activeId ? props.queryResults : undefined)
               }
               onTabsChange={(tabs, active) => {
-                setPaneIds((ids) =>
-                  ids.map((value, i) => (i === index ? active : value)),
+                if (!props.tabs.some((tab) => tab.id === active))
+                  setFocusTabId(active);
+                const next = updatePaneTabs(
+                  props.tabs,
+                  groups,
+                  index,
+                  bindNewTabs(
+                    tabs,
+                    props.tabs,
+                    props.newTabSourceId ??
+                      props.getTabContext?.(tab.id).sourceId,
+                  ),
+                  active,
                 );
-                props.onTabsChange(tabs, active);
+                props.onTabsChange(next.tabs, active, {
+                  ...layout,
+                  groups: next.groups,
+                });
               }}
               onChange={(sql) =>
                 props.onTabsChange(
@@ -377,7 +633,7 @@ export function SqlWorkspace(props: Props) {
                   )
                     return;
                   event.preventDefault();
-                  setWidth((value) =>
+                  setWidth(
                     event.key === "Home"
                       ? 25
                       : event.key === "End"
@@ -386,7 +642,7 @@ export function SqlWorkspace(props: Props) {
                             25,
                             Math.min(
                               75,
-                              value + (event.key === "ArrowLeft" ? -5 : 5),
+                              width + (event.key === "ArrowLeft" ? -5 : 5),
                             ),
                           ),
                   );

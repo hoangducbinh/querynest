@@ -1,12 +1,36 @@
+import { WorkspaceBrowser } from "../features/workspaces/WorkspaceBrowser";
+import { WorkspaceConnectionControls } from "../features/connections/WorkspaceConnectionControls";
+import { SnippetSettings } from "../features/sql/SnippetSettings";
+import { useLoadSnippetPreferences } from "../features/sql/snippet-preferences";
+import { WindowControls } from "../lib/platform/WindowControls";
+import {
+  desktopPlatform,
+  useDesktopChrome,
+} from "../lib/platform/desktop-chrome";
+import { ConnectionMenu } from "../features/connections/ConnectionMenu";
+import { MultiSqlWorkspace } from "../features/connections/MultiSqlWorkspace";
+import {
+  activateSource,
+  attachDatabase,
+  attachSource,
+  removeSource,
+  workspaceSources,
+  sourceSessionKey,
+  updateSource,
+  captureActiveSource,
+  tabSource,
+} from "../features/connections/sources";
+import { restoreSqlLayout, updatePaneTabs } from "../features/sql/panes";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { sampleDuckValue } from "../lib/duckdb/values";
 import { invalidateSession } from "../features/connections/sessions";
 import { readDarkAppearance, saveDarkAppearance } from "./appearance";
 import * as Dialog from "@radix-ui/react-dialog";
-import * as Popover from "@radix-ui/react-popover";
 import {
+  Braces,
   Check,
   ChevronDown,
+  ChevronRight,
   Code2,
   Database,
   Download,
@@ -26,7 +50,6 @@ import {
   Sun,
   Table2,
   Terminal,
-  Trash2,
   Undo2,
   Upload,
   X,
@@ -73,6 +96,7 @@ type Mode = "data" | "relations" | "sql" | "tests";
 const modes = [
   { id: "data", label: "Data", icon: Table2 },
   { id: "sql", label: "SQL", icon: Code2 },
+  { id: "relations", label: "Relations", icon: Waypoints },
   { id: "tests", label: "Tests", icon: FlaskConical },
 ] as const;
 const EMPTY_ROWS: Record<string, unknown>[] = [];
@@ -88,13 +112,26 @@ function signature(w: WorkspaceDefinition) {
   });
 }
 export default function App() {
+  useLoadSnippetPreferences();
+  const [abbreviations, setAbbreviations] = useState(false);
   const { workspace: w, edit, load, undo, redo, past, future } = useStore();
   const [mode, setMode] = useState<Mode>("sql");
+  useLayoutEffect(() => {
+    if (mode !== "sql" || !w.sources) return;
+    const source = tabSource(w, activeSqlTab(w));
+    if (source.id !== w.activeSourceId)
+      edit((draft) => activateSource(draft, source.id));
+  }, [mode, w, edit]);
+
   const [selected, setSelected] = useState("");
   const [dataTable, setDataTable] = useState("");
   const [search, setSearch] = useState("");
+  const [expandedTables, setExpandedTables] = useState<string[]>([]);
   const [left, setLeft] = useState(true);
-  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [connectionRevision, setConnectionRevision] = useState(0);
+  const [connectionHost, setConnectionHost] = useState<HTMLDivElement | null>(
+    null,
+  );
   const [sidebarWidth, setSidebarWidth] = useState(190);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const resizeSidebar = (width: number) => {
@@ -113,7 +150,9 @@ export default function App() {
   const [relationshipsTable, setRelationshipsTable] = useState<string | null>(
     null,
   );
+  const platform = desktopPlatform();
   const [dark, setDark] = useState(readDarkAppearance);
+  useDesktopChrome(dark);
   useLayoutEffect(() => {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
     document.documentElement.classList.toggle("dark", dark);
@@ -133,7 +172,9 @@ export default function App() {
   const sqlSelection = useRef({ tabId: "", sql: "" });
 
   const remote = !!(w.postgres || w.mssql);
-  const [manager, setManager] = useState<"create" | "connections" | null>(null);
+  const [manager, setManager] = useState<
+    "create" | "connections" | "attach" | null
+  >(null);
   const [open, setOpen] = useState(false);
   const [ddl, setDdl] = useState(false);
   const [workspaces, setWorkspaces] = useState<WorkspaceDefinition[]>([]);
@@ -202,7 +243,7 @@ export default function App() {
     setRuntime("");
     setQueryResults({});
     setTestResults({});
-    if (remote) {
+    if (remote || (w.sources && mode === "sql")) {
       setBusy(false);
       return;
     }
@@ -223,7 +264,7 @@ export default function App() {
       active = false;
     };
     // The workspace id is the boundary; edits must not implicitly rebuild the runtime.
-  }, [ready, w.id]);
+  }, [ready, w.id, w.activeSourceId, !!w.sources && mode === "sql"]);
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -361,7 +402,7 @@ export default function App() {
   }
   runRef.current = () => {
     if (mode === "sql") {
-      if (remote) remoteRun.current();
+      if (remote || w.sources) remoteRun.current();
       else void run();
     }
   };
@@ -432,6 +473,123 @@ export default function App() {
       setBusy(false);
     }
   }
+  async function selectConnection(sourceId: string) {
+    if (sourceId === (w.activeSourceId ?? "primary")) return true;
+    if (!(await leaveDraft())) return false;
+    edit((draft) => activateSource(draft, sourceId));
+    setDataTable("");
+    setSelected("");
+    setSearch("");
+    return true;
+  }
+  async function selectWorkspaceDatabase(rootId: string, database: string) {
+    if (!(await leaveDraft())) return;
+    edit((draft) => {
+      const sourceId = attachDatabase(draft, rootId, database);
+      if (mode === "sql") {
+        const active = activeSqlTab(draft).id;
+        setSqlTabs(
+          draft,
+          sqlTabs(draft).map((tab) =>
+            tab.id === active ? { ...tab, sourceId } : tab,
+          ),
+          active,
+        );
+      } else activateSource(draft, sourceId);
+    });
+    setDataTable("");
+    setSelected("");
+    setSearch("");
+  }
+  async function addWorkspaceConnection(profile?: ConnectionProfile) {
+    if (!profile || !(await leaveDraft())) return false;
+    edit((draft) => {
+      const sourceId = attachSource(draft, profile);
+      activateSource(draft, sourceId);
+      const tabs = sqlTabs(draft);
+      const active = activeSqlTab(draft).id;
+      const existing = tabs.find((tab) => tab.sourceId === sourceId);
+      if (existing) {
+        setSqlTabs(draft, tabs, existing.id);
+        return;
+      }
+      const tab = { id: id(), name: profile.name + ".sql", sql: "", sourceId };
+      const layout = restoreSqlLayout(tabs, active, draft.sqlLayout);
+      const index = Math.max(
+        0,
+        layout.groups.findIndex((group) => group.ids.includes(active)),
+      );
+      const owned = layout.groups[index].ids.map((tabId) =>
+        tabs.find((tab) => tab.id === tabId)!,
+      );
+      const next = updatePaneTabs(
+        tabs,
+        layout.groups,
+        index,
+        [...owned, tab],
+        tab.id,
+      );
+      setSqlTabs(draft, next.tabs, tab.id, { ...layout, groups: next.groups });
+    });
+    setMode("sql");
+    setDataTable("");
+    setSelected("");
+    setSearch("");
+  }
+  async function removeWorkspaceConnection(sourceId: string) {
+    if (!(await leaveDraft())) return;
+    const source = workspaceSources(w).find((source) => source.id === sourceId);
+    const fallback = workspaceSources(w).find(
+      (source) => source.id !== sourceId && source.parentSourceId !== sourceId,
+    );
+    if (
+      !source ||
+      !fallback ||
+      !(await confirmAction(
+        `Remove “${source.connection ? source.name : "Local DuckDB"}” from this workspace? Its SQL tabs will keep their text and use “${fallback.connection ? fallback.name : "Local DuckDB"}”. ${source.connection ? "The server database and reusable saved connection will not be deleted." : "Its saved local tables and rows will be removed from this workspace. Export JSON first if you need a backup."}`,
+      ))
+    )
+      return;
+    for (const item of workspaceSources(w).filter(
+      (s) => s.id === sourceId || s.parentSourceId === sourceId,
+    ))
+      invalidateSession(sourceSessionKey(w.id, item.id));
+    edit((draft) => removeSource(draft, sourceId));
+    setDataTable("");
+    setSelected("");
+    setSearch("");
+  }
+  async function closeConnectionManager() {
+    setManager(null);
+    if (!w.sources) return;
+    try {
+      const profiles = await storage.connections.toArray();
+      edit((draft) => {
+        captureActiveSource(draft);
+        for (const source of draft.sources ?? []) {
+          if (source.parentSourceId) continue;
+          const profile = profiles.find(
+            (profile) => profile.id === source.connectionId,
+          );
+          if (!profile) continue;
+          const connection = {
+            engine: profile.engine,
+            config: profile.config,
+          } as typeof source.connection;
+          const changed =
+            JSON.stringify(source.connection) !== JSON.stringify(connection);
+          updateSource(draft, source.id, {
+            name: profile.name,
+            connection,
+            ...(changed ? { schema: { tables: [], relationships: [] } } : {}),
+          });
+        }
+      });
+    } catch (e) {
+      setMessage(String(e));
+      setError(true);
+    }
+  }
   async function newWorkspace() {
     if (!(await leaveDraft())) return;
     setManager("create");
@@ -456,30 +614,6 @@ export default function App() {
     setSelected("");
     setDataTable("");
   }
-  async function openSwitcher() {
-    await task(async () => {
-      await saveWorkspace(w);
-      setWorkspaces(
-        await storage.workspaces.orderBy("updatedAt").reverse().toArray(),
-      );
-      setSwitcherOpen(true);
-    });
-  }
-  async function switchWorkspace(item: WorkspaceDefinition) {
-    if (item.id === w.id) {
-      setSwitcherOpen(false);
-      return;
-    }
-    if (!(await leaveDraft())) return;
-    await task(async () => {
-      await saveWorkspace(w);
-      load(item);
-      setSelected("");
-      setDataTable("");
-      setTableEditor(null);
-      setSwitcherOpen(false);
-    });
-  }
   async function openWorkspaces() {
     if (!(await leaveDraft())) return;
     await task(async () => {
@@ -489,6 +623,37 @@ export default function App() {
       );
       setOpen(true);
     });
+  }
+  async function renameWorkspace(workspaceId: string, name: string) {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed.length > 120)
+      throw Error("Use a name between 1 and 120 characters.");
+    setBusy(true);
+    try {
+      if (useStore.getState().workspace.id === workspaceId) {
+        edit((draft) => {
+          draft.name = trimmed;
+        });
+        if (!(await saveWorkspace(useStore.getState().workspace)))
+          throw Error("This workspace was deleted.");
+      } else {
+        const saved = await storage.workspaces.get(workspaceId);
+        if (
+          !saved ||
+          !(await saveWorkspace({
+            ...saved,
+            name: trimmed,
+            updatedAt: Date.now(),
+          }))
+        )
+          throw Error("This workspace was deleted.");
+      }
+      setWorkspaces(
+        await storage.workspaces.orderBy("updatedAt").reverse().toArray(),
+      );
+    } finally {
+      setBusy(false);
+    }
   }
   async function removeWorkspace(item: WorkspaceDefinition) {
     if (busy) return;
@@ -593,91 +758,74 @@ export default function App() {
     });
   }
   return (
-    <div className={"app " + (dark ? "dark" : "")}>
+    <div
+      className={
+        "app " +
+        (dark ? "dark " : "") +
+        (platform !== "web" ? `desktop desktop-${platform}` : "")
+      }
+    >
       <DialogHost />
-      <header className="app-header">
-        <div className="brand">
-          <Button
-            title={left ? "Hide sidebar" : "Show sidebar"}
-            onClick={() => setLeft(!left)}
-          >
-            <PanelLeftClose size={16} />
-          </Button>
-          <div className="brand-icon">
-            <Database size={21} />
-          </div>
-          <input
+      {abbreviations && (
+        <SnippetSettings key={w.id} onClose={() => setAbbreviations(false)} />
+      )}
+      <header className="app-header" data-tauri-drag-region>
+        <div className="brand" data-tauri-drag-region>
+          <span
+            className="workspace-title"
             aria-label="Workspace name"
-            value={w.name}
-            disabled={busy}
-            onChange={(e) =>
-              edit((d) => {
-                d.name = e.target.value;
+            title={w.name}
+            data-tauri-drag-region
+          >
+            {w.name}
+          </span>
+          <div className="titlebar-connection-host" ref={setConnectionHost}>
+            {!(mode === "sql" && w.sources) && (
+              <WorkspaceConnectionControls
+                workspace={w}
+                busy={busy}
+                onSelect={selectConnection}
+                onDatabaseChange={selectWorkspaceDatabase}
+                onError={(error) => {
+                  setMessage(String(error));
+                  setError(true);
+                }}
+              />
+            )}
+          </div>
+          <ConnectionMenu
+            workspace={w}
+            busy={busy}
+            onAdd={() =>
+              void leaveDraft().then((ok) => {
+                if (ok) setManager("attach");
               })
             }
-          />
-          <Popover.Root
-            open={switcherOpen}
-            onOpenChange={(next) => {
-              if (next) void openSwitcher();
-              else setSwitcherOpen(false);
+            onManage={() =>
+              void leaveDraft().then((ok) => {
+                if (ok) setManager("connections");
+              })
+            }
+            onRemove={(sourceId) => void removeWorkspaceConnection(sourceId)}
+            onBeforeAction={leaveDraft}
+            onConnected={() =>
+              setConnectionRevision((revision) => revision + 1)
+            }
+            onError={(error) => {
+              setMessage(String(error));
+              setError(true);
             }}
-          >
-            <Popover.Trigger asChild>
-              <Button
-                className="workspace-switch-trigger"
-                title="Switch workspace"
-                aria-label="Switch workspace"
-                disabled={busy}
-              >
-                <ChevronDown size={14} />
-              </Button>
-            </Popover.Trigger>
-            <Popover.Portal>
-              <Popover.Content
-                className={"workspace-switcher " + (dark ? "dark" : "")}
-                align="start"
-                sideOffset={8}
-                collisionPadding={12}
-                aria-label="Switch workspace"
-              >
-                <div className="workspace-switch-list">
-                  {workspaces.map((item) => (
-                    <button
-                      key={item.id}
-                      className="workspace-switch-item"
-                      disabled={busy}
-                      aria-current={item.id === w.id ? "true" : undefined}
-                      onClick={() => void switchWorkspace(item)}
-                    >
-                      <Database size={15} />
-                      <span>
-                        <strong>{item.id === w.id ? w.name : item.name}</strong>
-                        <small>
-                          {item.mssql
-                            ? "SQL Server"
-                            : item.postgres
-                              ? "PostgreSQL"
-                              : "Local · DuckDB"}
-                        </small>
-                      </span>
-                      {item.id === w.id && <Check size={14} />}
-                    </button>
-                  ))}
-                </div>
-              </Popover.Content>
-            </Popover.Portal>
-          </Popover.Root>
+          />
         </div>
-        <nav className="mode-switch" aria-label="Workspace mode">
+        <nav
+          className="mode-switch"
+          aria-label="Workspace mode"
+          data-tauri-drag-region
+        >
           {modes.map((item) => (
             <button
               key={item.id}
-              aria-current={
-                mode === item.id || (item.id === "data" && mode === "relations")
-                  ? "page"
-                  : undefined
-              }
+              aria-current={mode === item.id ? "page" : undefined}
               onClick={() => void changeMode(item.id)}
             >
               <item.icon size={15} />
@@ -685,7 +833,7 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <div className="header-actions">
+        <div className="header-actions" data-tauri-drag-region>
           <span
             className="save-indicator"
             title={`${saved}${errors.length ? ` · ${errors.length} schema issues` : ""}`}
@@ -701,7 +849,7 @@ export default function App() {
             title={dark ? "Light appearance" : "Dark appearance"}
             onClick={() => setDark(!dark)}
           >
-            {dark ? <Sun size={17} /> : <Moon size={17} />}
+            {dark ? <Sun size={15} /> : <Moon size={15} />}
           </Button>
           <details
             className="workspace-menu"
@@ -711,16 +859,20 @@ export default function App() {
             }}
           >
             <summary aria-label="Workspace actions">
-              <Ellipsis size={19} />
+              <Ellipsis size={17} />
             </summary>
             <div>
+              <Button onClick={() => setLeft(!left)} aria-pressed={!left}>
+                <PanelLeftClose size={15} />
+                {left ? "Hide sidebar" : "Show sidebar"}
+              </Button>
               <Button disabled={busy} onClick={() => void newWorkspace()}>
                 <Plus size={15} />
                 New workspace
               </Button>
-              <Button disabled={busy} onClick={() => setManager("connections")}>
-                <Database size={15} />
-                Connections
+              <Button onClick={() => setAbbreviations(true)}>
+                <Braces size={15} />
+                SQL abbreviations
               </Button>
               <Button disabled={busy} onClick={() => void openWorkspaces()}>
                 <FolderOpen size={15} />
@@ -773,6 +925,7 @@ export default function App() {
           </details>
         </div>
       </header>
+      {platform === "windows" && <WindowControls />}
       <input
         ref={file}
         type="file"
@@ -806,28 +959,18 @@ export default function App() {
               />
               <kbd>⌘ K</kbd>
             </div>
-            <button
-              className={
-                "sidebar-relations " + (mode === "relations" ? "active" : "")
-              }
-              aria-current={mode === "relations" ? "page" : undefined}
-              onClick={() => void changeMode("relations")}
-            >
-              <Waypoints size={16} />
-              <span>Relations</span>
-              <small>{w.schema.relationships.length}</small>
-            </button>
             <div className="section-heading">
               <span>TABLES</span>
               <span>{w.schema.tables.length}</span>
-              <Button
-                title="Create table"
-                disabled={busy || remote}
-                style={mode === "relations" ? { display: "none" } : undefined}
-                onClick={() => void addTable()}
-              >
-                <Plus size={15} />
-              </Button>
+              {!remote && mode !== "relations" && (
+                <Button
+                  title="Create table"
+                  disabled={busy}
+                  onClick={() => void addTable()}
+                >
+                  <Plus size={14} />
+                </Button>
+              )}
             </div>
             <div className="table-list">
               {w.schema.tables
@@ -836,37 +979,84 @@ export default function App() {
                 )
                 .map((table) => (
                   <div key={table.id}>
-                    <button
-                      className={
-                        "tree-table " +
-                        (mode !== "relations" && activeTable?.id === table.id
-                          ? "active"
-                          : "")
-                      }
-                      onClick={() => void chooseTable(table.id)}
-                      onDoubleClick={() => {
-                        if (mode === "data" && !remote)
-                          void editTable(table.id);
-                      }}
-                    >
-                      <span className="table-icon">
-                        <Table2 size={17} />
-                      </span>
-                      <span className="table-label">
-                        <strong>
-                          {table.namespace ? table.namespace + "." : ""}
-                          {table.name}
-                        </strong>
-                      </span>
-                      <ChevronDown size={12} />
-                    </button>
-                    {(mode === "data" || mode === "sql") &&
-                      activeTable?.id === table.id && (
+                    <div className="tree-table-row">
+                      <button
+                        className={
+                          "tree-table " +
+                          (mode !== "relations" && activeTable?.id === table.id
+                            ? "active"
+                            : "")
+                        }
+                        onClick={() => void chooseTable(table.id)}
+                        onDoubleClick={() => {
+                          if (mode === "data" && !remote)
+                            void editTable(table.id);
+                        }}
+                      >
+                        <span className="table-icon">
+                          <Table2 size={17} />
+                        </span>
+                        <span className="table-label">
+                          <strong>
+                            {table.namespace ? table.namespace + "." : ""}
+                            {table.name}
+                          </strong>
+                        </span>
+                      </button>
+                      <Button
+                        className="table-columns-toggle"
+                        title={`Toggle columns · ${table.name}`}
+                        aria-label={`Toggle columns · ${table.name}`}
+                        aria-expanded={expandedTables.includes(
+                          w.id +
+                            ":" +
+                            (w.activeSourceId ?? "primary") +
+                            ":" +
+                            table.id,
+                        )}
+                        onClick={async () => {
+                          const key =
+                            w.id +
+                            ":" +
+                            (w.activeSourceId ?? "primary") +
+                            ":" +
+                            table.id;
+                          if (!(await leaveDraft())) return;
+                          setDataTable(table.id);
+                          setSelected(table.id);
+                          setExpandedTables((items) =>
+                            items.includes(key)
+                              ? items.filter((item) => item !== key)
+                              : [...items, key],
+                          );
+                        }}
+                      >
+                        {expandedTables.includes(
+                          w.id +
+                            ":" +
+                            (w.activeSourceId ?? "primary") +
+                            ":" +
+                            table.id,
+                        ) ? (
+                          <ChevronDown size={12} />
+                        ) : (
+                          <ChevronRight size={12} />
+                        )}
+                      </Button>
+                    </div>
+                    {activeTable?.id === table.id &&
+                      expandedTables.includes(
+                        w.id +
+                          ":" +
+                          (w.activeSourceId ?? "primary") +
+                          ":" +
+                          table.id,
+                      ) && (
                         <div className="tree-columns">
                           {table.columns.map((c) => (
                             <button
                               key={c.id}
-                              disabled={mode === "sql" || remote}
+                              disabled={mode !== "data" || remote}
                               title={`${table.name}.${c.name} · ${c.nativeType ?? c.type}${table.primaryKey.includes(c.id) ? " · Primary key" : ""}${!c.nullable ? " · Required" : ""}`}
                               onClick={(event) =>
                                 void openColumn(
@@ -948,9 +1138,29 @@ export default function App() {
           />
         )}
         <main className={"main-view mode-" + mode}>
-          {remote ? (
-            <RemoteWorkspace
+          {w.sources && mode === "sql" ? (
+            <MultiSqlWorkspace
+              connectionHost={connectionHost}
               key={w.id}
+              workspace={w}
+              dark={dark}
+              busy={busy}
+              onBusy={setBusy}
+              runRef={remoteRun}
+            />
+          ) : remote ? (
+            <RemoteWorkspace
+              key={
+                w.id +
+                connectionRevision +
+                (w.activeSourceId ?? "") +
+                JSON.stringify(w.postgres ?? w.mssql)
+              }
+              sessionKey={
+                w.activeSourceId
+                  ? sourceSessionKey(w.id, w.activeSourceId)
+                  : w.id
+              }
               workspace={w}
               mode={mode}
               dark={dark}
@@ -1089,9 +1299,15 @@ export default function App() {
                   key={w.id}
                   tabs={sqlTabs(w)}
                   activeId={activeSqlTab(w).id}
-                  onTabsChange={(tabs, active) =>
+                  layout={w.sqlLayout}
+                  onLayoutChange={(layout) =>
                     edit((d) => {
-                      setSqlTabs(d, tabs, active);
+                      d.sqlLayout = layout;
+                    })
+                  }
+                  onTabsChange={(tabs, active, layout) =>
+                    edit((d) => {
+                      setSqlTabs(d, tabs, active, layout);
                     })
                   }
                   value={activeSqlTab(w).sql}
@@ -1180,66 +1396,28 @@ export default function App() {
       {manager && (
         <WorkspaceManager
           mode={manager}
-          onCreate={createFromConnection}
-          onClose={() => setManager(null)}
+          onCreate={
+            manager === "attach" ? addWorkspaceConnection : createFromConnection
+          }
+          onClose={() => void closeConnectionManager()}
         />
       )}
-      <Dialog.Root
-        open={open}
-        onOpenChange={(open) => {
-          if (!busy) setOpen(open);
-        }}
-      >
-        <Dialog.Portal>
-          <Dialog.Overlay className="modal-overlay" />
-          <Dialog.Content className="modal">
-            <Dialog.Title>Your workspaces</Dialog.Title>
-            <Dialog.Description>Saved on this device.</Dialog.Description>
-            {workspaces.map((item) => (
-              <div className="workspace-entry" key={item.id}>
-                <Button
-                  className="workspace-option"
-                  disabled={busy}
-                  onClick={() => {
-                    load(item);
-                    setSelected("");
-                    setDataTable("");
-                    setOpen(false);
-                  }}
-                >
-                  <span>
-                    <Database size={18} />
-                    <span className="workspace-option-info">
-                      <strong>{item.name}</strong>
-                      <small>
-                        {item.mssql
-                          ? "SQL Server"
-                          : item.postgres
-                            ? "PostgreSQL"
-                            : "Local · DuckDB"}
-                        {item.id === w.id ? " · Current" : ""}
-                      </small>
-                    </span>
-                  </span>
-                  <small>{new Date(item.updatedAt).toLocaleDateString()}</small>
-                </Button>
-                <Button
-                  className="workspace-delete danger"
-                  title={`Delete workspace ${item.name}`}
-                  aria-label={`Delete workspace ${item.name}`}
-                  disabled={busy}
-                  onClick={() => void removeWorkspace(item)}
-                >
-                  <Trash2 size={16} />
-                </Button>
-              </div>
-            ))}
-            <Dialog.Close asChild>
-              <Button disabled={busy}>Done</Button>
-            </Dialog.Close>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
+      {open && (
+        <WorkspaceBrowser
+          items={workspaces}
+          currentId={w.id}
+          busy={busy}
+          onClose={() => setOpen(false)}
+          onDelete={(item) => void removeWorkspace(item)}
+          onOpen={(item) => {
+            load(item);
+            setSelected("");
+            setDataTable("");
+            setOpen(false);
+          }}
+          onRename={renameWorkspace}
+        />
+      )}
       <Dialog.Root open={ddl} onOpenChange={setDdl}>
         <Dialog.Portal>
           <Dialog.Overlay className="modal-overlay" />

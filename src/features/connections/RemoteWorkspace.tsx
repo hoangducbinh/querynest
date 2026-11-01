@@ -1,4 +1,12 @@
-import { retainSession, takeSession, type RetainedSession } from "./sessions";
+import {
+  registerOwnedSession,
+  retainSession,
+  takeSession,
+  checkoutConnectionSession,
+  type RetainedSession,
+} from "./sessions";
+import { updateSource } from "./sources";
+import { ensureDatabaseSession } from "./databases";
 import { RemoteColumnEditor } from "./RemoteColumnEditor";
 import type { ColumnContext, ColumnChange } from "./columns";
 import {
@@ -31,6 +39,7 @@ import { catalogSchema, pgError, type PgCatalog } from "../postgres/model";
 import { isTauri, type PgQueryResult } from "../postgres/client";
 interface Props {
   workspace: WorkspaceDefinition;
+  sessionKey?: string;
   mode: "data" | "sql" | "relations" | "tests";
   dark: boolean;
   activeTable?: TableDefinition;
@@ -42,6 +51,7 @@ interface Props {
 }
 export function RemoteWorkspace({
   workspace: w,
+  sessionKey = w.id,
   mode,
   dark,
   activeTable,
@@ -62,6 +72,10 @@ export function RemoteWorkspace({
   const [sessionId, setSessionId] = useState("");
   const session = useRef("");
   const retained = useRef<RetainedSession | undefined>(undefined);
+  useEffect(() => {
+    if (!sessionId || !retained.current) return;
+    return registerOwnedSession(sessionKey, { ...retained.current, sessionId });
+  }, [sessionId, sessionKey]);
   const [version, setVersion] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [pending, setPending] = useState(false);
@@ -114,7 +128,22 @@ export function RemoteWorkspace({
       const config =
         profile && profile.engine === engine ? profile : currentConfig;
       setSettings(config);
-      const saved = takeSession(w.id, config);
+      if (w.sources && w.activeSourceId) {
+        try {
+          await ensureDatabaseSession(w, w.activeSourceId);
+        } catch {
+          /* The connection dialog handles expired sessions. */
+        }
+      }
+      const saved =
+        (await checkoutConnectionSession(sessionKey, config)) ??
+        (w.sources && w.activeSourceId === "primary"
+          ? takeSession(w.id, config)
+          : undefined);
+      if (stale) {
+        if (saved) retainSession(sessionKey, saved);
+        return;
+      }
       if (saved) {
         session.current = saved.sessionId;
         retained.current = saved;
@@ -152,7 +181,7 @@ export function RemoteWorkspace({
   useEffect(
     () => () => {
       if (session.current && retained.current)
-        retainSession(w.id, {
+        retainSession(sessionKey, {
           ...retained.current,
           sessionId: session.current,
         });
@@ -244,6 +273,11 @@ export function RemoteWorkspace({
       setSchemaStale(false);
       setColumnEditor(null);
       edit((d) => {
+        if (d.sources && d.activeSourceId)
+          updateSource(d, d.activeSourceId, {
+            connection: value,
+            schema: catalogSchema(result.catalog),
+          });
         if (value.engine === "postgres") d.postgres = value.config;
         else d.mssql = value.config;
         d.schema = catalogSchema(result.catalog);
@@ -550,8 +584,14 @@ export function RemoteWorkspace({
         <SqlWorkspace
           tabs={sqlTabs(w)}
           activeId={activeSqlTab(w).id}
-          onTabsChange={(tabs, active) =>
-            edit((d) => setSqlTabs(d, tabs, active))
+          layout={w.sqlLayout}
+          onLayoutChange={(layout) =>
+            edit((d) => {
+              d.sqlLayout = layout;
+            })
+          }
+          onTabsChange={(tabs, active, layout) =>
+            edit((d) => setSqlTabs(d, tabs, active, layout))
           }
           value={activeSqlTab(w).sql}
           onChange={(sql) =>

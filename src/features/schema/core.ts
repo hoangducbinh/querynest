@@ -1,4 +1,7 @@
+import { validSqlLayout } from "../sql/panes";
+import { sqlTabs } from "../sql/tabs";
 import { validDuckType } from "../../lib/duckdb/types";
+import { parseRemoteConfig } from "../connections/model";
 import { parseMssqlConfig } from "../connections/model";
 import { parsePostgresConfig } from "../postgres/model";
 import { validateSnippets } from "../sql/snippets";
@@ -6,6 +9,7 @@ import {
   type DatabaseSchema,
   type RelationshipDefinition,
   type WorkspaceDefinition,
+  type WorkspaceSource,
 } from "../../types/schema";
 export const id = () => crypto.randomUUID();
 export function validateRelationship(
@@ -187,6 +191,13 @@ export function parseWorkspace(text: string): WorkspaceDefinition {
     )
       throw Error("Invalid active SQL tab.");
   }
+  if (w.sqlLayout !== undefined && !validSqlLayout(w.sqlLayout, sqlTabs(w)))
+    throw Error("Invalid SQL split layout.");
+  if (
+    w.sqlAbbreviationsEnabled !== undefined &&
+    typeof w.sqlAbbreviationsEnabled !== "boolean"
+  )
+    throw Error("Invalid SQL abbreviations mode.");
   if (w.sqlSnippets !== undefined) {
     const snippetErrors = validateSnippets(w.sqlSnippets);
     if (snippetErrors.length) throw Error(snippetErrors.join(" "));
@@ -202,6 +213,116 @@ export function parseWorkspace(text: string): WorkspaceDefinition {
   if (w.postgres !== undefined) {
     w.postgres = parsePostgresConfig(w.postgres);
     w.data = {};
+  }
+  if (w.sources !== undefined) {
+    if (
+      !Array.isArray(w.sources) ||
+      !w.sources.length ||
+      w.sources.length > 1000 ||
+      new Set(w.sources.map((source) => source?.id)).size !== w.sources.length
+    )
+      throw Error("Invalid workspace connections.");
+    w.sources = w.sources.map((source): WorkspaceSource => {
+      if (
+        !source ||
+        typeof source.id !== "string" ||
+        !source.id ||
+        typeof source.name !== "string" ||
+        !source.name.trim() ||
+        (source.connectionId !== undefined &&
+          typeof source.connectionId !== "string")
+      )
+        throw Error("Invalid workspace connection.");
+      const connection =
+        source.connection === undefined
+          ? undefined
+          : parseRemoteConfig(source.connection);
+      const validated = parseWorkspace(
+        JSON.stringify({
+          ...w,
+          sources: undefined,
+          activeSourceId: undefined,
+          schema: source.schema,
+          data: connection ? {} : (source.data ?? {}),
+          diagramPositions: source.diagramPositions,
+          postgres:
+            connection?.engine === "postgres" ? connection.config : undefined,
+          mssql: connection?.engine === "mssql" ? connection.config : undefined,
+          sqlTabs: w.sqlTabs?.map(({ sourceId: _sourceId, ...tab }) => {
+            void _sourceId;
+            return tab;
+          }),
+        }),
+      );
+      return {
+        id: source.id,
+        name: source.name,
+        parentSourceId: source.parentSourceId,
+        databases: source.databases,
+        connectionId: source.connectionId,
+        connection,
+        schema: validated.schema,
+        data: connection ? {} : validated.data,
+        diagramPositions: validated.diagramPositions,
+      };
+    });
+    if (w.sources.filter((s) => !s.parentSourceId).length > 50)
+      throw Error("A workspace supports up to 50 connections.");
+    for (const source of w.sources) {
+      if (
+        source.databases !== undefined &&
+        (!Array.isArray(source.databases) ||
+          source.databases.length > 10000 ||
+          source.databases.some(
+            (name) => typeof name !== "string" || !name || name.includes("\0"),
+          ))
+      )
+        throw Error("Invalid database list.");
+      if (source.parentSourceId !== undefined) {
+        const root = w.sources.find(
+          (s) => s.id === source.parentSourceId && !s.parentSourceId,
+        );
+        if (
+          !root?.connection ||
+          !source.connection ||
+          root.id === source.id ||
+          JSON.stringify({
+            ...root.connection,
+            config: { ...root.connection.config, database: "" },
+          }) !==
+            JSON.stringify({
+              ...source.connection,
+              config: { ...source.connection.config, database: "" },
+            })
+        )
+          throw Error("Invalid database connection reference.");
+      }
+    }
+    if (w.sources.filter((source) => !source.connection).length > 1)
+      throw Error("A workspace supports one local DuckDB playground.");
+    const active = w.sources.find((source) => source.id === w.activeSourceId);
+    if (
+      !active ||
+      w.sqlTabs?.some(
+        (tab) =>
+          tab.sourceId !== undefined &&
+          (typeof tab.sourceId !== "string" ||
+            !w.sources!.some((source) => source.id === tab.sourceId)),
+      )
+    )
+      throw Error("Invalid SQL tab connection reference.");
+    w.schema = structuredClone(active.schema);
+    w.data = active.connection ? {} : structuredClone(active.data ?? {});
+    w.postgres =
+      active.connection?.engine === "postgres"
+        ? active.connection.config
+        : undefined;
+    w.mssql =
+      active.connection?.engine === "mssql"
+        ? active.connection.config
+        : undefined;
+    w.connectionId = active.connectionId;
+    w.diagramPositions = active.diagramPositions;
   }
   const errors = w.postgres || w.mssql ? [] : validateSchema(w.schema);
   if (errors.length) throw Error(errors.join("\n"));
