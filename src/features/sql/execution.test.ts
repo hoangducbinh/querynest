@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { executeSqlBatch } from "./execution";
+import { executeSqlBatch, sqlMayChangeSchema } from "./execution";
 describe("multi-statement SQL execution", () => {
   it("runs in order and preserves each result including DML", async () => {
     const query = vi.fn(async (sql: string) => ({
@@ -49,4 +49,46 @@ describe("multi-statement SQL execution", () => {
     expect(results.map((item) => item.sql)).toEqual(["SELECT 1", "SELECT 2"]);
     expect(query).toHaveBeenCalledTimes(2);
   });
+});
+
+describe("schema refresh invalidation", () => {
+  it("keeps ordinary reads and row edits off the catalog refresh path", () => {
+    for (const sql of [
+      "SELECT TOP (3) * FROM dbo.Customer",
+      "SELECT 'CREATE TABLE' AS description -- DROP TABLE t",
+      "WITH c AS (SELECT 1 AS n) SELECT n FROM c",
+      "UPDATE dbo.Customer SET name='ALTER'",
+    ])
+      expect(sqlMayChangeSchema(sql, "mssql")).toBe(false);
+  });
+  it("refreshes after DDL and procedures that may change schema", () => {
+    for (const sql of [
+      "CREATE TABLE t(id int)",
+      "SELECT 1; ALTER TABLE t ADD n int",
+      "DROP VIEW v",
+      "EXEC dbo.ChangeSchema",
+      "EXECUTE sp_executesql N'CREATE TABLE t(id int)'",
+    ])
+      expect(sqlMayChangeSchema(sql, "mssql")).toBe(true);
+  });
+});
+
+it("skips later GO batches after a stop request", async () => {
+  let stopped = false;
+  const driver = vi.fn(async () => {
+    stopped = true;
+    return { columns: ["n"], rows: [{ n: 1 }] };
+  });
+  const result = await executeSqlBatch(
+    "SELECT 1 AS n\nGO\nSELECT 2 AS n",
+    async () => {
+      if (stopped)
+        throw Error("Query stopped. Remaining statements were skipped.");
+      return driver();
+    },
+    "mssql",
+  );
+  expect(driver).toHaveBeenCalledOnce();
+  expect(result.at(-1)?.error).toBe(true);
+  expect(result.at(-1)?.status).toContain("Query stopped");
 });

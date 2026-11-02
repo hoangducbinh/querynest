@@ -1,6 +1,8 @@
+> Interface update: the app now opens directly into a saved SQL/Data session. There is no workspace chooser or workspace title in the UI. The first title-bar dropdown handles choosing, searching, editing and removing connections; a submenu beside each connection holds lifecycle and settings actions, while the dedicated New connection icon remains on the title bar. The New connection sheet connects and saves settings in one step. Existing workspace storage and JSON remain compatible; removing the chooser does not delete saved data.
+
 # Database Design Playground
 
-A local database design and data workspace built with React, TypeScript, Vite, React Flow, Monaco, DuckDB-Wasm, Zustand/Immer and Dexie. No backend, account or AI service. Workers and Wasm are bundled locally.
+A local database design and data workspace built with React, TypeScript, Vite, Monaco, DuckDB-Wasm, Zustand/Immer and Dexie. No backend, account or AI service. Workers and Wasm are bundled locally.
 
 ## Start
 
@@ -28,17 +30,17 @@ npm run desktop:build
 
 Desktop JSON export uses a native Save dialog and writes only to the path selected there. Import uses the existing file picker. Each browser origin and the packaged desktop app have separate local workspace storage and appearance settings: use JSON export/import to transfer workspaces. Window-close requests wait for saved workspace state and protect unsaved grid drafts. Keep JSON backups for important work.
 
-Build on the target OS (or its GitHub Actions runner). For Windows, install the MSVC build tools, WebView2 and Rust, then use `npm run desktop:build -- --bundles nsis`. Release signing/notarization and distribution are separate from these local builds. The app identifier is `dev.dbplayground.desktop`; keep it stable to retain the same desktop storage location.
+Build on the target OS (or its GitHub Actions runner). For Windows, install the MSVC build tools, WebView2 and Rust, then use `npm run desktop:build -- --bundles nsis`. Release signing/notarization and distribution are separate from these local builds. The app identifier is `dev.dbplayground.desktop`; keep it stable to retain the same desktop storage location. Keep the bundle product name `Database Design Playground` and executable name `database-design-playground` stable as well, so the existing macOS WebKit storage remains available. IndexedDB keeps the original `database-design-playground` name across branding changes.
 
 The native shell is in `src-tauri`. Frontend platform adapters are isolated in `src/lib/platform`; the web version does not call native APIs. Native capabilities are limited to the main window's close lifecycle and user-selected JSON export. Monaco, DuckDB workers and WASM assets are bundled locally.
 
 ## Workspaces and saved connections
 
-**New workspace** opens a unified chooser. Enter an optional workspace name and choose **Local playground**, or choose **Open workspace** on a saved PostgreSQL/SQL Server connection. Add a connection using the engine buttons, name it, optionally test it, and save. Each open creates a separate workspace with independent SQL tabs, tests and diagram layout.
+Open the first title-bar connection dropdown and choose **New connection** to choose SQL Server or PostgreSQL, enter settings and connect. The app saves the profile and opens a SQL tab directly, without creating or choosing a workspace. Passwords remain in native memory only. Choose existing profiles directly in that same dropdown.
 
 To delete a workspace, choose **Open workspace**, click its trash button, and confirm. This removes only that workspace's local SQL, schema/sample data, tests, layout and settings; server databases and saved connection profiles are not deleted. Export JSON first if you need a backup. Deleting the active workspace switches to the most recently used remaining workspace; deleting the last one creates an empty local workspace. A deletion marker prevents queued autosaves/other windows from silently recreating the deleted ID. Importing a JSON backup creates a new workspace ID.
 
-**Connections** in the workspace menu lets you search, rename, edit, test and remove profiles. Settings are stored in Dexie on this device; passwords are never stored. Editing a profile affects new workspaces and the next Connection dialog/reconnect; an already-open session keeps its current settings until reconnecting. Removing a profile does not delete workspaces or disconnect active sessions; a workspace retains a non-secret settings snapshot. Existing PostgreSQL workspaces migrate to named saved profiles automatically. JSON export contains workspace connection settings, but not the separate profile list or any passwords. Profile IDs imported on another device fall back to the workspace snapshot when unavailable.
+The first title-bar menu is the connection manager. Each connection has Connect/Refresh and a compact actions menu for settings, reconnect, disconnect and removal. Settings are stored in Dexie; passwords are never saved. Editing settings updates the connection configuration for the next connection; session-local state remains owned by the existing native session until disconnected. Legacy workspace JSON is still accepted.
 
 Browser mode can manage settings and use local playgrounds; actual network connections require the desktop app. The connection form offers **Test connection** before opening a session. Each workspace switch closes its old native session; passwords must be entered again for SQL login.
 
@@ -49,21 +51,24 @@ Browser mode can manage settings and use local playgrounds; actual network conne
    Use **Test connection** to verify login and catalog access without opening a workspace session; the temporary connection closes after the check.
 
 3. **Read-only connection** is enabled by default. Connect to read schema, columns, native PostgreSQL types and foreign-key relationships.
-4. **SQL** supports multiple query tabs, selected-text execution, separate batch results, table/column/alias completion and PostgreSQL diagnostics. **Cancel query** cancels the current PostgreSQL query and stops the remaining batch.
+4. **SQL** supports multiple query tabs, selected-text execution, separate batch results, table/column/alias completion and PostgreSQL diagnostics. **Stop** cancels the current PostgreSQL query and stops the remaining batch.
 5. **Data** loads 100 rows/page and supports spreadsheet editing in read/write connections. It uses primary-key order where available, physical row order for ordinary tables without keys, and a next-page probe instead of an expensive COUNT. View ordering without a primary key is not guaranteed; concurrent changes can shift offset-based pages. Reconnect with read-only disabled to insert, update and delete directly in the grid (or use SQL).
-6. **Relations** displays the introspected foreign keys; diagram arrangement remains local. **Tests** executes checks against the connected database. Refresh the PostgreSQL schema after DDL changes using the refresh button next to Connection.
 
-Switching workspaces retains the existing native database session in memory, without saving the password or session handle to disk. Up to four inactive workspace sessions are retained; each expires 30 minutes after leaving it. Returning rechecks the catalog before enabling queries. Changed connection settings (including read-only permissions), an expired/closed session, or restarting the app require connecting again. Use **Disconnect** to close the current session explicitly. Removing a workspace also closes its retained session.
+Connections are owned by the application and retained in memory across tools, query tabs and workspaces. Matching saved-profile settings reuse the same native session, with no inactivity expiry or workspace-count eviction. Returning reuses cached schema metadata; use **Refresh schema** after external schema changes. The global **Connections** center manages Connect, Reconnect and Disconnect. Removing a workspace releases its references; saved-profile sessions remain available until explicitly disconnected or the app closes. Passwords and native session handles are never saved to disk. Restarting the app requires authentication again.
 
 Settings, SQL text and cached schema metadata are saved per workspace. Passwords and live session IDs are kept only in memory; reconnect after reopening the app. Query result rows are not snapshotted into workspace storage or JSON exports. Import strips unknown connection fields and remote row data. Browser workspaces and remote workspaces remain separate; PostgreSQL requires the desktop app.
 
 Read-only queries run inside a server-enforced read-only transaction and are rolled back after each execution. SELECT/WITH/VALUES/TABLE previews use a server cursor to fetch at most 1,001 rows, displaying at most 1,000. Other results are also limited to 1,000 displayed rows. In read/write mode, statements fully execute; results beyond the display cap are drained without storing them. Earlier successful writes remain applied if a later batch statement fails. Explicit BEGIN/COMMIT/ROLLBACK are supported on the dedicated read/write session. Default statement timeout is 60 seconds and lock timeout is 5 seconds.
 
-BIGINT values outside JavaScript's safe integer range, NUMERIC/DECIMAL, arrays, JSON and timestamps are returned as PostgreSQL text to preserve precision/format. Ordinary integers, finite floats and booleans retain JSON types; SQL NULL stays null. Tests should use corresponding expected values or explicit SQL casts. Duplicate result column names receive unique display names.
+BIGINT values outside JavaScript's safe integer range, NUMERIC/DECIMAL, arrays, JSON and timestamps are returned as PostgreSQL text to preserve precision/format. Ordinary integers, finite floats and booleans retain JSON types; SQL NULL stays null. Use explicit SQL casts when another representation is needed. Duplicate result column names receive unique display names.
 
 Diagnostics prepare statements without executing them, on a separate connection. Uncommitted schema changes and custom session settings may not be reflected in live diagnostics. A non-default PostgreSQL port is supported; SSH tunneling, custom CA/client-certificate pickers are not included in this connection release.
 
 Rust unit tests: `cargo test --manifest-path src-tauri/Cargo.toml`. The ignored `live_postgres_driver` integration test requires the disposable fixture described in `scripts/postgres-qa.sh` and should never target a production database.
+
+### Shared connection across tools
+
+The active SQL tab selects the workspace's connection/database for Data. Other SQL tabs keep their own contexts. Switching tools reuses the same in-memory session rather than asking for a password again. Connection status and lifecycle actions are centralized in **Connections**. Data restores the exact source configuration used by SQL; a saved profile's default database does not replace that selection. If no authenticated session remains, use Connect in the global center. Stopping SQL Server queries keeps the session available. Restarting the app or explicitly disconnecting requires authentication again.
 
 ## SQL Server workspaces (desktop)
 
@@ -71,13 +76,13 @@ Choose **New workspace → SQL Server** (or add a profile from **Connections**).
 
 Encryption and certificate verification are enabled by default. For a local development server with a self-signed certificate, explicitly select **Trust server certificate**. On Windows, enable SQL Server TCP/IP and check the actual instance port; SQL login requires server-side SQL authentication to be enabled. Windows authentication requires the Windows account to have permission on that instance/database. See [Microsoft TCP/IP setup](https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/enable-or-disable-a-server-network-protocol) and [authentication modes](https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/change-server-authentication-mode).
 
-- Tables, views, native types, primary keys and composite foreign keys populate the shared sidebar and relation diagram. **Refresh schema** after DDL.
+- Tables, views, native types, primary keys and composite foreign keys populate the shared sidebar. **Refresh schema** after DDL.
 - SQL supports selected text, multiple result sets, bracket-quoted name completion and T-SQL keywords. Use **GO alone on a line** between batches; semicolons stay inside each batch so DECLARE variables, stored procedure definitions and transactions keep their normal T-SQL scope. `GO n` repetition is not supported. Results are capped at 1,000 rows/set, 10,000 rows total and 50 sets; the driver still drains the complete response. Use `TOP`/filters for large queries. Commands without row results show **Completed** rather than an invented affected-row count.
 - **Data** fetches 100 rows/page via OFFSET/FETCH plus a next-page probe. Primary-key ordering is used where available; tables/views without a key have no guaranteed page order. Use the spreadsheet in read/write mode to edit ordinary tables, or write using SQL.
-- BIGINT beyond the JavaScript safe range, DECIMAL/NUMERIC and date/time values use strings; binary uses hex. SQL NULL remains null. Tests expect one result set and reject truncated results.
+- BIGINT beyond the JavaScript safe range, DECIMAL/NUMERIC and date/time values use strings; binary uses hex. SQL NULL remains null.
 - Live diagnostics use `sp_describe_first_result_set` on a separate connection without running user text. Procedures, temp tables, dynamic SQL, session settings and uncommitted schema changes may not be describable; those failures show warnings. SQL Server usually supplies a line, not an exact character position.
 - **Query-only guard** conservatively parses batches and blocks non-SELECT statements, SELECT INTO, sequence advancement and external-access clauses. This is an app guard, not a SQL Server permission boundary: use a restricted read-only login for server-enforced protection. Complex T-SQL unsupported by the parser must use a restricted account with the guard disabled.
-- Connection timeout is 12 seconds; queries have a 60-second timeout and 5-second lock timeout. **Cancel query** and execution timeouts close the dedicated SQL Server socket. Reconnect afterward; open transactions are rolled back by SQL Server when disconnect is processed. Previously committed statements remain committed; cancellation cannot undo them. Explicit BEGIN TRANSACTION/COMMIT/ROLLBACK otherwise use the pinned session.
+- Connection timeout is 12 seconds; queries have a 60-second timeout and 5-second lock timeout. **Stop** sends TDS ATTENTION and drains the server acknowledgement before reusing the same socket. Temporary tables, session settings and open transactions remain available; stopping does not automatically roll back an open transaction. Execution timeouts use the same cancellation path. If cancellation cannot be acknowledged within five seconds, the broken socket is closed. **Reconnect** explicitly creates a new physical session and therefore resets session-local state. Previously committed statements remain committed; cancellation cannot undo them. Explicit BEGIN TRANSACTION/COMMIT/ROLLBACK otherwise use the pinned session.
 
 ### Editing PostgreSQL and SQL Server data
 
@@ -132,7 +137,7 @@ For SQL login, use `SQLSERVER_TEST_AUTH=sql`, `SQLSERVER_TEST_USER` and `SQLSERV
 
 ## The workspace
 
-The compact interface uses a single compact toolbar and four title bar modes: **Data**, **SQL**, **Relations** and **Tests**. Decorative headers, breadcrumbs, global footers, explanatory banners and duplicate table tabs have been removed. Dark appearance and the workspace menu remain in the top toolbar. Appearance is saved locally for this browser and restored on reload. Dialogs and popovers share the same theme; text inputs use a thin focus border.
+The compact interface uses a single compact toolbar and two title bar modes: **Data** and **SQL**. Relations and Tests have been removed; legacy workspace fields remain import-compatible. Decorative headers, breadcrumbs, global footers, explanatory banners and duplicate table tabs have been removed. Dark appearance and the workspace menu remain in the top toolbar. Appearance is saved locally for this browser and restored on reload. Dialogs and popovers share the same theme; text inputs use a thin focus border.
 
 **SQL** opens by default and keeps the shared table sidebar visible and shows the selected table's columns, data types and PK/FK indicators for reference while writing queries. Column rows are read-only in SQL. The editor uses 70% of the remaining height and fills the available width. Drag the separator to resize the editor/results split; the separator also supports arrow keys and Home/End. Use the results toggle to give the editor all available height. The top-left button toggles the shared sidebar consistently across views.
 
@@ -140,7 +145,7 @@ The compact interface uses a single compact toolbar and four title bar modes: **
 
 ### SQL query tabs
 
-Use **+** beside the SQL tab names to open another query. Click a tab to switch; double-click its name to rename it (Enter saves, Escape cancels). **×** closes a tab, with confirmation when it contains SQL. Closing the last tab creates an empty query. Query text, names and the selected tab autosave per workspace and travel with workspace JSON; legacy single-query workspaces open as `query.sql`. Each tab has its own results during the current session. Results are cleared on reload; Run and Cmd/Ctrl+Enter execute the selected SQL text, or the entire active tab when there is no nonempty selection. All tabs share the workspace database. Use **Split SQL editor** to open two panes side by side. Each pane owns a separate list of tabs and displays its selected tab's results. Adding, renaming or closing a tab affects only its pane. Existing tabs are distributed between panes when splitting; use **Move current tab to other split** to move a query and its results without copying it. If only one tab exists, splitting creates an empty `split.sql` tab. Drag the divider to resize (or focus it and use Left/Right, Home/End). Run and Cmd/Ctrl+Enter target the focused pane; executions share the same database session and run one at a time. **Close SQL split** keeps the tabs and returns to one pane. Split state, divider width, pane tab order and the selected tab in each pane autosave per workspace. Switching views/workspaces or relaunching the app restores that layout; it also travels with workspace JSON. Workspaces saved before this feature open in one pane.
+Use **+** beside the SQL tab names to open another query. Click a tab to switch; double-click its name to rename it (Enter saves, Escape cancels). **×** closes a tab, with confirmation when it contains SQL. Closing the last tab creates an empty query. Query text, names and the selected tab autosave per workspace and travel with workspace JSON; legacy single-query workspaces open as `query.sql`. Each tab has its own results during the current session, retained when switching between SQL, Data and workspaces. Results are cleared on reload; Run and Cmd/Ctrl+Enter execute the selected SQL text, or the entire active tab when there is no nonempty selection. All tabs share the workspace database. Use the **Split SQL editor** toolbar icon to open two panes side by side. Each pane owns a separate list of tabs and displays its selected tab's results. Adding, renaming or closing a tab affects only its pane. Existing tabs are distributed between panes when splitting; use **Move current tab to other split** to move a query and its results without copying it. If only one tab exists, splitting creates an empty `split.sql` tab. Drag the divider to resize (or focus it and use Left/Right, Home/End). Run and Cmd/Ctrl+Enter target the focused pane; executions share the same database session and run one at a time. **Close SQL split** keeps the tabs and returns to one pane. Split state, divider width, pane tab order and the selected tab in each pane autosave per workspace. Switching views/workspaces or relaunching the app restores that layout; it also travels with workspace JSON. Workspaces saved before this feature open in one pane.
 
 ### Run a selection or multiple statements
 
@@ -184,10 +189,7 @@ A primary key is required to edit/delete existing rows safely. New records can b
 ### Design, query, validate
 
 - **Data** combines record entry, schema editing and relationship management. Use **Add column**, immediately beside **Add row** in the grid toolbar, to add a column; click any existing column header to edit its name, type, primary key, nullability, unique constraint or default. The column editor is an anchored popover with name/type first, friendly type labels, and a **More options** disclosure for defaults and constraints. Press Enter or Cmd/Ctrl+S to submit. Focus returns to the created/edited column; unsaved changes are protected when dismissing. There is no extra add-column grid gutter. Direct column edits rebuild an isolated runtime and restore saved rows before committing the canonical schema. Defaults are populated immediately. Failures preserve the existing table and keep the column draft open.
-- **Relationships** in the Data toolbar manages outgoing and incoming mappings, including physical foreign keys, logical relationships and ordered composite keys. Full **Edit table** still handles batch column changes, reordering and table creation. Those staged changes require **Sync database**. Column renames migrate saved values by stable ID; deletion confirms removal of saved values and affected relationships.
-- **Relations** opens from the title bar, alongside Data, SQL and Tests. Drag tables to arrange the diagram, pan/zoom, fit the view, select a table to highlight related edges, or select a relationship to inspect its mapping. Layout autosaves separately from the canonical schema, restores after reload, supports undo/redo and travels with workspace JSON. **Auto arrange** restores a dependency-based layout and fits the view. Moving a table does not require SQL runtime synchronization. Schema and relationship edits remain in Data; creating/reconnecting edges and deleting schema objects from the canvas are disabled. Click a table in the sidebar to return to its Data grid.
 - **SQL** provides Monaco editing and query results. **Cmd/Ctrl+Enter** runs SQL. SELECT, JOIN, aggregation, CTE and DuckDB-supported DML/DDL run in the browser. Successful queries snapshot canonical tables for persistence. Runtime DDL does not update the ERD; incompatible metadata requires rebuilding.
-- **Tests** runs individual SQL requirement checks or all saved checks. Use **New test** to enter a requirement, SQL and expected JSON rows. Row order is optional, NULL differs from missing values, and numeric serialization is normalized. Definitions persist; actual results are shown after each run.
 - **Cmd/Ctrl+K** focuses table search. Workspaces autosave to IndexedDB; use JSON export for backups and transfer between origins/devices.
 
 ## Checks
@@ -199,7 +201,7 @@ npm test
 npm run build
 ```
 
-Tests cover schema validation, ordered DDL, IndexedDB roundtrips, history operations, deterministic comparisons, safe runtime reconstruction, typed spreadsheet values, Excel TSV parsing, composite row identity, atomic save/rollback behavior, staged table editing with stable-ID data migrations, automatic relationship layout, and saved diagram positions with IndexedDB/JSON roundtrips. Browser QA covers direct entry, multi-row paste, keyboard save, table switching and foreign-key error recovery.
+Tests cover schema validation, ordered DDL, IndexedDB roundtrips, history operations, safe runtime reconstruction, typed spreadsheet values, Excel TSV parsing, composite row identity, atomic save/rollback behavior, staged table editing with stable-ID data migrations. Browser QA covers direct entry, multi-row paste, keyboard save, table switching and foreign-key error recovery.
 
 ## Architecture and limits
 
@@ -223,11 +225,11 @@ SQL autocomplete uses the current workspace engine. Type suggestions are priorit
 
 ### Multiple connections in one workspace
 
-Connection management lives in the title bar’s **Connection actions** menu: add/attach a profile, manage saved profiles, refresh databases and tables, or remove the selected connection from the workspace. The title bar selectors choose the current connection and database; **Relations** is also opened from the title bar. The sidebar contains only that database’s tables and column details; it follows the active SQL tab when switching split panes. Expand the arrow beside a table to inspect columns. Discovery respects server permissions, and removing a connection never deletes server databases.
+Connection management lives in the title bar’s **Connection actions** menu: add/attach a profile, manage saved profiles, refresh databases and tables, or remove the selected connection from the workspace. The title bar selectors choose the current connection and database. The sidebar contains only that database’s tables and column details; it follows the active SQL tab when switching split panes. Expand the arrow beside a table to inspect columns. Discovery respects server permissions, and removing a connection never deletes server databases.
 
-The title bar shows **Connection** and **Database** selectors in every mode. Data, Tests and Relations use the database selected for the workspace; SQL uses the active SQL tab’s own context. DuckDB shows its local `main` database. With split editors, focus a pane to show and change that pane’s active tab context; switching the title bar selectors does not retarget other tabs. Changing a SQL tab’s title bar selectors does not retarget other tabs. Split panes may query different PostgreSQL/SQL Server databases, or local DuckDB, while keeping independent tabs/results. Autocomplete, type suggestions and diagnostics use the selected tab's connection catalog and dialect. New tabs use the current title bar connection and database. The + button's tooltip names that connection and focuses the new editor for immediate typing. The connection/database binding is saved alongside SQL text and split layout, including in JSON exports. Old single-connection workspaces keep working and migrate when a connection or another database is opened.
+The title bar shows **Connection** and **Database** selectors in every mode. Data uses the database selected for the workspace; SQL uses the active SQL tab’s own context. DuckDB shows its local `main` database. With split editors, focus a pane to show and change that pane’s active tab context; switching the title bar selectors does not retarget other tabs. Changing a SQL tab’s title bar selectors does not retarget other tabs. Split panes may query different PostgreSQL/SQL Server databases, or local DuckDB, while keeping independent tabs/results. Autocomplete, type suggestions and diagnostics use the selected tab's connection catalog and dialect. New tabs use the current title bar connection and database. The + button's tooltip names that connection and focuses the new editor for immediate typing. The connection/database binding is saved alongside SQL text and split layout, including in JSON exports. Old single-connection workspaces keep working and migrate when a connection or another database is opened.
 
-Use the plug button beside a SQL tab's connection selector to Test connection or connect. The first Run on a disconnected database opens its connection dialog; after connecting, press Run again. Passwords are not saved in workspace/connection storage. Sessions are reused across SQL and Data; up to four inactive sessions are retained for 30 minutes and active operations do not expire underneath a query. Opening another database reuses an authenticated session from the same connection to create an independent native database session; switching a database never changes another database session’s SQL context. Read-only settings are preserved. Closing the app requires authenticating again.
+Use the global **Connections** center to connect, refresh schema, reconnect or disconnect. The first Run on a disconnected database requests authentication there; after connecting, press Run again. SQL, Data and other tools borrow the same application-owned session for matching saved-profile settings. Opening another database reuses native authentication to create an independent database session without changing another tab’s SQL context. Read-only settings remain isolated. Transport recovery can reuse authentication held in native memory, but failed SQL is never replayed automatically. Closing the app requires authenticating again.
 
 Removing a remote connection from a workspace keeps its SQL text and explicitly reassigns those tabs to the named remaining connection; it does not delete server data or the reusable profile. Removing Local DuckDB removes its local saved tables/rows after confirmation. Remote Data CRUD/column editing uses the database selected in the title bar. SQL execution remains one operation at a time; there are no automatic cross-server joins or distributed transactions. SQL Server version-specific types still require a supporting server version.
 
@@ -244,3 +246,32 @@ Split SQL panes use one compact tab/tool row. **⋯** opens split, move-tab and 
 ### Browse saved workspaces
 
 Use **⋯ → Open workspace** to search by workspace, connection, database or host. Select a workspace to inspect all attached connections, server endpoints, database names, read/write settings, saved table counts, SQL tabs, tests, the last selected database, split layout and update time before opening it. The current workspace is marked explicitly. Rename a workspace here (up to 120 characters); long existing names remain fully visible in the detail pane. Deletion keeps the existing confirmation and does not delete server databases. Table counts and database names describe saved metadata, not a live server inventory.
+
+### Large remote catalogs and slow networks
+
+Ordinary SQL reads and row edits reuse cached metadata; SQL execution refreshes the full catalog only for potential DDL/procedure batches. Use Refresh for external schema changes. Switching from SQL to Data also reuses cached schema. Remote SQL is checked when executed; typing does not send background validation requests to the server. Autocomplete limits suggestions to 500 and, for catalogs over 200 tables, offers columns from referenced tables/aliases instead of enumerating every column in the database. The sidebar shows 50 tables per page; search covers the full catalog and resets to the first page.
+
+Initial connection still loads the full catalog. These client optimizations do not change query plans, server execution time, network latency, or result-draining semantics. Further work for very large deployments should measure those costs independently and introduce lazy per-table metadata.
+
+
+Large-catalog follow-up: schema DDL generation runs only when opening its dialog,
+not on hidden-dialog renders. Metadata cloning unwraps Immer snapshots before
+copying; active source snapshots are reconciled on save/export/switch. Immutable
+workspace state uses a shallow save envelope until IndexedDB copies it. Wide
+Data and SQL result grids mount only columns near the horizontal viewport, cache
+initial width/type calculations, and keep full row drafts for edits/paste. Grid
+cells are memoized so ordinary keystrokes do not rerender every input. A local
+Vite/React Profiler harness and native read-only benchmark are documented in
+`scripts/sqlserver/README.md`; neither requires a desktop release build.
+
+
+While SQL is running, the toolbar shows **Stop** immediately, including while a
+workspace source is preparing its session. **Stopping…** prevents duplicate stop
+requests. Stopping skips subsequent SQL statements/GO batches. Remote queries
+use the native cancellation path; SQL Server sends TDS ATTENTION and waits for
+acknowledgement while retaining its connection, and PostgreSQL sends a server
+cancellation request.
+Previously committed writes are not undone by stopping. Local DuckDB SQL uses
+pending queries so the worker can receive cancellation and remain usable for a
+subsequent query. Grid saves/schema edits are separate operations and do not show
+the SQL Stop button.

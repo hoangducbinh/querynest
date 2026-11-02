@@ -82,6 +82,9 @@ export function SqlEditor({
   const context = useRef({ schema, snippets, dialect });
   context.current = { schema, snippets, dialect };
   const provider = useRef<monaco.IDisposable | null>(null);
+  const validator = useRef(validate);
+  validator.current = validate;
+  const validationBusy = useRef(false);
   useEffect(
     () => () => {
       provider.current?.dispose();
@@ -96,47 +99,62 @@ export function SqlEditor({
     const version = model.getVersionId();
     monaco.editor.setModelMarkers(model, "sql-validation", []);
     onValidation?.(validationEnabled ? (value.trim() ? "Checking…" : "") : "");
-    const timer = setTimeout(async () => {
-      if (!validationEnabled || !value.trim()) return;
-      try {
-        const diagnostics = validate
-          ? await validate(value)
-          : await withSqlValidator((prepare) => validateSql(value, prepare));
-        if (cancelled || model.isDisposed() || model.getVersionId() !== version)
+    let timer = setTimeout(
+      async function check() {
+        if (!validationEnabled || !value.trim() || cancelled) return;
+        // Coalesce edits while a slow network validation is still in flight.
+        if (validationBusy.current) {
+          timer = setTimeout(check, 300);
           return;
-        monaco.editor.setModelMarkers(
-          model,
-          "sql-validation",
-          diagnostics.map((item) => {
-            const start = model.getPositionAt(
-              Math.min(value.length, item.start),
-            );
-            const end = model.getPositionAt(Math.min(value.length, item.end));
-            return {
-              startLineNumber: start.lineNumber,
-              startColumn: start.column,
-              endLineNumber: end.lineNumber,
-              endColumn: Math.max(
-                start.lineNumber === end.lineNumber ? start.column + 1 : 1,
-                end.column,
-              ),
-              message: item.message,
-              source: validationSource,
-              severity: item.warning
-                ? monaco.MarkerSeverity.Warning
-                : monaco.MarkerSeverity.Error,
-            };
-          }),
-        );
-        onValidation?.(
-          diagnostics.length
-            ? `${diagnostics.length} SQL issue${diagnostics.length === 1 ? "" : "s"}`
-            : "",
-        );
-      } catch {
-        if (!cancelled) onValidation?.("Validation unavailable");
-      }
-    }, 650);
+        }
+        validationBusy.current = true;
+        try {
+          const diagnostics = validator.current
+            ? await validator.current(value)
+            : await withSqlValidator((prepare) => validateSql(value, prepare));
+          if (
+            cancelled ||
+            model.isDisposed() ||
+            model.getVersionId() !== version
+          )
+            return;
+          monaco.editor.setModelMarkers(
+            model,
+            "sql-validation",
+            diagnostics.map((item) => {
+              const start = model.getPositionAt(
+                Math.min(value.length, item.start),
+              );
+              const end = model.getPositionAt(Math.min(value.length, item.end));
+              return {
+                startLineNumber: start.lineNumber,
+                startColumn: start.column,
+                endLineNumber: end.lineNumber,
+                endColumn: Math.max(
+                  start.lineNumber === end.lineNumber ? start.column + 1 : 1,
+                  end.column,
+                ),
+                message: item.message,
+                source: validationSource,
+                severity: item.warning
+                  ? monaco.MarkerSeverity.Warning
+                  : monaco.MarkerSeverity.Error,
+              };
+            }),
+          );
+          onValidation?.(
+            diagnostics.length
+              ? `${diagnostics.length} SQL issue${diagnostics.length === 1 ? "" : "s"}`
+              : "",
+          );
+        } catch {
+          if (!cancelled) onValidation?.("Validation unavailable");
+        } finally {
+          validationBusy.current = false;
+        }
+      },
+      validate ? 1500 : 650,
+    );
     return () => {
       cancelled = true;
       clearTimeout(timer);
@@ -149,7 +167,7 @@ export function SqlEditor({
     validationEnabled,
     editorInstance,
     onValidation,
-    validate,
+    !!validate,
     validationSource,
   ]);
   return (

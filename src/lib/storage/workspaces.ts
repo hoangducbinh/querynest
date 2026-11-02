@@ -9,7 +9,8 @@ import type {
   WorkspaceDefinition,
   SqlAbbreviationSettings,
 } from "../../types/schema";
-export const storage = new Dexie("max-learning") as Dexie & {
+// Keep the storage identity stable across product renames and app updates.
+export const storage = new Dexie("database-design-playground") as Dexie & {
   workspaces: EntityTable<WorkspaceDefinition, "id">;
   connections: EntityTable<ConnectionProfile, "id">;
   deletedWorkspaces: EntityTable<{ id: string }, "id">;
@@ -54,9 +55,17 @@ storage.version(4).stores({
 });
 export const saveConnection = (profile: ConnectionProfile) =>
   storage.connections.put(parseProfile(profile));
+export function workspaceSnapshot(w: WorkspaceDefinition) {
+  // Immer state is deeply frozen. A shallow envelope is sufficient until
+  // IndexedDB performs its own structured clone; mutable imports keep a copy.
+  const snapshot = Object.isFrozen(w) ? { ...w } : structuredClone(w);
+  // This object is already detached from live state: do not clone the active
+  // catalog a second time just to serialize it to IndexedDB.
+  captureActiveSource(snapshot, false);
+  return snapshot;
+}
 export const saveWorkspace = (w: WorkspaceDefinition) => {
-  const snapshot = structuredClone(w);
-  captureActiveSource(snapshot);
+  const snapshot = workspaceSnapshot(w);
   return storage.transaction(
     "rw",
     storage.workspaces,

@@ -35,6 +35,8 @@ struct Session {
     read_only: bool,
     running: AtomicBool,
     cancel: Notify,
+    stop: Notify,
+    attention: tiberius::CancelHandle,
     validation: Mutex<()>,
 }
 #[derive(Clone, Deserialize)]
@@ -327,10 +329,41 @@ async fn run(s: &Session, sql: &str, limit: usize) -> Result<Vec<ResultSet>, Fai
     let mut client = guard
         .take()
         .ok_or_else(|| Failure::closed("Connection closed. Reconnect to continue."))?;
-    let result = tokio::select! {
-        biased;
-        _=s.cancel.notified()=>Err(Failure::closed("Query stopped. The SQL Server connection was closed; reconnect to continue. Open transactions are rolled back by the server.")),
-        result=tokio::time::timeout(Duration::from_secs(60),collect(&mut client,sql,limit))=>result.unwrap_or_else(|_|Err(Failure::closed("Query exceeded 60 seconds. Connection closed; reconnect to continue."))),
+    s.attention.arm();
+    let result = {
+        // Keep the token decoder alive while ATTENTION is sent and acknowledged.
+        // Dropping collect mid-token would leave the connection unsynchronized.
+        let query = collect(&mut client, sql, limit);
+        tokio::pin!(query);
+        let deadline = tokio::time::sleep(Duration::from_secs(60));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                biased;
+                _ = s.cancel.notified() => break Err(Failure::closed("Connection disconnected.")),
+                _ = s.stop.notified() => {
+                    if !s.attention.requested() { continue; }
+                    let drained = tokio::time::timeout(Duration::from_secs(5), &mut query).await;
+                    break if s.attention.acknowledged() && !matches!(&drained, Ok(Err(e)) if e.closed) {
+                        Err(Failure::message("Query stopped. Connection kept open; remaining batches were skipped."))
+                    } else {
+                        Err(Failure::closed("Cancellation could not synchronize the SQL Server session. Reconnect to continue."))
+                    };
+                }
+                result = &mut query => break if s.attention.requested() {
+                    if s.attention.acknowledged() && !matches!(&result, Err(e) if e.closed) {
+                        Err(Failure::message("Query stopped. Connection kept open; remaining batches were skipped."))
+                    } else { Err(Failure::closed("SQL Server did not acknowledge cancellation. Reconnect to continue.")) }
+                } else { result },
+                _ = &mut deadline => {
+                    s.attention.cancel();
+                    let drained = tokio::time::timeout(Duration::from_secs(5), &mut query).await;
+                    break if s.attention.acknowledged() && !matches!(&drained, Ok(Err(e)) if e.closed) {
+                        Err(Failure::message("Query exceeded 60 seconds and was stopped. Connection kept open."))
+                    } else { Err(Failure::closed("Query timed out and the session could not recover. Reconnect to continue.")) };
+                }
+            }
+        }
     };
     if !matches!(&result,Err(e) if e.closed) {
         *guard = Some(client);
@@ -434,6 +467,8 @@ async fn connect_options(state: &MsState, opts: Config, read_only: bool) -> Resu
         id.clone(),
         Arc::new(Session {
             config: opts,
+            attention: client.cancellation_handle(),
+            stop: Notify::new(),
             client: Mutex::new(Some(client)),
             read_only,
             running: AtomicBool::new(false),
@@ -495,10 +530,9 @@ pub async fn ms_cancel(
     session_id: String,
 ) -> Result<(), Failure> {
     let s = session(&state, &session_id).await?;
-    s.cancel.notify_one();
-    s.client.lock().await.take();
-    // Removing the session also drops credentials after any in-flight task completes.
-    state.sessions.lock().await.remove(&session_id);
+    if s.running.load(Ordering::SeqCst) && s.attention.cancel() {
+        s.stop.notify_one();
+    }
     Ok(())
 }
 #[tauri::command]
@@ -1041,6 +1075,8 @@ mod tests {
         assert!(catalog["tables"].is_array());
         let session = Arc::new(Session {
             config: options,
+            attention: client.cancellation_handle(),
+            stop: Notify::new(),
             client: Mutex::new(Some(client)),
             read_only: false,
             running: AtomicBool::new(false),
@@ -1078,14 +1114,94 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.code, Some(208));
+        let mut observer = open(session.config.clone()).await.unwrap();
+        let sid = run(&session, "SELECT @@SPID AS session_id", 1)
+            .await
+            .unwrap()[0]
+            .rows[0]["session_id"]
+            .as_i64()
+            .unwrap() as i32;
         let cancelling = session.clone();
         let handle = tokio::spawn(async move {
             run(&cancelling, "WAITFOR DELAY '00:00:10'; SELECT 1", 1000).await
         });
         tokio::time::sleep(Duration::from_millis(200)).await;
-        session.cancel.notify_one();
-        assert!(handle.await.unwrap().unwrap_err().closed);
-        assert!(session.client.lock().await.is_none());
+        let cancelled_at = std::time::Instant::now();
+        assert!(session.attention.cancel());
+        session.stop.notify_one();
+        let stopped = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("Cancellation must not wait for the 10-second query");
+        assert!(!stopped.unwrap().unwrap_err().closed);
+        eprintln!("SQLSERVER_CANCEL_MS {}", cancelled_at.elapsed().as_millis());
+        assert!(session.client.lock().await.is_some());
+        let kept = run(
+            &session,
+            "SELECT @@SPID AS session_id; SELECT COUNT(*) AS n FROM #dbplayground_qa",
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(kept[0].rows[0]["session_id"], json!(sid));
+        assert_eq!(kept[1].rows[0]["n"], json!(1));
+        run(
+            &session,
+            "SET CONTEXT_INFO 0x123456; BEGIN TRANSACTION; INSERT INTO #dbplayground_qa VALUES(3);",
+            10,
+        )
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            let cancelling = session.clone();
+            let handle = tokio::spawn(async move {
+                run(&cancelling,"SELECT TOP (20000) REPLICATE(N'x',1000) AS payload FROM sys.all_objects a CROSS JOIN sys.all_objects b; WAITFOR DELAY '00:00:10';",10).await
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(session.attention.cancel());
+            session.stop.notify_one();
+            let failure = tokio::time::timeout(Duration::from_secs(2), handle)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            assert!(!failure.closed, "{}", failure.message);
+            let kept = run(&session,"SELECT @@SPID AS sid,CONVERT(varchar(20),SUBSTRING(CONTEXT_INFO(),1,3),1) AS ctx,@@TRANCOUNT AS transactions; SELECT COUNT(*) AS n FROM #dbplayground_qa",10).await.unwrap();
+            assert_eq!(kept[0].rows[0]["sid"], json!(sid));
+            assert_eq!(kept[0].rows[0]["ctx"], json!("0x123456"));
+            assert_eq!(kept[0].rows[0]["transactions"], json!(1));
+            assert_eq!(kept[1].rows[0]["n"], json!(2));
+        }
+        run(
+            &session,
+            "ROLLBACK; SELECT COUNT(*) AS n FROM #dbplayground_qa",
+            10,
+        )
+        .await
+        .unwrap();
+
+        // Verify the server request disappears, rather than only abandoning
+        // the client future. The local fixture login has DMV visibility.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let row = observer
+                    .query(
+                        "SELECT COUNT(*) FROM sys.dm_exec_requests WHERE session_id=@P1",
+                        &[&sid],
+                    )
+                    .await
+                    .unwrap()
+                    .into_row()
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if row.get::<i32, _>(0) == Some(0) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("SQL Server must stop the disconnected request");
     }
     #[tokio::test]
     #[ignore = "requires SQLSERVER_TEST_HOST; creates and removes an isolated grid_qa_* schema"]
@@ -1111,9 +1227,12 @@ mod tests {
         )
         .unwrap();
         let mut setup = open(options.clone()).await.unwrap();
+        let grid_client = open(options.clone()).await.unwrap();
         let s = Session {
             config: options.clone(),
-            client: Mutex::new(Some(open(options.clone()).await.unwrap())),
+            attention: grid_client.cancellation_handle(),
+            stop: Notify::new(),
+            client: Mutex::new(Some(grid_client)),
             read_only: false,
             running: AtomicBool::new(false),
             cancel: Notify::new(),
@@ -1145,7 +1264,7 @@ mod tests {
             save_grid(&s,keyless,vec![edit(None,json!({}),false)]).await.unwrap();
             assert!(save_grid(&s,keyless,vec![edit(Some(json!({"val":"new"}).as_object().unwrap().clone()),json!({"val":"changed"}),false)]).await.is_err());
             let view=setup.query("SELECT OBJECT_ID(@P1)",&[&format!("[{schema}].preview")]).await.unwrap().into_row().await.unwrap().unwrap().get::<i32,_>(0).unwrap();assert!(save_grid(&s,view,vec![edit(None,json!({"name":"no"}),false)]).await.is_err());
-            let read_only=Session {config:options,client:Mutex::new(None),read_only:true,running:AtomicBool::new(false),cancel:Notify::new(),validation:Mutex::new(())};assert!(save_grid(&read_only,object,vec![edit(None,json!({"name":"no"}),false)]).await.is_err());
+            let read_only=Session {config:options,client:Mutex::new(None),attention:Default::default(),stop:Notify::new(),read_only:true,running:AtomicBool::new(false),cancel:Notify::new(),validation:Mutex::new(())};assert!(save_grid(&read_only,object,vec![edit(None,json!({"name":"no"}),false)]).await.is_err());
         }).catch_unwind().await;
         setup.simple_query(format!("DROP VIEW IF EXISTS [{schema}].preview; DROP TABLE IF EXISTS [{schema}].items; DROP TABLE IF EXISTS [{schema}].no_key; DROP SCHEMA IF EXISTS [{schema}];")).await.unwrap().into_results().await.unwrap();
         if let Err(error) = result {
@@ -1180,6 +1299,8 @@ mod tests {
         let s = Session {
             config: options,
             client: Mutex::new(None),
+            attention: Default::default(),
+            stop: Notify::new(),
             read_only: false,
             running: AtomicBool::new(false),
             cancel: Notify::new(),
@@ -1274,5 +1395,69 @@ mod tests {
         for s in [a, b] {
             s.client.lock().await.take();
         }
+    }
+    #[tokio::test]
+    #[ignore = "read-only benchmark requiring the local AdventureWorks StressTest fixture"]
+    async fn live_sqlserver_stress_performance() {
+        let config = MsConfig {
+            auth: "sql".into(),
+            host: std::env::var("SQLSERVER_TEST_HOST").expect("Set SQLSERVER_TEST_HOST"),
+            port: std::env::var("SQLSERVER_TEST_PORT")
+                .unwrap_or_else(|_| "1433".into())
+                .parse()
+                .unwrap(),
+            database: "AdventureWorksLT2019_Test".into(),
+            user: std::env::var("SQLSERVER_TEST_USER").unwrap_or_else(|_| "sa".into()),
+            encrypt: true,
+            trust_certificate: std::env::var("SQLSERVER_TEST_TRUST_CERT")
+                .is_ok_and(|v| v == "true"),
+            read_only: true,
+        };
+        let opts = options(
+            &config,
+            std::env::var("SQLSERVER_TEST_PASSWORD").unwrap_or_default(),
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        let (_, catalog, mut client) = metadata(opts).await.unwrap();
+        let schema_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let tables = catalog["tables"].as_array().unwrap();
+        assert!(tables.len() >= 3000, "Seed StressTest first");
+        let columns: usize = tables
+            .iter()
+            .map(|t| t["columns"].as_array().unwrap().len())
+            .sum();
+        let start = std::time::Instant::now();
+        let bytes = serde_json::to_vec(&catalog).unwrap().len();
+        let serialize_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let mut point_reads = Vec::new();
+        let mut wide_reads = Vec::new();
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let result = collect(
+                &mut client,
+                "SELECT TOP (3) * FROM StressTest.BigOrders ORDER BY OrderID",
+                100,
+            )
+            .await
+            .unwrap();
+            point_reads.push(start.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(result[0].rows.len(), 3);
+            let start = std::time::Instant::now();
+            let result = collect(
+                &mut client,
+                "SELECT TOP (100) * FROM StressTest.WideRows ORDER BY RowID",
+                100,
+            )
+            .await
+            .unwrap();
+            wide_reads.push(start.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(result[0].columns.len(), 121);
+            assert_eq!(result[0].rows.len(), 100);
+        }
+        eprintln!(
+            "STRESS_PERF {}",
+            json!({"tables":tables.len(),"columns":columns,"catalogBytes":bytes,"connectAndCatalogMs":schema_ms,"serializeCatalogMs":serialize_ms,"pointReadMs":point_reads,"wideReadMs":wide_reads})
+        );
     }
 }

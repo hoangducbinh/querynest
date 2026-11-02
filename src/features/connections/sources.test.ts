@@ -6,6 +6,7 @@ import { createWorkspace, parseWorkspace } from "../schema/core";
 import { defaultRemoteConfig, type ConnectionProfile } from "./model";
 import {
   attachDatabase,
+  syncActiveSqlSource,
   connectionRoot,
   activateSource,
   attachSource,
@@ -16,7 +17,11 @@ import {
   workspaceSources,
 } from "./sources";
 import { sqlTabs, setSqlTabs, bindNewTabs } from "../sql/tabs";
-import { storage, saveWorkspace } from "../../lib/storage/workspaces";
+import {
+  storage,
+  saveWorkspace,
+  workspaceSnapshot,
+} from "../../lib/storage/workspaces";
 const pg = {
   engine: "postgres",
   config: { ...defaultPostgresConfig },
@@ -285,4 +290,64 @@ describe("databases under one connection", () => {
     };
     expect(() => parseWorkspace(JSON.stringify(raw))).toThrow();
   });
+});
+
+it("uses the active SQL database in Data and Relations while preserving other tab contexts", () => {
+  const w = createWorkspace();
+  const root = attachSource(w, ms);
+  const child = attachDatabase(w, root, "AdventureWorksLT2019_Test");
+  const first = { ...sqlTabs(w)[0], sourceId: root };
+  const second = {
+    id: "adventure",
+    name: "test.sql",
+    sql: "SELECT 1",
+    sourceId: child,
+  };
+  setSqlTabs(w, [first, second], second.id);
+  syncActiveSqlSource(w);
+  expect(w.activeSourceId).toBe(child);
+  expect(w.mssql?.database).toBe("AdventureWorksLT2019_Test");
+  expect(w.connectionId).toBeUndefined();
+  setSqlTabs(w, sqlTabs(w), first.id);
+  syncActiveSqlSource(w);
+  expect(w.activeSourceId).toBe(root);
+  expect(w.mssql?.database).toBe(ms.config.database);
+  expect(tabSource(w, second).connection?.config.database).toBe(
+    "AdventureWorksLT2019_Test",
+  );
+});
+
+it("keeps refreshed active metadata isolated and captures it on save/export and source switches", () => {
+  const w = createWorkspace(false);
+  const id = attachSource(w, ms);
+  activateSource(w, id);
+  const schema = structuredClone(createWorkspace().schema);
+  const next = produce(w, (draft) => updateSource(draft, id, { schema }));
+  expect(
+    workspaceSources(next).find((source) => source.id === id)?.schema,
+  ).toEqual(schema);
+  const saved = workspaceSnapshot(next);
+  expect(saved.sources?.find((source) => source.id === id)?.schema).toEqual(
+    schema,
+  );
+  expect(parseWorkspace(JSON.stringify(saved)).schema).toEqual(schema);
+  schema.tables[0].name = "external mutation";
+  expect(next.schema.tables[0].name).not.toBe("external mutation");
+  const switched = produce(next, (draft) => activateSource(draft, "primary"));
+  const returned = produce(switched, (draft) => activateSource(draft, id));
+  expect(returned.schema).toEqual(next.schema);
+  expect(next.schema.tables.length).toBeGreaterThan(0);
+});
+
+it("detaches snapshots of mutable inputs while sharing only frozen catalog state", () => {
+  const mutable = createWorkspace();
+  const snapshot = workspaceSnapshot(mutable);
+  mutable.schema.tables[0].name = "changed after save";
+  expect(snapshot.schema.tables[0].name).not.toBe("changed after save");
+  const frozen = produce(createWorkspace(), (draft) => {
+    draft.sql = "SELECT 42";
+  });
+  const immutableSnapshot = workspaceSnapshot(frozen);
+  expect(immutableSnapshot.schema).toBe(frozen.schema);
+  expect(immutableSnapshot).not.toBe(frozen);
 });

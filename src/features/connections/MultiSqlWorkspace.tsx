@@ -1,29 +1,42 @@
-import { listDatabases, withDatabaseSession } from "./databases";
-import { useRef, useState, type MutableRefObject } from "react";
+import { useSqlResults } from "../sql/result-state";
+import {
+  listDatabases,
+  withDatabaseSession,
+  ensureDatabaseSession,
+} from "./databases";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import type { WorkspaceDefinition, WorkspaceSource } from "../../types/schema";
 import { useStore } from "../schema/store";
 import { SqlWorkspace } from "../sql/SqlWorkspace";
 import { activeSqlTab, sqlTabs, setSqlTabs } from "../sql/tabs";
-import { executeSqlBatch, type SqlResult } from "../sql/execution";
+import {
+  executeSqlBatch,
+  sqlMayChangeSchema,
+  type SqlResult,
+} from "../sql/execution";
 import { validateSql } from "../sql/diagnostics";
 import {
-  query,
+  queryCancelable,
+  cancelLocalQuery,
   rebuild,
   snapshot,
   withSqlValidator,
 } from "../../lib/duckdb/engine";
 import { catalogSchema, pgError } from "../postgres/model";
 import { isTauri } from "../postgres/client";
-import { remoteClient, connectRemote } from "./client";
+import { remoteClient } from "./client";
 import { engineName } from "./model";
-import { ConnectionDialog } from "./ConnectionDialog";
 import {
   NeedsConnection,
-  retainSession,
-  discardConnectionSession,
+  useConnectionStatus,
+  useSessionRevision,
+  markConnectionUnavailable,
+  requestConnection,
+  getSession,
 } from "./sessions";
 import {
   attachDatabase,
+  syncActiveSqlSource,
   connectionRoot,
   databaseSources,
   sourceSessionKey,
@@ -31,7 +44,6 @@ import {
   updateSource,
   workspaceSources,
 } from "./sources";
-import { saveConnection, storage } from "../../lib/storage/workspaces";
 export function MultiSqlWorkspace({
   workspace: w,
   connectionHost,
@@ -48,16 +60,17 @@ export function MultiSqlWorkspace({
   runRef: MutableRefObject<() => void>;
 }) {
   const edit = useStore((state) => state.edit);
-  const [results, setResults] = useState<Record<string, SqlResult[]>>({});
+  const [results, setResults, resultContexts] = useSqlResults(w.id);
   const [error, setError] = useState("");
-  const [login, setLogin] = useState<WorkspaceSource | null>(null);
-  const [revision, setRevision] = useState(0);
+  const revision = useSessionRevision();
   const selection = useRef({ tabId: "", sql: "" });
   const running = useRef(false);
+  const executionId = useRef(0);
+  const [queryRunning, setQueryRunning] = useState(false);
+  const [cancelPending, setCancelPending] = useState(false);
   const cancelled = useRef(false);
   const localReady = useRef("");
   const localStarting = useRef<Promise<void> | null>(null);
-  const resultContexts = useRef<Record<string, string>>({});
   const resultContext = (source: WorkspaceSource) =>
     JSON.stringify([source.id, source.connection]);
   const activeRun = useRef<{
@@ -65,6 +78,46 @@ export function MultiSqlWorkspace({
     sessionId: string;
   } | null>(null);
   const sources = workspaceSources(w);
+  const activeSource = tabSource(w, activeSqlTab(w));
+  const activeSourceId = activeSource.id;
+  const connectionStatus = useConnectionStatus(
+    sourceSessionKey(w.id, activeSourceId),
+    activeSource.connection,
+  );
+  useEffect(() => {
+    if (activeSourceId !== w.activeSourceId)
+      edit((draft) => syncActiveSqlSource(draft));
+  }, [activeSourceId, w.activeSourceId, edit]);
+  const activeConnectionSignature = JSON.stringify(activeSource.connection);
+  useEffect(() => {
+    if (!activeSource.connection || !isTauri()) return;
+    const source = activeSource;
+    let stale = false;
+    void ensureDatabaseSession(w, source.id)
+      .then(() => {
+        const cached = getSession(
+          sourceSessionKey(w.id, source.id),
+          source.connection!,
+        )?.catalog;
+        if (
+          !stale &&
+          cached &&
+          !source.schema.tables.length &&
+          useStore.getState().workspace.id === w.id
+        )
+          edit((draft) => {
+            if (draft.sources?.some((item) => item.id === source.id))
+              updateSource(draft, source.id, { schema: catalogSchema(cached) });
+          });
+      })
+      .catch((error) => {
+        if (!stale && !(error instanceof NeedsConnection))
+          setError(pgError(error));
+      });
+    return () => {
+      stale = true;
+    };
+  }, [w.id, activeSourceId, activeConnectionSignature]);
   function sourceFor(tabId: string) {
     const tab = sqlTabs(w).find((tab) => tab.id === tabId);
     if (!tab) throw Error("SQL tab was closed.");
@@ -101,7 +154,10 @@ export function MultiSqlWorkspace({
         : tab.sql);
     if (!text.trim()) return;
     running.current = true;
+    executionId.current++;
     cancelled.current = false;
+    setQueryRunning(true);
+    setCancelPending(false);
     onBusy(true);
     setError("");
     try {
@@ -115,6 +171,7 @@ export function MultiSqlWorkspace({
         const config = source.connection;
         const client = remoteClient(config.engine);
         output = await withDatabaseSession(w, source, async (session) => {
+          if (cancelled.current) throw Error("Query stopped before execution.");
           activeRun.current = { source, sessionId: session.sessionId };
           const value = await executeSqlBatch(
             text,
@@ -133,7 +190,9 @@ export function MultiSqlWorkspace({
                     "closed" in error &&
                     error.closed
                   )
-                    discardConnectionSession(sourceSessionKey(w.id, source.id));
+                    markConnectionUnavailable(
+                      sourceSessionKey(w.id, source.id),
+                    );
                   throw error;
                 });
               const describe = (set: typeof result) => ({
@@ -147,32 +206,47 @@ export function MultiSqlWorkspace({
             },
             config.engine === "mssql" ? "mssql" : "default",
           );
-          try {
-            const schema = catalogSchema(
-              await client.refresh(session.sessionId),
-            );
-            edit((draft) => updateSource(draft, source.id, { schema }));
-          } catch {
-            setError(
-              "SQL completed. Refresh the connection schema before editing data if the schema changed.",
-            );
-          }
+          setQueryRunning(false);
+          if (
+            !cancelled.current &&
+            sqlMayChangeSchema(
+              text,
+              config.engine === "mssql" ? "mssql" : "default",
+            )
+          )
+            try {
+              const schema = catalogSchema(
+                await client.refresh(session.sessionId),
+              );
+              edit((draft) => updateSource(draft, source.id, { schema }));
+            } catch {
+              setError(
+                "SQL completed. Refresh the connection schema before editing data if the schema changed.",
+              );
+            }
           return value;
         });
       } else {
         await ensureLocal(source);
-        output = await executeSqlBatch(text, query);
+        output = await executeSqlBatch(text, async (sql) => {
+          if (cancelled.current)
+            throw Error("Query stopped. Remaining statements were skipped.");
+          return queryCancelable(sql);
+        });
+        setQueryRunning(false);
         const data = await snapshot({ ...w, schema: source.schema });
         edit((draft) => updateSource(draft, source.id, { data }));
       }
-      resultContexts.current[tab.id] = resultContext(source);
+      resultContexts[tab.id] = resultContext(source);
       setResults((previous) => ({ ...previous, [tab.id]: output }));
     } catch (e) {
-      if (e instanceof NeedsConnection) setLogin(source);
+      if (e instanceof NeedsConnection) requestConnection(w.id, source.id);
       else setError(pgError(e));
     } finally {
       activeRun.current = null;
       running.current = false;
+      setQueryRunning(false);
+      setCancelPending(false);
       onBusy(false);
     }
   }
@@ -181,6 +255,14 @@ export function MultiSqlWorkspace({
   };
   return (
     <section className="multi-sql-workspace">
+      <div className="compact-toolbar pg-connection-bar" role="status">
+        <span className="toolbar-count">
+          {connectionStatus} ·{" "}
+          {activeSource.connection
+            ? activeSource.connection.config.database
+            : "Local DuckDB"}
+        </span>
+      </div>
       {error && (
         <div className="sheet-error" role="alert">
           {error}
@@ -197,7 +279,10 @@ export function MultiSqlWorkspace({
           })
         }
         onTabsChange={(tabs, active, layout) =>
-          edit((draft) => setSqlTabs(draft, tabs, active, layout))
+          edit((draft) => {
+            setSqlTabs(draft, tabs, active, layout);
+            syncActiveSqlSource(draft);
+          })
         }
         value={activeSqlTab(w).sql}
         onChange={() => {}}
@@ -209,8 +294,7 @@ export function MultiSqlWorkspace({
           Object.entries(results).filter(([tabId]) => {
             const tab = sqlTabs(w).find((tab) => tab.id === tabId);
             return (
-              tab &&
-              resultContexts.current[tabId] === resultContext(tabSource(w, tab))
+              tab && resultContexts[tabId] === resultContext(tabSource(w, tab))
             );
           }),
         )}
@@ -274,7 +358,8 @@ export function MultiSqlWorkspace({
                 edit((draft) => updateSource(draft, root.id, { databases }));
             })
             .catch((e) => {
-              if (e instanceof NeedsConnection) setLogin(source);
+              if (e instanceof NeedsConnection)
+                requestConnection(w.id, source.id);
               else setError(pgError(e));
             });
         }}
@@ -296,6 +381,7 @@ export function MultiSqlWorkspace({
               ),
               tabId,
             );
+            syncActiveSqlSource(draft);
           });
           const current = useStore.getState().workspace;
           const target = tabSource(
@@ -314,7 +400,8 @@ export function MultiSqlWorkspace({
                 );
             })
             .catch((e) => {
-              if (e instanceof NeedsConnection) setLogin(target);
+              if (e instanceof NeedsConnection)
+                requestConnection(w.id, target.id);
               else setError(pgError(e));
             });
         }}
@@ -325,21 +412,16 @@ export function MultiSqlWorkspace({
             delete next[tabId];
             return next;
           });
-          edit((draft) =>
+          edit((draft) => {
             setSqlTabs(
               draft,
               sqlTabs(draft).map((tab) =>
                 tab.id === tabId ? { ...tab, sourceId } : tab,
               ),
               tabId,
-            ),
-          );
-        }}
-        onConnectTab={(tabId) => {
-          setError("");
-          const source = sourceFor(tabId);
-          if (isTauri()) setLogin(source);
-          else setError("Open the desktop app to connect to this database.");
+            );
+            syncActiveSqlSource(draft);
+          });
         }}
         validationSource={String(revision)}
         validateTab={async (tabId, sql) => {
@@ -355,86 +437,40 @@ export function MultiSqlWorkspace({
           await ensureLocal(source);
           return withSqlValidator((prepare) => validateSql(sql, prepare));
         }}
+        cancelPending={cancelPending}
         onCancel={
-          activeRun.current?.source.connection
+          queryRunning
             ? () => {
+                if (cancelled.current) return;
                 cancelled.current = true;
+                setCancelPending(true);
+                const requestId = executionId.current;
                 const active = activeRun.current;
-                if (active?.source.connection) {
-                  const config = active.source.connection;
-                  void remoteClient(config.engine)
-                    .cancel(active.sessionId)
-                    .catch((e) => setError(pgError(e)));
-                  if (config.engine === "mssql")
-                    discardConnectionSession(
-                      sourceSessionKey(w.id, active.source.id),
-                    );
+                if (!active?.source.connection) {
+                  void cancelLocalQuery().catch((error) => {
+                    if (executionId.current !== requestId || !running.current)
+                      return;
+                    cancelled.current = false;
+                    setError(pgError(error));
+                    setCancelPending(false);
+                  });
+                  return;
                 }
+                const config = active.source.connection;
+                void remoteClient(config.engine)
+                  .cancel(active.sessionId)
+                  .catch((error) => {
+                    if (executionId.current !== requestId || !running.current)
+                      return;
+                    setError(pgError(error));
+                    setCancelPending(false);
+                    // Permit retry if the transport rejected the cancellation request.
+                    cancelled.current = false;
+                  });
               }
             : undefined
         }
       />
-      {login?.connection && (
-        <ConnectionDialog
-          initial={login.connection}
-          onClose={() => setLogin(null)}
-          onConnect={async (config, password) => {
-            onBusy(true);
-            try {
-              const result = await connectRemote(config, password);
-              try {
-                if (login.connectionId) {
-                  const profile = await storage.connections.get(
-                    login.connectionId,
-                  );
-                  if (profile)
-                    await saveConnection({
-                      ...profile,
-                      ...config,
-                      updatedAt: Date.now(),
-                    });
-                }
-                edit((draft) =>
-                  updateSource(draft, login.id, {
-                    connection: config,
-                    schema: catalogSchema(result.catalog),
-                  }),
-                );
-                retainSession(sourceSessionKey(w.id, login.id), {
-                  sessionId: result.sessionId,
-                  serverVersion: result.serverVersion,
-                  config,
-                  disconnect: remoteClient(config.engine).disconnect,
-                });
-              } catch (e) {
-                await remoteClient(config.engine)
-                  .disconnect(result.sessionId)
-                  .catch(() => {});
-                throw e;
-              }
-              try {
-                const current = useStore.getState().workspace;
-                const target = workspaceSources(current).find(
-                  (s) => s.id === login.id,
-                )!;
-                const databases = await listDatabases(current, target);
-                if (current.id === w.id)
-                  edit((draft) =>
-                    updateSource(draft, connectionRoot(current, target).id, {
-                      databases,
-                    }),
-                  );
-              } catch {
-                /* Discovery can be retried from the sidebar. */
-              }
-              setRevision((n) => n + 1);
-              setError("");
-            } finally {
-              onBusy(false);
-            }
-          }}
-        />
-      )}
     </section>
   );
 }

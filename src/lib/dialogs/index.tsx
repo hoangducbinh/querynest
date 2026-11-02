@@ -1,7 +1,12 @@
 import { useState, useSyncExternalStore } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Button } from "../../components/ui/button";
-type Request = {
+type ConfirmOptions = {
+  title?: string;
+  confirmLabel?: string;
+  destructive?: boolean;
+};
+type Request = ConfirmOptions & {
   id: number;
   kind: "confirm" | "prompt";
   message: string;
@@ -17,18 +22,25 @@ const subscribe = (fn: () => void) => {
   };
 };
 const emit = () => listeners.forEach((fn) => fn());
-function request(kind: Request["kind"], message: string, initial = "") {
+function request(
+  kind: Request["kind"],
+  message: string,
+  initial = "",
+  options: ConfirmOptions = {},
+) {
   return new Promise<string | null>((resolve) => {
     if (pending) {
       resolve(null);
       return;
     }
-    pending = { id: Date.now(), kind, message, initial, resolve };
+    pending = { ...options, id: Date.now(), kind, message, initial, resolve };
     emit();
   });
 }
-export const confirmAction = async (message: string) =>
-  (await request("confirm", message)) !== null;
+export const confirmAction = async (
+  message: string,
+  options: ConfirmOptions = {},
+) => (await request("confirm", message, "", options)) !== null;
 export const promptValue = (message: string, initial = "") =>
   request("prompt", message, initial);
 function finish(value: string | null) {
@@ -52,9 +64,9 @@ function RequestDialog({ request: r }: { request: Request }) {
     >
       <Dialog.Portal>
         <Dialog.Overlay className="modal-overlay" />
-        <Dialog.Content className="modal">
+        <Dialog.Content className="modal action-dialog" data-kind={r.kind}>
           <Dialog.Title>
-            {r.kind === "confirm" ? "Confirm action" : "Edit data"}
+            {r.title ?? (r.kind === "confirm" ? "Continue?" : "Edit value")}
           </Dialog.Title>
           <Dialog.Description>{r.message}</Dialog.Description>
           <form
@@ -68,15 +80,25 @@ function RequestDialog({ request: r }: { request: Request }) {
                 aria-label="JSON value"
                 autoFocus
                 rows={5}
-                style={{ width: "100%", marginBottom: 16 }}
+                className="action-dialog-value"
                 value={value}
                 onChange={(e) => setValue(e.target.value)}
               />
             )}
-            <div className="row">
-              <Button onClick={() => finish(null)}>Cancel</Button>
-              <Button type="submit" className="primary">
-                {r.kind === "confirm" ? "Confirm" : "Save value"}
+            <div className="action-dialog-actions">
+              <Button
+                autoFocus={r.kind === "confirm"}
+                onClick={() => finish(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                className={
+                  r.destructive ? "action-dialog-destructive" : "primary"
+                }
+              >
+                {r.confirmLabel ?? (r.kind === "confirm" ? "Continue" : "Save")}
               </Button>
             </div>
           </form>

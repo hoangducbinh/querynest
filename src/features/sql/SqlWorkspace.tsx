@@ -1,4 +1,5 @@
-import * as Popover from "@radix-ui/react-popover";
+import { DatabasePicker } from "../connections/DatabasePicker";
+import { ConnectionPicker } from "../connections/ConnectionPicker";
 import { createPortal } from "react-dom";
 import { bindNewTabs } from "./tabs";
 import {
@@ -11,13 +12,11 @@ import {
 import { useRef, useState } from "react";
 import {
   LoaderCircle,
-  MoreHorizontal,
   PanelBottom,
   Play,
+  Square,
   Columns2,
   ArrowLeftRight,
-  X,
-  Plug,
 } from "lucide-react";
 import type { SqlDialect } from "./data-types";
 import type { SqlTab, SqlLayout, DatabaseSchema } from "../../types/schema";
@@ -46,7 +45,6 @@ interface Props {
   getTabContext?: (tabId: string) => TabContext;
   tabContext?: TabContext;
   onTabConnectionChange?: (tabId: string, sourceId: string) => void;
-  onConnectTab?: (tabId: string) => void;
   onTabDatabaseChange?: (tabId: string, database: string) => void;
   onDiscoverTabDatabases?: (tabId: string) => void;
   validateTab?: (tabId: string, sql: string) => Promise<SqlDiagnostic[]>;
@@ -70,6 +68,7 @@ interface Props {
   validate?: (sql: string) => Promise<SqlDiagnostic[]>;
   validationSource?: string;
   onCancel?: () => void;
+  cancelPending?: boolean;
 }
 function SqlConnectionControls({
   tabContext,
@@ -79,7 +78,6 @@ function SqlConnectionControls({
   onTabConnectionChange,
   onTabDatabaseChange,
   onDiscoverTabDatabases,
-  onConnectTab,
 }: Pick<
   Props,
   | "tabContext"
@@ -89,55 +87,23 @@ function SqlConnectionControls({
   | "onTabConnectionChange"
   | "onTabDatabaseChange"
   | "onDiscoverTabDatabases"
-  | "onConnectTab"
 >) {
   return (
     tabContext &&
     connectionOptions && (
       <>
-        <select
-          className="sql-connection-select"
-          aria-label="SQL tab connection"
+        <ConnectionPicker
           value={tabContext.connectionRootId ?? tabContext.sourceId}
           disabled={busy}
-          onChange={(event) =>
-            onTabConnectionChange?.(activeId, event.target.value)
-          }
-        >
-          {connectionOptions.map((source) => (
-            <option value={source.id} key={source.id}>
-              {source.name}
-            </option>
-          ))}
-        </select>
-        {
-          <select
-            className="sql-database-select"
-            aria-label="SQL tab database"
-            value={tabContext.database ?? "main"}
-            disabled={busy || !tabContext.remote}
-            onFocus={() => onDiscoverTabDatabases?.(activeId)}
-            onChange={(event) =>
-              onTabDatabaseChange?.(activeId, event.target.value)
-            }
-          >
-            {(tabContext.databases ?? ["main"]).map((database) => (
-              <option value={database} key={database}>
-                {database}
-              </option>
-            ))}
-          </select>
-        }
-        {tabContext.remote && (
-          <Button
-            title="Connect or configure this tab's database"
-            aria-label="Connect tab database"
-            disabled={busy}
-            onClick={() => onConnectTab?.(activeId)}
-          >
-            <Plug size={14} />
-          </Button>
-        )}
+          onSelect={(id) => onTabConnectionChange?.(activeId, id)}
+        />
+        <DatabasePicker
+          value={tabContext.database ?? "main"}
+          databases={tabContext.databases ?? ["main"]}
+          disabled={busy || !tabContext.remote}
+          onDiscover={() => onDiscoverTabDatabases?.(activeId)}
+          onSelect={(database) => onTabDatabaseChange?.(activeId, database)}
+        />
       </>
     )
   );
@@ -162,11 +128,11 @@ function SqlPane({
   validate,
   validationSource,
   onCancel,
+  cancelPending = false,
   onSplit,
   connectionOptions,
   tabContext,
   onTabConnectionChange,
-  onConnectTab,
   onTabDatabaseChange,
   onDiscoverTabDatabases,
   onMoveTab,
@@ -216,7 +182,6 @@ function SqlPane({
               onTabConnectionChange={onTabConnectionChange}
               onTabDatabaseChange={onTabDatabaseChange}
               onDiscoverTabDatabases={onDiscoverTabDatabases}
-              onConnectTab={onConnectTab}
             />
           )}
           <span
@@ -229,66 +194,57 @@ function SqlPane({
           >
             {validationStatus}
           </span>
-          <Popover.Root>
-            <Popover.Trigger asChild>
-              <Button title="SQL pane options" aria-label="SQL pane options">
-                <MoreHorizontal size={15} />
-              </Button>
-            </Popover.Trigger>
-            <Popover.Portal>
-              <Popover.Content
-                className="sql-pane-menu"
-                sideOffset={6}
-                align="end"
-                onCloseAutoFocus={(event) => event.preventDefault()}
-              >
-                {splitOpen && (
-                  <Popover.Close asChild>
-                    <Button
-                      title="Move current tab to other split"
-                      aria-label="Move current tab to other split"
-                      onClick={onMoveTab}
-                      disabled={busy}
-                    >
-                      <ArrowLeftRight size={14} />
-                      Move tab to other pane
-                    </Button>
-                  </Popover.Close>
-                )}
-                <Popover.Close asChild>
-                  <Button
-                    title={splitOpen ? "Close SQL split" : "Split SQL editor"}
-                    aria-label={
-                      splitOpen ? "Close SQL split" : "Split SQL editor"
-                    }
-                    onClick={onSplit}
-                    disabled={busy}
-                  >
-                    {splitOpen ? <X size={14} /> : <Columns2 size={14} />}
-                    {splitOpen ? "Close split" : "Split editor"}
-                  </Button>
-                </Popover.Close>
-                <Popover.Close asChild>
-                  <Button
-                    title={results ? "Hide results" : "Show results"}
-                    aria-pressed={results}
-                    onClick={() => setResults(!results)}
-                  >
-                    <PanelBottom size={15} />
-                    {results ? "Hide results" : "Show results"}
-                  </Button>
-                </Popover.Close>
-              </Popover.Content>
-            </Popover.Portal>
-          </Popover.Root>
-          {busy && onCancel && <Button onClick={onCancel}>Cancel query</Button>}
+          {splitOpen && (
+            <Button
+              title="Move tab to other pane"
+              onClick={onMoveTab}
+              disabled={busy}
+            >
+              <ArrowLeftRight size={14} />
+            </Button>
+          )}
+          <Button
+            title={splitOpen ? "Close SQL split" : "Split SQL editor"}
+            aria-pressed={!!splitOpen}
+            className={splitOpen ? "is-active" : undefined}
+            onClick={onSplit}
+            disabled={busy}
+          >
+            <Columns2 size={14} />
+          </Button>
+          <Button
+            title={results ? "Hide results" : "Show results"}
+            aria-pressed={results}
+            className={results ? "is-active" : undefined}
+            onClick={() => setResults(!results)}
+          >
+            <PanelBottom size={14} />
+          </Button>
+          {busy && onCancel && (
+            <Button
+              className="sql-stop-button"
+              aria-label="Stop query"
+              title="Stop the running query and skip remaining batches"
+              disabled={cancelPending}
+              onClick={onCancel}
+            >
+              {cancelPending ? (
+                <LoaderCircle className="spin" size={13} />
+              ) : (
+                <Square size={12} fill="currentColor" />
+              )}
+              <span aria-live="polite">
+                {cancelPending ? "Stopping…" : "Stop"}
+              </span>
+            </Button>
+          )}
           <Button
             title={
               validationSource === "SQL Server"
                 ? "Run selected T-SQL or the whole tab. Use GO on its own line to separate batches."
                 : "Run selected SQL or the whole tab. Separate SELECT queries with a blank line or semicolon."
             }
-            className="primary sql-run-button"
+            className="sql-run-button"
             aria-label={hasSelection ? "Run selected SQL" : "Run SQL"}
             disabled={disabled}
             onClick={() =>
@@ -298,7 +254,7 @@ function SqlPane({
             {busy ? (
               <LoaderCircle className="spin" size={14} />
             ) : (
-              <Play size={13} />
+              <Play size={12} fill="currentColor" strokeWidth={0} />
             )}
             <span>{hasSelection ? "Run selection" : "Run"}</span>
             <kbd>⌘ ↵</kbd>
@@ -315,7 +271,11 @@ function SqlPane({
             autoFocus={autoFocus}
             schema={tabContext?.schema}
             dialect={tabContext?.dialect}
-            validationEnabled={!disabled}
+            validationEnabled={
+              !disabled &&
+              !tabContext?.remote &&
+              !(validate && validationSource !== "DuckDB")
+            }
             validate={validate}
             validationSource={validationSource}
             onValidation={setValidationStatus}

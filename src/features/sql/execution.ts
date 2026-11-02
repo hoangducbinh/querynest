@@ -1,3 +1,4 @@
+import { tokenize } from "./lexer";
 import { sqlStatements, mssqlBatches } from "./statements";
 export interface SqlResult {
   sql: string;
@@ -50,4 +51,18 @@ export async function executeSqlBatch(
     }
   }
   return results;
+}
+
+/** Conservative invalidation; strings/comments do not imply a schema change. */
+export function sqlMayChangeSchema(
+  sql: string,
+  dialect: "default" | "mssql" = "default",
+) {
+  return tokenize(sql, dialect).some(
+    (token) =>
+      token.kind === "word" &&
+      /^(CREATE|ALTER|DROP|RENAME|EXEC|EXECUTE|CALL|GRANT|REVOKE)$/i.test(
+        token.text,
+      ),
+  );
 }

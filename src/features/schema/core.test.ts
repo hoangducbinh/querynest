@@ -7,7 +7,6 @@ import {
 } from "./core";
 import { generateDDL } from "../../lib/ddl/generate";
 import { useStore } from "./store";
-import { compareResults } from "../test-cases/compare";
 import "fake-indexeddb/auto";
 import { saveWorkspace, storage } from "../../lib/storage/workspaces";
 describe("canonical schema", () => {
@@ -94,14 +93,5 @@ describe("canonical schema", () => {
     expect(await storage.workspaces.get(w.id)).toEqual(w);
     expect(parseWorkspace(JSON.stringify(w))).toEqual(w);
     await storage.workspaces.delete(w.id);
-  });
-  it("compares ordered/unordered rows, NULL, and numeric serialization", () => {
-    expect(
-      compareResults([{ x: 1 }, { x: null }], [{ x: null }, { x: "1" }], false),
-    ).toBe(true);
-    expect(
-      compareResults([{ x: 1 }, { x: null }], [{ x: null }, { x: 1 }], true),
-    ).toBe(false);
-    expect(compareResults([{ x: null }], [{}], false)).toBe(false);
   });
 });

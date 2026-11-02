@@ -69,7 +69,13 @@ export async function rebuild(w: WorkspaceDefinition) {
 }
 export async function query(sql: string) {
   if (!connection) throw Error("Apply the schema to initialize DuckDB first.");
-  const result = await connection.query(sql);
+  return queryResult(await connection.query(sql));
+}
+type ArrowResult = Pick<
+  Awaited<ReturnType<duckdb.AsyncDuckDBConnection["query"]>>,
+  "schema" | "toArray"
+>;
+function queryResult(result: ArrowResult) {
   return {
     columns: result.schema.fields.map((f) => f.name),
     rows: result.toArray().map((r) => {
@@ -96,6 +102,47 @@ export async function query(sql: string) {
     }),
   };
 }
+let activeQuery:
+  { connection: duckdb.AsyncDuckDBConnection; cancelled: boolean } | undefined;
+export async function queryCancelable(sql: string) {
+  if (!connection) throw Error("Apply the schema to initialize DuckDB first.");
+  if (activeQuery) throw Error("Another local query is running.");
+  const active = { connection, cancelled: false };
+  activeQuery = active;
+  try {
+    // Pending queries yield back to the worker so it can receive cancellation.
+    // The synchronous query API blocks worker messages until execution completes.
+    const reader = await active.connection.send(sql, false);
+    await reader.open();
+    // Arrow may clear its schema when the stream auto-closes at EOF.
+    const columns = reader.schema.fields.map((field) => field.name);
+    const rows: Record<string, unknown>[] = [];
+    for await (const batch of reader) {
+      if (active.cancelled) throw Error("Query stopped.");
+      rows.push(...queryResult(batch).rows);
+    }
+    if (active.cancelled) throw Error("Query stopped.");
+    return { columns, rows };
+  } catch (error) {
+    if (active.cancelled)
+      throw Error("Query stopped. Remaining statements were skipped.");
+    throw error;
+  } finally {
+    if (activeQuery === active) activeQuery = undefined;
+  }
+}
+export async function cancelLocalQuery() {
+  const active = activeQuery;
+  if (!active) return;
+  active.cancelled = true;
+  try {
+    await active.connection.cancelSent();
+  } catch (error) {
+    active.cancelled = false;
+    throw error;
+  }
+}
+
 export async function snapshot(w: WorkspaceDefinition) {
   const data: WorkspaceDefinition["data"] = {};
   for (const t of w.schema.tables)

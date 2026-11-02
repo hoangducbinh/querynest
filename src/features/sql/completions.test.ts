@@ -203,3 +203,47 @@ describe("concise SQL Server identifiers", () => {
     ).toBe("[a]]b]");
   });
 });
+
+it("bounds suggestions on a 3,000-table catalog and resolves columns only for referenced tables", () => {
+  const large = {
+    relationships: [],
+    tables: Array.from({ length: 3000 }, (_, index) => ({
+      ...schema.tables[0],
+      id: `table-${index}`,
+      name: `table_${index}`,
+      namespace: "dbo",
+      columns: Array.from({ length: 50 }, (_, column) => ({
+        ...schema.tables[0].columns[0],
+        id: `${index}-${column}`,
+        name: `field_${column}`,
+      })),
+    })),
+  };
+  const sql = "SELECT ";
+  const unbound = sqlCompletions(sql, sql.length, large, [], "mssql");
+  expect(unbound.suggestions.length).toBeLessThanOrEqual(500);
+  expect(unbound.suggestions.some((item) => item.kind === "column")).toBe(
+    false,
+  );
+  const query = "SELECT t. FROM dbo.table_2999 t";
+  const bound = sqlCompletions(
+    query,
+    query.indexOf(".") + 1,
+    large,
+    [],
+    "mssql",
+  );
+  expect(
+    bound.suggestions.filter((item) => item.kind === "column"),
+  ).toHaveLength(50);
+  const filtered = "SELECT * FROM table_2999";
+  expect(
+    sqlCompletions(
+      filtered,
+      filtered.length,
+      large,
+      [],
+      "mssql",
+    ).suggestions.map((item) => item.label),
+  ).toEqual(["table_2999"]);
+});

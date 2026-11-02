@@ -16,6 +16,13 @@ export interface MssqlConfig {
 export type RemoteConfig =
   | { engine: "postgres"; config: PostgresConfig }
   | { engine: "mssql"; config: MssqlConfig };
+export const connectionEngines: {
+  id: RemoteConfig["engine"];
+  label: string;
+}[] = [
+  { id: "mssql", label: "SQL Server" },
+  { id: "postgres", label: "PostgreSQL" },
+];
 export type ConnectionProfile = RemoteConfig & {
   id: string;
   name: string;

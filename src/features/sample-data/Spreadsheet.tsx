@@ -1,10 +1,20 @@
+import {
+  ColumnResizeHandle,
+  fitColumnWidth,
+  useColumnWidths,
+  useColumnWindow,
+} from "./column-sizing";
 import { duckCellHint } from "../../lib/duckdb/values";
 import {
+  memo,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
+  type ClipboardEvent,
+  type RefObject,
 } from "react";
 import {
   Check,
@@ -15,7 +25,7 @@ import {
   Search,
   Trash2,
 } from "lucide-react";
-import type { TableDefinition } from "../../types/schema";
+import type { ColumnDefinition, TableDefinition } from "../../types/schema";
 import { Button } from "../../components/ui/button";
 import { confirmAction } from "../../lib/dialogs";
 import {
@@ -33,6 +43,14 @@ const initialDrafts = (rows: Record<string, unknown>[]) => [
   ...rows.map((row) => makeDraft(row)),
   ...Array.from({ length: Math.max(1, 12 - rows.length) }, () => makeDraft()),
 ];
+const valueAt = (row: DraftRow, name: string): CellValue =>
+  Object.hasOwn(row.cells, name)
+    ? row.cells[name]
+    : row.original?.[name] === null
+      ? null
+      : row.original && Object.hasOwn(row.original, name)
+        ? cellText(row.original[name])
+        : undefined;
 interface Props {
   table: TableDefinition;
   rows: Record<string, unknown>[];
@@ -74,6 +92,43 @@ export function Spreadsheet({
   const [filter, setFilter] = useState("");
   const [page, setPage] = useState(0);
   const root = useRef<HTMLDivElement>(null);
+  const sizing = useColumnWidths(
+    `data:${table.namespace ?? ""}:${table.id}:${table.name}`,
+    table.columns.map((column) => column.id),
+  );
+  const defaultWidths = useMemo(
+    () =>
+      table.columns.map((column) =>
+        fitColumnWidth(
+          column.name,
+          rows.map((row) => row[column.name]),
+          280,
+        ),
+      ),
+    [table.columns, rows],
+  );
+  const cellHints = useMemo(
+    () =>
+      table.columns.map((column) =>
+        duckCellHint(column.nativeType ?? column.type),
+      ),
+    [table.columns],
+  );
+  const widths = table.columns.map((column, index) =>
+    sizing.width(column.id, defaultWidths[index]),
+  );
+  const columnViewport = useColumnWindow(widths);
+  const visibleColumns = useMemo(
+    () =>
+      table.columns
+        .slice(columnViewport.start, columnViewport.end)
+        .map((column, offset) => ({
+          column,
+          index: columnViewport.start + offset,
+        })),
+    [table.columns, columnViewport.start, columnViewport.end],
+  );
+  const previousRows = useRef(rows);
   const dirty = drafts.some(isChanged);
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
@@ -86,6 +141,8 @@ export function Spreadsheet({
     return () => onDirty(false);
   }, [dirty, onDirty]);
   useEffect(() => {
+    if (rows === previousRows.current) return;
+    previousRows.current = rows;
     if (!dirtyRef.current) {
       setDrafts(initialDrafts(rows));
       setSelected(new Set());
@@ -96,19 +153,21 @@ export function Spreadsheet({
       const input = root.current?.querySelector<HTMLInputElement>(
         `input[data-row="${focus.row}"][data-col="${focus.col}"]`,
       );
-      input?.focus();
-      input?.select();
+      if (!input) {
+        const viewport = columnViewport.ref.current;
+        if (viewport) {
+          const left =
+            40 +
+            widths.slice(0, focus.col).reduce((sum, width) => sum + width, 0);
+          viewport.scrollLeft = Math.max(0, left - 40);
+        }
+        return;
+      }
+      input.focus();
+      input.select();
       setFocus(null);
     }
-  }, [focus, drafts]);
-  const valueAt = (row: DraftRow, name: string): CellValue =>
-    Object.hasOwn(row.cells, name)
-      ? row.cells[name]
-      : row.original?.[name] === null
-        ? null
-        : row.original && Object.hasOwn(row.original, name)
-          ? cellText(row.original[name])
-          : undefined;
+  }, [focus, drafts, columnViewport.start, columnViewport.end]);
   function update(row: number, col: number, value: CellValue) {
     const column = table.columns[col];
     if (
@@ -293,6 +352,51 @@ export function Spreadsheet({
     if (first) setActive({ row: first.index, col: 0 });
     root.current?.querySelector(".sheet-grid-scroll")?.scrollTo({ top: 0 });
   }
+  function paste(
+    event: ClipboardEvent<HTMLInputElement>,
+    row: number,
+    column: number,
+  ) {
+    if (disabled || saving || readOnlyReason || requiresRefresh) {
+      event.preventDefault();
+      return;
+    }
+    const text = event.clipboardData.getData("text/plain");
+    if (!/[\t\r\n]/.test(text)) return;
+    event.preventDefault();
+    try {
+      setDrafts((current) =>
+        pasteCells(current, table, row, column, parseClipboard(text)),
+      );
+      setError("");
+      setNotice("");
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    }
+  }
+  const cellHandlers = useRef<CellHandlers>({
+    update,
+    handleKey,
+    paste,
+    focus: () => {},
+    select: () => {},
+  });
+  cellHandlers.current = {
+    select: (id, checked) =>
+      setSelected((current) => {
+        const next = new Set(current);
+        if (checked) next.add(id);
+        else next.delete(id);
+        return next;
+      }),
+    update,
+    handleKey,
+    paste,
+    focus: (row, col) =>
+      setActive((old) =>
+        old.row === row && old.col === col ? old : { row, col },
+      ),
+  };
   const selectedRow = drafts[active.row];
   const activeColumn = table.columns[active.col];
   return (
@@ -427,8 +531,18 @@ export function Spreadsheet({
           </button>
         </div>
       )}
-      <div className="sheet-grid-scroll">
-        <table className="sheet-grid" aria-label={`${table.name} data grid`}>
+      <div className="sheet-grid-scroll" ref={columnViewport.ref}>
+        <table
+          className="sheet-grid"
+          aria-label={`${table.name} data grid`}
+          style={{ width: 40 + widths.reduce((sum, width) => sum + width, 0) }}
+        >
+          <colgroup>
+            <col style={{ width: 40 }} />
+            {table.columns.map((column, index) => (
+              <col key={column.id} style={{ width: widths[index] }} />
+            ))}
+          </colgroup>
           <thead>
             <tr>
               <th className="row-gutter">
@@ -456,7 +570,14 @@ export function Spreadsheet({
                   }
                 />
               </th>
-              {table.columns.map((c, i) => (
+              {columnViewport.start > 0 && (
+                <th
+                  className="column-spacer"
+                  colSpan={columnViewport.start}
+                  aria-hidden="true"
+                />
+              )}
+              {visibleColumns.map(({ column: c, index: i }) => (
                 <th
                   key={c.id}
                   className={active.col === i ? "column-active" : ""}
@@ -493,7 +614,7 @@ export function Spreadsheet({
                               : "#"}
                         </span>
                       )}
-                      {c.name}
+                      <span className="column-name-label">{c.name}</span>
                       {!structureDisabled && <ChevronDown size={11} />}
                     </div>
                     <span className="sheet-column-type">
@@ -509,128 +630,51 @@ export function Spreadsheet({
                               : " · required"}
                     </span>
                   </button>
+                  <ColumnResizeHandle
+                    name={c.name}
+                    width={widths[i]}
+                    onResize={(width, persist) =>
+                      sizing.resize(c.id, width, persist)
+                    }
+                    onAutoFit={() =>
+                      sizing.resize(
+                        c.id,
+                        fitColumnWidth(
+                          c.name,
+                          drafts.map((row) => valueAt(row, c.name)),
+                        ),
+                      )
+                    }
+                  />
                 </th>
               ))}
+              {columnViewport.end < table.columns.length && (
+                <th
+                  className="column-spacer"
+                  colSpan={table.columns.length - columnViewport.end}
+                  aria-hidden="true"
+                />
+              )}
             </tr>
           </thead>
           <tbody>
             {visible.map(({ row, index: r }) => (
-              <tr
+              <GridRow
                 key={row.id}
-                className={[
-                  row.deleted ? "row-deleted" : "",
-                  !row.original ? "row-new" : "",
-                  selected.has(row.id) ? "row-selected" : "",
-                ].join(" ")}
-              >
-                <th className="row-gutter">
-                  <label>
-                    <input
-                      type="checkbox"
-                      aria-label={`Select row ${r + 1}`}
-                      checked={selected.has(row.id)}
-                      onChange={(e) =>
-                        setSelected((current) => {
-                          const next = new Set(current);
-                          if (e.target.checked) next.add(row.id);
-                          else next.delete(row.id);
-                          return next;
-                        })
-                      }
-                    />
-                    <span>
-                      {r +
-                        1 +
-                        (row.original
-                          ? (serverPage?.index ?? 0) * PAGE_SIZE
-                          : 0)}
-                    </span>
-                    {!row.original && <Plus size={11} />}
-                  </label>
-                </th>
-                {table.columns.map((column, c) => {
-                  const value = valueAt(row, column.name);
-                  return (
-                    <td
-                      key={column.id}
-                      className={[
-                        active.row === r && active.col === c
-                          ? "cell-active"
-                          : "",
-                        Object.hasOwn(row.cells, column.name)
-                          ? "cell-changed"
-                          : "",
-                        value === null ? "cell-null" : "",
-                      ].join(" ")}
-                    >
-                      <input
-                        aria-label={`${column.name}, row ${r + 1}`}
-                        title={duckCellHint(column.nativeType ?? column.type)}
-                        data-row={r}
-                        data-col={c}
-                        value={value ?? ""}
-                        placeholder={
-                          value === null
-                            ? "NULL"
-                            : !row.original
-                              ? column.generated
-                                ? "Generated"
-                                : column.defaultValue
-                                  ? "Default"
-                                  : column.nullable
-                                    ? "NULL"
-                                    : ""
-                              : ""
-                        }
-                        disabled={disabled || saving || row.deleted}
-                        readOnly={
-                          !!column.generated ||
-                          !!column.readOnly ||
-                          (!!row.original && !table.primaryKey.length)
-                        }
-                        spellCheck={false}
-                        autoComplete="off"
-                        onFocus={() => setActive({ row: r, col: c })}
-                        onChange={(e) => update(r, c, e.target.value)}
-                        onKeyDown={(e) => handleKey(e, r, c)}
-                        onPaste={(e) => {
-                          if (
-                            disabled ||
-                            saving ||
-                            readOnlyReason ||
-                            requiresRefresh
-                          ) {
-                            e.preventDefault();
-                            return;
-                          }
-                          const text = e.clipboardData.getData("text/plain");
-                          if (!/[\t\r\n]/.test(text)) return;
-                          e.preventDefault();
-                          try {
-                            setDrafts((current) =>
-                              pasteCells(
-                                current,
-                                table,
-                                r,
-                                c,
-                                parseClipboard(text),
-                              ),
-                            );
-                            setError("");
-                            setNotice("");
-                          } catch (error) {
-                            setError(
-                              error instanceof Error
-                                ? error.message
-                                : String(error),
-                            );
-                          }
-                        }}
-                      />
-                    </td>
-                  );
-                })}
-              </tr>
+                row={row}
+                rowIndex={r}
+                selected={selected.has(row.id)}
+                activeCol={active.row === r ? active.col : -1}
+                visibleColumns={visibleColumns}
+                start={columnViewport.start}
+                end={columnViewport.end}
+                columnCount={table.columns.length}
+                hasPrimaryKey={!!table.primaryKey.length}
+                pageIndex={serverPage?.index ?? 0}
+                disabled={disabled || saving}
+                cellHints={cellHints}
+                handlers={cellHandlers}
+              />
             ))}
           </tbody>
         </table>
@@ -708,3 +752,176 @@ export function Spreadsheet({
     </div>
   );
 }
+
+interface CellHandlers {
+  select: (id: string, checked: boolean) => void;
+  update: (row: number, col: number, value: string) => void;
+  handleKey: (
+    event: KeyboardEvent<HTMLInputElement>,
+    row: number,
+    col: number,
+  ) => void;
+  paste: (
+    event: ClipboardEvent<HTMLInputElement>,
+    row: number,
+    col: number,
+  ) => void;
+  focus: (row: number, col: number) => void;
+}
+// A keystroke updates one cell, rather than re-rendering every visible input.
+const GridCell = memo(function GridCell({
+  column,
+  rowIndex,
+  columnIndex,
+  value,
+  hint,
+  isActive,
+  changed,
+  placeholder,
+  disabled,
+  readOnly,
+  handlers,
+}: {
+  column: ColumnDefinition;
+  rowIndex: number;
+  columnIndex: number;
+  value: CellValue;
+  hint: string;
+  isActive: boolean;
+  changed: boolean;
+  placeholder: string;
+  disabled: boolean;
+  readOnly: boolean;
+  handlers: RefObject<CellHandlers>;
+}) {
+  return (
+    <td
+      className={[
+        isActive ? "cell-active" : "",
+        changed ? "cell-changed" : "",
+        value === null ? "cell-null" : "",
+      ].join(" ")}
+    >
+      <input
+        aria-label={`${column.name}, row ${rowIndex + 1}`}
+        title={`${value === null ? "NULL" : (value ?? "")}\n${hint}`}
+        data-row={rowIndex}
+        data-col={columnIndex}
+        value={value ?? ""}
+        placeholder={placeholder}
+        disabled={disabled}
+        readOnly={readOnly}
+        spellCheck={false}
+        autoComplete="off"
+        onFocus={() => handlers.current.focus(rowIndex, columnIndex)}
+        onChange={(event) =>
+          handlers.current.update(rowIndex, columnIndex, event.target.value)
+        }
+        onKeyDown={(event) =>
+          handlers.current.handleKey(event, rowIndex, columnIndex)
+        }
+        onPaste={(event) =>
+          handlers.current.paste(event, rowIndex, columnIndex)
+        }
+      />
+    </td>
+  );
+});
+
+const GridRow = memo(function GridRow({
+  row,
+  rowIndex: r,
+  selected,
+  activeCol,
+  visibleColumns,
+  start,
+  end,
+  columnCount,
+  hasPrimaryKey,
+  pageIndex,
+  disabled,
+  cellHints,
+  handlers,
+}: {
+  row: DraftRow;
+  rowIndex: number;
+  selected: boolean;
+  activeCol: number;
+  visibleColumns: { column: ColumnDefinition; index: number }[];
+  start: number;
+  end: number;
+  columnCount: number;
+  hasPrimaryKey: boolean;
+  pageIndex: number;
+  disabled: boolean;
+  cellHints: string[];
+  handlers: RefObject<CellHandlers>;
+}) {
+  return (
+    <tr
+      className={[
+        row.deleted ? "row-deleted" : "",
+        !row.original ? "row-new" : "",
+        selected ? "row-selected" : "",
+      ].join(" ")}
+    >
+      <th className="row-gutter">
+        <label>
+          <input
+            type="checkbox"
+            aria-label={`Select row ${r + 1}`}
+            checked={selected}
+            onChange={(e) => handlers.current.select(row.id, e.target.checked)}
+          />
+          <span>{r + 1 + (row.original ? pageIndex * PAGE_SIZE : 0)}</span>
+          {!row.original && <Plus size={11} />}
+        </label>
+      </th>
+      {start > 0 && (
+        <td className="column-spacer" colSpan={start} aria-hidden="true" />
+      )}
+      {visibleColumns.map(({ column, index: c }) => {
+        const value = valueAt(row, column.name);
+        return (
+          <GridCell
+            key={column.id}
+            column={column}
+            rowIndex={r}
+            columnIndex={c}
+            value={value}
+            hint={cellHints[c]}
+            isActive={activeCol === c}
+            changed={Object.hasOwn(row.cells, column.name)}
+            placeholder={
+              value === null
+                ? "NULL"
+                : !row.original
+                  ? column.generated
+                    ? "Generated"
+                    : column.defaultValue
+                      ? "Default"
+                      : column.nullable
+                        ? "NULL"
+                        : ""
+                  : ""
+            }
+            disabled={!!(disabled || row.deleted)}
+            readOnly={
+              !!column.generated ||
+              !!column.readOnly ||
+              (!!row.original && !hasPrimaryKey)
+            }
+            handlers={handlers}
+          />
+        );
+      })}
+      {end < columnCount && (
+        <td
+          className="column-spacer"
+          colSpan={columnCount - end}
+          aria-hidden="true"
+        />
+      )}
+    </tr>
+  );
+});

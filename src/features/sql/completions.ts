@@ -339,22 +339,28 @@ export function sqlCompletions(
     table: TableDefinition,
     qualifier?: string,
   ): SqlSuggestion[] =>
-    table.columns.map((column) => ({
-      label: column.name,
-      description: qualifier ?? table.name,
-      detail: `${column.nativeType ?? column.type}${table.primaryKey.includes(column.id) ? " · PK" : ""}${column.nullable ? " · nullable" : ""} — ${table.name}.${column.name}`,
-      insertText: (qualifier ? name(qualifier) + "." : "") + name(column.name),
-      kind: "column",
-      sortText: "1_" + column.name,
-    }));
+    table.columns
+      .filter(
+        (column) => !prefix || column.name.toLowerCase().startsWith(prefix),
+      )
+      .map((column) => ({
+        label: column.name,
+        description: qualifier ?? table.name,
+        detail: `${column.nativeType ?? column.type}${table.primaryKey.includes(column.id) ? " · PK" : ""}${column.nullable ? " · nullable" : ""} — ${table.name}.${column.name}`,
+        insertText:
+          (qualifier ? name(qualifier) + "." : "") + name(column.name),
+        kind: "column",
+        sortText: "1_" + column.name,
+      }));
   const tables = (namespace?: string) =>
     schema.tables
       .filter(
         (table) =>
-          !namespace ||
-          (dialect === "mssql"
-            ? table.namespace?.toLowerCase() === namespace.toLowerCase()
-            : table.namespace === namespace),
+          (!prefix || table.name.toLowerCase().startsWith(prefix)) &&
+          (!namespace ||
+            (dialect === "mssql"
+              ? table.namespace?.toLowerCase() === namespace.toLowerCase()
+              : table.namespace === namespace)),
       )
       .map((table) => ({
         label: table.name,
@@ -433,7 +439,9 @@ export function sqlCompletions(
           ? refs.flatMap((ref) =>
               columns(ref.table, refs.length > 1 ? ref.alias : undefined),
             )
-          : schema.tables.flatMap((table) => columns(table, table.name))),
+          : schema.tables.length <= 200
+            ? schema.tables.flatMap((table) => columns(table, table.name))
+            : []),
         ...(dialect === "mssql"
           ? [
               ...KEYWORDS.filter(
@@ -482,8 +490,8 @@ export function sqlCompletions(
   return {
     start,
     end: replaceEnd,
-    suggestions: suggestions.filter(
-      (item) => !prefix || item.label.toLowerCase().startsWith(prefix),
-    ),
+    suggestions: suggestions
+      .filter((item) => !prefix || item.label.toLowerCase().startsWith(prefix))
+      .slice(0, 500),
   };
 }

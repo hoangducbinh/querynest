@@ -13,17 +13,25 @@ import {
 import { Button } from "../../components/ui/button";
 import { pgError } from "../postgres/model";
 import { testRemoteConnection } from "./client";
-import { engineName, parseRemoteConfig, type RemoteConfig } from "./model";
+import {
+  connectionEngines,
+  defaultRemoteConfig,
+  engineName,
+  parseRemoteConfig,
+  type RemoteConfig,
+} from "./model";
 export function ConnectionDialog({
   initial,
   initialName = "",
   profileMode = false,
+  allowEngineChange = false,
   onConnect,
   onClose,
 }: {
   initial: RemoteConfig;
   initialName?: string;
   profileMode?: boolean;
+  allowEngineChange?: boolean;
   onConnect: (
     value: RemoteConfig,
     password: string,
@@ -120,12 +128,14 @@ export function ConnectionDialog({
               <Dialog.Title>
                 {profileMode
                   ? "Connection settings"
-                  : `Connect to ${engineName(value.engine)}`}
+                  : allowEngineChange
+                    ? "New connection"
+                    : `Connect to ${engineName(value.engine)}`}
               </Dialog.Title>
               <Dialog.Description>
                 {profileMode
-                  ? `${engineName(value.engine)} · reusable connection`
-                  : "Passwords are never saved."}
+                  ? "Saved settings apply the next time you connect."
+                  : "One connection for SQL and Data."}
               </Dialog.Description>
             </div>
             <Button
@@ -152,8 +162,38 @@ export function ConnectionDialog({
                 setSuccess("");
               }}
             >
-              {profileMode && (
+              {allowEngineChange && (
                 <label>
+                  Database type
+                  <select
+                    value={value.engine}
+                    onChange={(event) => {
+                      const engine = connectionEngines.find(
+                        (option) => option.id === event.target.value,
+                      )?.id;
+                      if (!engine || engine === value.engine) return;
+                      const next = defaultRemoteConfig(engine);
+                      setValue(next);
+                      setPort(String(next.config.port));
+                      setPassword("");
+                      setError("");
+                      setSuccess("");
+                    }}
+                  >
+                    {connectionEngines.map((engine) => (
+                      <option key={engine.id} value={engine.id}>
+                        {engine.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {(profileMode || allowEngineChange) && (
+                <label
+                  className={
+                    allowEngineChange ? undefined : "connection-full-width"
+                  }
+                >
                   Connection name
                   <input
                     autoFocus
@@ -168,7 +208,7 @@ export function ConnectionDialog({
                 <label>
                   Host
                   <input
-                    autoFocus={!profileMode}
+                    autoFocus={!profileMode && !allowEngineChange}
                     autoComplete="off"
                     autoCapitalize="none"
                     spellCheck={false}
@@ -188,7 +228,13 @@ export function ConnectionDialog({
                   />
                 </label>
               </div>
-              <label>
+              <label
+                className={
+                  value.engine === "postgres"
+                    ? "connection-full-width"
+                    : undefined
+                }
+              >
                 Database
                 <input
                   autoComplete="off"

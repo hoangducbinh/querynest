@@ -3,6 +3,8 @@ import { createWorkspace } from "../../features/schema/core";
 const mocks = vi.hoisted(() => ({
   instances: [] as {
     query: ReturnType<typeof vi.fn>;
+    send: ReturnType<typeof vi.fn>;
+    cancelSent: ReturnType<typeof vi.fn>;
     close: ReturnType<typeof vi.fn>;
     terminate: ReturnType<typeof vi.fn>;
   }[],
@@ -16,6 +18,12 @@ vi.mock("@duckdb/duckdb-wasm", () => ({
   ConsoleLogger: class {},
   AsyncDuckDB: class {
     query = vi.fn(async () => ({ schema: { fields: [] }, toArray: () => [] }));
+    send = vi.fn(async () => ({
+      schema: { fields: [] },
+      open: async () => {},
+      async *[Symbol.asyncIterator]() {},
+    }));
+    cancelSent = vi.fn(async () => true);
     close = vi.fn(async () => {});
     terminate = vi.fn(async () => {});
     constructor() {
@@ -23,7 +31,12 @@ vi.mock("@duckdb/duckdb-wasm", () => ({
     }
     async instantiate() {}
     async connect() {
-      return { query: this.query, close: this.close };
+      return {
+        query: this.query,
+        send: this.send,
+        cancelSent: this.cancelSent,
+        close: this.close,
+      };
     }
   },
 }));
@@ -58,5 +71,71 @@ describe("isolated runtime reconstruction", () => {
     expect(failed.terminate).toHaveBeenCalled();
     await query("SELECT 1");
     expect(previous.query).toHaveBeenCalledWith("SELECT 1");
+  });
+});
+
+it("cancels the pending worker query and allows a subsequent query without rebuilding", async () => {
+  const { rebuild, queryCancelable, cancelLocalQuery } =
+    await import("./engine");
+  await rebuild(createWorkspace(false));
+  const instance = mocks.instances.at(-1)!;
+  let interrupt!: (error: Error) => void;
+  instance.send.mockImplementationOnce(
+    () =>
+      new Promise((_, reject) => {
+        interrupt = reject;
+      }),
+  );
+  instance.cancelSent.mockImplementationOnce(async () => {
+    interrupt(new Error("interrupted"));
+    return true;
+  });
+  const pending = queryCancelable("SELECT expensive_work");
+  const stopped = expect(pending).rejects.toThrow(/Query stopped/);
+  await cancelLocalQuery();
+  await stopped;
+  expect(instance.cancelSent).toHaveBeenCalledOnce();
+  await expect(queryCancelable("SELECT 1")).resolves.toEqual({
+    columns: [],
+    rows: [],
+  });
+});
+
+it("converts rows from the pending-query reader with the same value rules", async () => {
+  const { rebuild, queryCancelable } = await import("./engine");
+  await rebuild(createWorkspace(false));
+  const instance = mocks.instances.at(-1)!;
+  const schema = { fields: [{ name: "n", type: { toString: () => "Int32" } }] };
+  instance.send.mockResolvedValueOnce({
+    schema,
+    open: async () => {},
+    async *[Symbol.asyncIterator]() {
+      yield { schema, toArray: () => [{ toJSON: () => ({ n: 42 }) }] };
+    },
+  });
+  await expect(queryCancelable("SELECT 42 AS n")).resolves.toEqual({
+    columns: ["n"],
+    rows: [{ n: 42 }],
+  });
+});
+
+it("preserves column metadata after the Arrow stream clears it at EOF", async () => {
+  const { rebuild, queryCancelable } = await import("./engine");
+  await rebuild(createWorkspace(false));
+  const schema = {
+    fields: [{ name: "answer", type: { toString: () => "Int32" } }],
+  };
+  const reader = {
+    schema: schema as typeof schema | undefined,
+    open: async () => {},
+    async *[Symbol.asyncIterator]() {
+      yield { schema, toArray: () => [{ toJSON: () => ({ answer: 42 }) }] };
+      this.schema = undefined;
+    },
+  };
+  mocks.instances.at(-1)!.send.mockResolvedValueOnce(reader);
+  await expect(queryCancelable("SELECT 42 AS answer")).resolves.toEqual({
+    columns: ["answer"],
+    rows: [{ answer: 42 }],
   });
 });

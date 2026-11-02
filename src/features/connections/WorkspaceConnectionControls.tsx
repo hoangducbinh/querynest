@@ -1,3 +1,5 @@
+import { DatabasePicker } from "./DatabasePicker";
+import { ConnectionPicker } from "./ConnectionPicker";
 import type { WorkspaceDefinition } from "../../types/schema";
 import { useStore } from "../schema/store";
 import {
@@ -6,9 +8,10 @@ import {
   ensureSources,
   updateSource,
   workspaceSources,
+  sourceSessionKey,
 } from "./sources";
 import { listDatabases } from "./databases";
-import { NeedsConnection } from "./sessions";
+import { NeedsConnection, useConnectionStatus } from "./sessions";
 import { isTauri } from "../postgres/client";
 
 export function WorkspaceConnectionControls({
@@ -30,6 +33,10 @@ export function WorkspaceConnectionControls({
       (source) => source.id === (workspace.activeSourceId ?? "primary"),
     ) ?? sources[0];
   const root = connectionRoot(workspace, active);
+  const status = useConnectionStatus(
+    sourceSessionKey(workspace.id, active.id),
+    active.connection,
+  );
   const databases = active.connection
     ? [
         ...new Set([
@@ -58,45 +65,29 @@ export function WorkspaceConnectionControls({
     <div
       className="titlebar-connection-controls"
       role="group"
-      aria-label="Workspace database"
+      aria-label="Database"
     >
-      <select
-        className="sql-connection-select"
-        aria-label="Workspace connection"
-        title="Connection for the current view"
+      <span
+        className="toolbar-count"
+        role="status"
+        title="Connection shared by SQL and Data"
+      >
+        {status}
+      </span>
+      <ConnectionPicker
         value={root.id}
         disabled={busy}
-        onChange={(event) => void onSelect(event.target.value).catch(onError)}
-      >
-        {sources
-          .filter((source) => !source.parentSourceId)
-          .map((source) => (
-            <option key={source.id} value={source.id}>
-              {source.connection ? source.name : "Local DuckDB"}
-            </option>
-          ))}
-      </select>
-      <select
-        className="sql-database-select"
-        aria-label="Workspace database"
-        title={
-          active.connection
-            ? "Database for the current view"
-            : "Local DuckDB database"
-        }
+        onSelect={(id) => onSelect(id).catch(onError)}
+      />
+      <DatabasePicker
         value={active.connection?.config.database ?? "main"}
+        databases={databases}
         disabled={busy || !active.connection}
-        onFocus={() => void discover()}
-        onChange={(event) =>
-          void onDatabaseChange(root.id, event.target.value).catch(onError)
+        onDiscover={discover}
+        onSelect={(database) =>
+          onDatabaseChange(root.id, database).catch(onError)
         }
-      >
-        {databases.map((database) => (
-          <option key={database} value={database}>
-            {database}
-          </option>
-        ))}
-      </select>
+      />
     </div>
   );
 }

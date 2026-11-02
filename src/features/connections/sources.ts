@@ -1,12 +1,15 @@
+import { current, isDraft, type Draft } from "immer";
 import type {
   WorkspaceDefinition,
   WorkspaceSource,
   SqlTab,
 } from "../../types/schema";
 import type { ConnectionProfile, RemoteConfig } from "./model";
-import { sqlTabs, setSqlTabs } from "../sql/tabs";
+import { activeSqlTab, sqlTabs, setSqlTabs } from "../sql/tabs";
 const clone = <T>(value: T): T =>
-  value === undefined ? value : JSON.parse(JSON.stringify(value));
+  value === undefined
+    ? value
+    : structuredClone(isDraft(value) ? current<T>(value as Draft<T>) : value);
 export const sourceSessionKey = (workspaceId: string, sourceId: string) =>
   `${workspaceId}:source:${sourceId}`;
 export function currentSource(w: WorkspaceDefinition): WorkspaceSource {
@@ -40,10 +43,12 @@ export function tabSource(
   const sources = workspaceSources(w);
   return sources.find((s) => s.id === tab.sourceId) ?? sources[0];
 }
-export function captureActiveSource(w: WorkspaceDefinition) {
+export function captureActiveSource(w: WorkspaceDefinition, copy = true) {
   if (!w.sources) return;
-  const active = currentSource(w);
-  w.sources = w.sources.map((s) => (s.id === active.id ? clone(active) : s));
+  const active = currentSource(isDraft(w) ? current(w) : w);
+  w.sources = w.sources.map((s) =>
+    s.id === active.id ? (copy ? clone(active) : active) : s,
+  );
 }
 export function activateSource(w: WorkspaceDefinition, sourceId: string) {
   captureActiveSource(w);
@@ -68,7 +73,7 @@ export function attachSource(
   profile: ConnectionProfile,
 ) {
   if (!w.sources) {
-    w.sources = [clone(currentSource(w))];
+    w.sources = [clone(currentSource(isDraft(w) ? current(w) : w))];
     w.activeSourceId = "primary";
     setSqlTabs(
       w,
@@ -118,7 +123,15 @@ export function updateSource(
   const changed =
     patch.connection &&
     JSON.stringify(source.connection) !== JSON.stringify(patch.connection);
-  Object.assign(source, clone(patch));
+  // The active schema/data live on the workspace. Its entry in sources is
+  // a snapshot captured on save/switch, just like ordinary local schema edits.
+  // Avoid cloning a 75k-column catalog twice during a single refresh.
+  const { schema: nextSchema, data: nextData, ...metadata } = patch;
+  Object.assign(source, clone(metadata));
+  if (w.activeSourceId !== sourceId) {
+    if (nextSchema) source.schema = clone(nextSchema);
+    if (nextData) source.data = source.connection ? {} : clone(nextData);
+  }
   if (changed && !source.parentSourceId) {
     for (const child of w.sources ?? []) {
       if (
@@ -205,7 +218,7 @@ export function databaseSources(w: WorkspaceDefinition, rootId: string) {
 }
 export function ensureSources(w: WorkspaceDefinition) {
   if (w.sources) return;
-  const source = clone(currentSource(w));
+  const source = clone(currentSource(isDraft(w) ? current(w) : w));
   w.sources = [source];
   w.activeSourceId = source.id;
   setSqlTabs(
@@ -246,4 +259,11 @@ export function attachDatabase(
   };
   w.sources!.push(child);
   return child.id;
+}
+
+/** Keep Data on the database selected by the active SQL tab. */
+export function syncActiveSqlSource(w: WorkspaceDefinition) {
+  if (!w.sources) return;
+  const source = tabSource(w, activeSqlTab(w));
+  if (source.id !== w.activeSourceId) activateSource(w, source.id);
 }

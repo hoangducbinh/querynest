@@ -1,6 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Max Learning",
+  "productName": "Database Design Playground",
+  "mainBinaryName": "database-design-playground",
   "version": "1.0.0",
   "identifier": "dev.dbplayground.desktop",
   "build": {

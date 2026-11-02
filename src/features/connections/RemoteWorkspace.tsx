@@ -1,11 +1,10 @@
+import { useSqlResults } from "../sql/result-state";
 import {
-  registerOwnedSession,
-  retainSession,
-  takeSession,
-  checkoutConnectionSession,
-  type RetainedSession,
+  useConnectionSession,
+  requestConnection,
+  markConnectionUnavailable,
+  NeedsConnection,
 } from "./sessions";
-import { updateSource } from "./sources";
 import { ensureDatabaseSession } from "./databases";
 import { RemoteColumnEditor } from "./RemoteColumnEditor";
 import type { ColumnContext, ColumnChange } from "./columns";
@@ -16,13 +15,10 @@ import {
   useState,
   type MutableRefObject,
 } from "react";
-import { RefreshCw, Plug, Unplug } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import type { TableDefinition, WorkspaceDefinition } from "../../types/schema";
 import { useStore } from "../schema/store";
-import { Diagram } from "../erd/Diagram";
-import { Requirements } from "../test-cases/Requirements";
-import { compareResults } from "../test-cases/compare";
 import { ResultGrid } from "../sample-data/ResultGrid";
 import { Spreadsheet } from "../sample-data/Spreadsheet";
 import type { DraftRow } from "../sample-data/model";
@@ -30,21 +26,17 @@ import { confirmAction } from "../../lib/dialogs";
 import { gridChanges, gridSaveError } from "./grid";
 import { SqlWorkspace } from "../sql/SqlWorkspace";
 import { activeSqlTab, setSqlTabs, sqlTabs } from "../sql/tabs";
-import { executeSqlBatch, type SqlResult } from "../sql/execution";
-import { ConnectionDialog } from "../connections/ConnectionDialog";
-import { connectRemote, remoteClient } from "../connections/client";
+import { executeSqlBatch } from "../sql/execution";
+import { remoteClient } from "../connections/client";
 import { engineName, type RemoteConfig } from "../connections/model";
-import { storage, saveConnection } from "../../lib/storage/workspaces";
 import { catalogSchema, pgError, type PgCatalog } from "../postgres/model";
 import { isTauri, type PgQueryResult } from "../postgres/client";
 interface Props {
   workspace: WorkspaceDefinition;
   sessionKey?: string;
-  mode: "data" | "sql" | "relations" | "tests";
+  mode: "data" | "sql";
   dark: boolean;
   activeTable?: TableDefinition;
-  selected: string;
-  onSelect: (id: string) => void;
   runRef: MutableRefObject<() => void>;
   onBusy: (busy: boolean) => void;
   onDirty: (dirty: boolean) => void;
@@ -55,8 +47,6 @@ export function RemoteWorkspace({
   mode,
   dark,
   activeTable,
-  selected,
-  onSelect,
   runRef,
   onBusy,
   onDirty,
@@ -67,23 +57,22 @@ export function RemoteWorkspace({
   const currentConfig: RemoteConfig = w.mssql
     ? { engine: "mssql", config: w.mssql }
     : { engine: "postgres", config: w.postgres! };
-  const [settings, setSettings] = useState(currentConfig);
-  const edit = useStore((s) => s.edit);
-  const [sessionId, setSessionId] = useState("");
-  const session = useRef("");
-  const retained = useRef<RetainedSession | undefined>(undefined);
-  useEffect(() => {
-    if (!sessionId || !retained.current) return;
-    return registerOwnedSession(sessionKey, { ...retained.current, sessionId });
-  }, [sessionId, sessionKey]);
-  const [version, setVersion] = useState("");
-  const [connecting, setConnecting] = useState(false);
+  const shared = useConnectionSession(sessionKey, currentConfig);
+  const edit = useStore((state) => state.edit);
+  const [sessionId, setSessionId] = useState(shared?.sessionId ?? "");
+  const session = useRef(shared?.sessionId ?? "");
+  const [restoring, setRestoring] = useState(false);
   const [pending, setPending] = useState(false);
+  const [queryRunning, setQueryRunning] = useState(false);
+  const [cancelPending, setCancelPending] = useState(false);
   const [error, setError] = useState("");
-  const [results, setResults] = useState<Record<string, SqlResult[]>>({});
-  const [testResults, setTestResults] = useState<Record<string, string>>({});
+  const [results, setResults] = useSqlResults(
+    `${w.id}:source:${sessionKey}:${JSON.stringify(currentConfig)}`,
+  );
   const selection = useRef({ id: "", sql: "" });
   const cancelled = useRef(false);
+  const sqlRunning = useRef(false);
+  const executionId = useRef(0);
   const [page, setPage] = useState(0);
   const [gridDirty, setGridDirty] = useState(false);
   const [columnDirty, setColumnDirty] = useState(false);
@@ -120,74 +109,38 @@ export function RemoteWorkspace({
   );
   useEffect(() => {
     let stale = false;
-    async function prepare() {
-      const profile = w.connectionId
-        ? await storage.connections.get(w.connectionId)
-        : undefined;
-      if (stale) return;
-      const config =
-        profile && profile.engine === engine ? profile : currentConfig;
-      setSettings(config);
-      if (w.sources && w.activeSourceId) {
-        try {
-          await ensureDatabaseSession(w, w.activeSourceId);
-        } catch {
-          /* The connection dialog handles expired sessions. */
-        }
-      }
-      const saved =
-        (await checkoutConnectionSession(sessionKey, config)) ??
-        (w.sources && w.activeSourceId === "primary"
-          ? takeSession(w.id, config)
-          : undefined);
-      if (stale) {
-        if (saved) retainSession(sessionKey, saved);
-        return;
-      }
-      if (saved) {
-        session.current = saved.sessionId;
-        retained.current = saved;
-        try {
-          const catalog = await client.refresh(saved.sessionId);
-          if (stale) return;
-          setSessionId(saved.sessionId);
-          setVersion(saved.serverVersion);
-          applyCatalog(catalog);
-          return;
-        } catch (error) {
-          if (stale) return;
-          session.current = "";
-          retained.current = undefined;
-          void client.disconnect(saved.sessionId).catch(() => {});
-          setError(pgError(error));
-        }
-      }
-      if (!stale) setConnecting(isTauri());
+    session.current = shared?.sessionId ?? "";
+    setSessionId(session.current);
+    setRestoring(false);
+    if (!shared) {
+      if (w.sources && w.activeSourceId)
+        void ensureDatabaseSession(w, w.activeSourceId).catch((error) => {
+          if (!stale && !(error instanceof NeedsConnection))
+            setError(pgError(error));
+        });
+    } else if (!w.schema.tables.length) {
+      setRestoring(true);
+      void (
+        shared.catalog
+          ? Promise.resolve(shared.catalog)
+          : client.refresh(shared.sessionId)
+      )
+        .then((catalog) => {
+          if (!stale) applyCatalog(catalog);
+        })
+        .catch((error) => {
+          if (!stale) setError(pgError(error));
+        })
+        .finally(() => {
+          if (!stale) setRestoring(false);
+        });
     }
-    void prepare().catch((e) => setError(pgError(e)));
     return () => {
       stale = true;
     };
-    // Each workspace has an independent session.
-  }, []);
-  async function openSettings() {
-    if (!(await leaveGrid())) return;
-    const profile = w.connectionId
-      ? await storage.connections.get(w.connectionId)
-      : undefined;
-    setSettings(profile && profile.engine === engine ? profile : currentConfig);
-    setConnecting(true);
-  }
-  useEffect(
-    () => () => {
-      if (session.current && retained.current)
-        retainSession(sessionKey, {
-          ...retained.current,
-          sessionId: session.current,
-        });
-    },
-    [],
-  );
+  }, [shared, sessionKey]);
+  const requestConnect = () =>
+    requestConnection(w.id, w.activeSourceId ?? "primary");
   useEffect(() => {
     setPage(0);
     setData(undefined);
@@ -210,10 +163,9 @@ export function RemoteWorkspace({
         if (!stale) {
           setError(pgError(e));
           if (e && typeof e === "object" && "closed" in e && e.closed) {
-            const old = session.current;
             session.current = "";
             setSessionId("");
-            void client.disconnect(old).catch(() => {});
+            markConnectionUnavailable(sessionKey);
           }
         }
       })
@@ -238,62 +190,6 @@ export function RemoteWorkspace({
       onBusy(false);
     }
   }
-  async function connect(value: RemoteConfig, password: string) {
-    onBusy(true);
-    try {
-      const result = await connectRemote(value, password);
-      try {
-        if (w.connectionId) {
-          const profile = await storage.connections.get(w.connectionId);
-          if (profile)
-            await saveConnection({
-              ...profile,
-              ...value,
-              updatedAt: Date.now(),
-            });
-        }
-      } catch (e) {
-        await client.disconnect(result.sessionId).catch(() => {});
-        throw e;
-      }
-      const old = session.current;
-      session.current = result.sessionId;
-      retained.current = {
-        sessionId: result.sessionId,
-        serverVersion: result.serverVersion,
-        config: value,
-        disconnect: client.disconnect,
-      };
-      setSessionId(result.sessionId);
-      setVersion(result.serverVersion);
-      setResults({});
-      setData(undefined);
-      setTestResults({});
-      setPage(0);
-      setSchemaStale(false);
-      setColumnEditor(null);
-      edit((d) => {
-        if (d.sources && d.activeSourceId)
-          updateSource(d, d.activeSourceId, {
-            connection: value,
-            schema: catalogSchema(result.catalog),
-          });
-        if (value.engine === "postgres") d.postgres = value.config;
-        else d.mssql = value.config;
-        d.schema = catalogSchema(result.catalog);
-        d.data = {};
-        if (
-          d.name === "PostgreSQL workspace" ||
-          d.name === "SQL Server workspace"
-        )
-          d.name = value.config.database + " · " + label;
-      });
-      if (old) await client.disconnect(old).catch(() => {});
-      setError("");
-    } finally {
-      onBusy(false);
-    }
-  }
   async function query(sql: string) {
     if (cancelled.current)
       throw Error("Execution cancelled. Remaining statements were skipped.");
@@ -310,34 +206,43 @@ export function RemoteWorkspace({
       };
     } catch (e) {
       if (e && typeof e === "object" && "closed" in e && e.closed) {
-        const old = session.current;
         session.current = "";
         setSessionId("");
-        void client.disconnect(old).catch(() => {});
+        markConnectionUnavailable(sessionKey);
         setError(pgError(e));
       }
       throw Error(pgError(e));
     }
   }
   async function run(tabId?: string, suppliedSql?: string) {
-    if (!sessionId || pending) return;
+    if (!sessionId || pending || sqlRunning.current) return;
+    sqlRunning.current = true;
     cancelled.current = false;
+    executionId.current++;
+    setQueryRunning(true);
+    setCancelPending(false);
     const tab = sqlTabs(w).find((item) => item.id === tabId) ?? activeSqlTab(w);
     const sql =
       suppliedSql ??
       (selection.current.id === tab.id && selection.current.sql.trim()
         ? selection.current.sql
         : tab.sql);
-    await task(async () => {
-      setResults((current) => ({ ...current, [tab.id]: [] }));
-      const output = await executeSqlBatch(
-        sql,
-        query,
-        engine === "mssql" ? "mssql" : "default",
-      );
-      setResults((current) => ({ ...current, [tab.id]: output }));
-      setRefresh((n) => n + 1);
-    });
+    try {
+      await task(async () => {
+        setResults((current) => ({ ...current, [tab.id]: [] }));
+        const output = await executeSqlBatch(
+          sql,
+          query,
+          engine === "mssql" ? "mssql" : "default",
+        );
+        setResults((current) => ({ ...current, [tab.id]: output }));
+        setRefresh((n) => n + 1);
+      });
+    } finally {
+      sqlRunning.current = false;
+      setQueryRunning(false);
+      setCancelPending(false);
+    }
   }
   runRef.current = () => {
     if (mode === "sql") void run();
@@ -460,104 +365,18 @@ export function RemoteWorkspace({
       onBusy(false);
     }
   }
-  async function runTests(id?: string) {
-    if (!sessionId) return;
-    cancelled.current = false;
-    await task(async () => {
-      for (const test of w.tests.filter((t) => !id || t.id === id)) {
-        try {
-          const expected = JSON.parse(test.expected);
-          if (!Array.isArray(expected))
-            throw Error("Expected rows must be a JSON array.");
-          const actual = await query(test.sql);
-          if (
-            "resultSets" in actual &&
-            Array.isArray(actual.resultSets) &&
-            actual.resultSets.length > 1
-          )
-            throw Error("Tests must return a single result set.");
-          if (actual.truncated)
-            throw Error("Result exceeds 1,000 rows; narrow this test query.");
-          setTestResults((r) => ({
-            ...r,
-            [test.id]:
-              (compareResults(actual.rows, expected, test.ordered)
-                ? "PASS"
-                : "FAIL") +
-              " · " +
-              JSON.stringify(actual.rows),
-          }));
-        } catch (e) {
-          setTestResults((r) => ({ ...r, [test.id]: "ERROR · " + pgError(e) }));
-        }
-      }
-    });
-  }
   return (
     <section className="pg-workspace">
-      <div className="compact-toolbar pg-connection-bar">
-        <span className="toolbar-count">
-          {label}
-          {sessionId
-            ? ` ${version} · ${currentConfig.config.database}@${currentConfig.config.host} · ${currentConfig.config.readOnly ? (engine === "mssql" ? "Query-only" : "Read only") : "Read/write"}`
-            : " · Disconnected"}
-        </span>
-        <div className="row">
-          <Button
-            disabled={!isTauri() || pending || dataLoading}
-            onClick={() =>
-              void openSettings().catch((e) => setError(pgError(e)))
-            }
-          >
-            <Plug size={13} />
-            {sessionId ? "Connection" : "Connect"}
-          </Button>
-          {sessionId && (
-            <>
-              <Button
-                title="Refresh database schema"
-                disabled={pending}
-                onClick={() =>
-                  void (async () => {
-                    if (!(await leaveGrid())) return;
-                    await task(async () => {
-                      applyCatalog(await client.refresh(sessionId));
-                      setRefresh((n) => n + 1);
-                    });
-                  })()
-                }
-              >
-                <RefreshCw size={13} />
-              </Button>
-              <Button
-                title="Disconnect database"
-                disabled={pending || dataLoading}
-                onClick={() =>
-                  void (async () => {
-                    if (!(await leaveGrid())) return;
-                    await task(async () => {
-                      const old = session.current;
-                      session.current = "";
-                      setSessionId("");
-                      setResults({});
-                      setData(undefined);
-                      await client.disconnect(old);
-                    });
-                  })()
-                }
-              >
-                <Unplug size={13} />
-              </Button>
-            </>
-          )}
-        </div>
-      </div>
       {error && (
         <div className="sheet-error" role="alert">
           {error}
         </div>
       )}
-      {!sessionId ? (
+      {restoring ? (
+        <div className="empty-state" role="status">
+          Restoring shared connection…
+        </div>
+      ) : !sessionId ? (
         <div className="empty-state">
           <h2>
             {isTauri()
@@ -566,16 +385,11 @@ export function RemoteWorkspace({
           </h2>
           <p>
             {isTauri()
-              ? "Connect to browse tables and run SQL against your database."
+              ? "Connect once to use SQL and Data in this workspace."
               : "Direct database connections are available in the Tauri desktop app. Your local workspaces still work in the browser."}
           </p>
           {isTauri() && (
-            <Button
-              className="primary"
-              onClick={() =>
-                void openSettings().catch((e) => setError(pgError(e)))
-              }
-            >
+            <Button className="primary" onClick={() => requestConnect()}>
               Connect
             </Button>
           )}
@@ -612,23 +426,25 @@ export function RemoteWorkspace({
           }}
           validate={validate}
           validationSource={label}
-          onCancel={() => {
-            cancelled.current = true;
-            void client
-              .cancel(sessionId)
-              .then(() => {
-                if (engine === "mssql") {
-                  session.current = "";
-                  setSessionId("");
-                  setError(
-                    "Query stopped. Reconnect to continue; open transactions are rolled back by SQL Server.",
-                  );
+          cancelPending={cancelPending}
+          onCancel={
+            queryRunning
+              ? () => {
+                  if (cancelled.current) return;
+                  cancelled.current = true;
+                  setCancelPending(true);
+                  const requestId = executionId.current;
+                  void client.cancel(sessionId).catch((e) => {
+                    if (executionId.current !== requestId) return;
+                    setError(pgError(e));
+                    setCancelPending(false);
+                    cancelled.current = false;
+                  });
                 }
-              })
-              .catch((e) => setError(pgError(e)));
-          }}
+              : undefined
+          }
         />
-      ) : mode === "data" ? (
+      ) : (
         <div className="pg-data">
           <div className="compact-toolbar">
             <span>
@@ -681,20 +497,6 @@ export function RemoteWorkspace({
             <ResultGrid rows={[]} columns={[]} />
           )}
         </div>
-      ) : mode === "relations" ? (
-        <div className="design-view">
-          <div className="design-workspace">
-            <div className="diagram">
-              <Diagram select={onSelect} selected={selected} />
-            </div>
-          </div>
-        </div>
-      ) : (
-        <Requirements
-          results={testResults}
-          onRun={(id) => void runTests(id)}
-          disabled={pending}
-        />
       )}
       {columnEditor && (
         <RemoteColumnEditor
@@ -706,13 +508,6 @@ export function RemoteWorkspace({
           onClose={() => setColumnEditor(null)}
           onCommit={commitColumn}
           onDirty={setColumnDirty}
-        />
-      )}
-      {connecting && isTauri() && (
-        <ConnectionDialog
-          initial={settings}
-          onConnect={connect}
-          onClose={() => setConnecting(false)}
         />
       )}
     </section>

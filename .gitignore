@@ -15,3 +15,6 @@ src-tauri/gen/schemas/
 
 # Connection UI QA screenshots
 /preview-connections*.png
+
+# Synthetic SQL Server performance snapshots (regenerate locally)
+/scripts/sqlserver/perf-*.local.json

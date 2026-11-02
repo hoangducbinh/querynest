@@ -1,4 +1,4 @@
-import { WorkspaceBrowser } from "../features/workspaces/WorkspaceBrowser";
+import { useSqlResults } from "../features/sql/result-state";
 import { WorkspaceConnectionControls } from "../features/connections/WorkspaceConnectionControls";
 import { SnippetSettings } from "../features/sql/SnippetSettings";
 import { useLoadSnippetPreferences } from "../features/sql/snippet-preferences";
@@ -7,7 +7,7 @@ import {
   desktopPlatform,
   useDesktopChrome,
 } from "../lib/platform/desktop-chrome";
-import { ConnectionMenu } from "../features/connections/ConnectionMenu";
+import { ConnectionController } from "../features/connections/ConnectionController";
 import { MultiSqlWorkspace } from "../features/connections/MultiSqlWorkspace";
 import {
   activateSource,
@@ -16,12 +16,10 @@ import {
   removeSource,
   workspaceSources,
   sourceSessionKey,
-  updateSource,
-  captureActiveSource,
   tabSource,
 } from "../features/connections/sources";
 import { restoreSqlLayout, updatePaneTabs } from "../features/sql/panes";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { sampleDuckValue } from "../lib/duckdb/values";
 import { invalidateSession } from "../features/connections/sessions";
 import { readDarkAppearance, saveDarkAppearance } from "./appearance";
@@ -30,15 +28,13 @@ import {
   Braces,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Code2,
   Database,
   Download,
   Ellipsis,
-  FlaskConical,
-  FolderOpen,
   KeyRound,
-  Waypoints,
   Link2,
   Moon,
   PanelLeftClose,
@@ -57,47 +53,40 @@ import {
 import { Button } from "../components/ui/button";
 import { DialogHost, confirmAction } from "../lib/dialogs";
 import { useStore } from "../features/schema/store";
-import {
-  createWorkspace,
-  id,
-  parseWorkspace,
-  validateSchema,
-} from "../features/schema/core";
-import { Diagram } from "../features/erd/Diagram";
+import { id, parseWorkspace, validateSchema } from "../features/schema/core";
 import { TableEditor } from "../features/schema/TableEditor";
 import { newTable } from "../features/schema/table-edit";
-import { RelationshipManager } from "../features/schema/RelationshipManager";
 import { ColumnEditor } from "../features/schema/ColumnEditor";
-import { RelationshipDetails } from "../features/erd/RelationshipDetails";
 import { planTableEdit } from "../features/schema/table-edit";
 import { activeSqlTab, sqlTabs, setSqlTabs } from "../features/sql/tabs";
-import { executeSqlBatch, type SqlResult } from "../features/sql/execution";
+import { executeSqlBatch } from "../features/sql/execution";
 import { SqlWorkspace } from "../features/sql/SqlWorkspace";
 
 import { Spreadsheet } from "../features/sample-data/Spreadsheet";
 import { saveGridChanges } from "../features/sample-data/mutations";
 import type { DraftRow } from "../features/sample-data/model";
-import { Requirements } from "../features/test-cases/Requirements";
-import { compareResults } from "../features/test-cases/compare";
 import { generateDDL, orderedTables, quote } from "../lib/ddl/generate";
-import { query, rebuild, snapshot } from "../lib/duckdb/engine";
+import {
+  query,
+  queryCancelable,
+  cancelLocalQuery,
+  rebuild,
+  snapshot,
+} from "../lib/duckdb/engine";
 import { RemoteWorkspace } from "../features/connections/RemoteWorkspace";
-import { WorkspaceManager } from "../features/connections/WorkspaceManager";
 import type { ConnectionProfile } from "../features/connections/model";
 import { saveJsonFile } from "../lib/platform/save-file";
 import { useDesktopClose } from "../lib/platform/use-desktop-close";
 import {
-  deleteWorkspace,
   saveWorkspace,
+  workspaceSnapshot,
   storage,
 } from "../lib/storage/workspaces";
 import type { TableDefinition, WorkspaceDefinition } from "../types/schema";
-type Mode = "data" | "relations" | "sql" | "tests";
+type Mode = "data" | "sql";
 const modes = [
   { id: "data", label: "Data", icon: Table2 },
   { id: "sql", label: "SQL", icon: Code2 },
-  { id: "relations", label: "Relations", icon: Waypoints },
-  { id: "tests", label: "Tests", icon: FlaskConical },
 ] as const;
 const EMPTY_ROWS: Record<string, unknown>[] = [];
 function signature(w: WorkspaceDefinition) {
@@ -123,9 +112,25 @@ export default function App() {
       edit((draft) => activateSource(draft, source.id));
   }, [mode, w, edit]);
 
-  const [selected, setSelected] = useState("");
   const [dataTable, setDataTable] = useState("");
   const [search, setSearch] = useState("");
+  const [tablePage, setTablePage] = useState(0);
+  const tableList = useRef<HTMLDivElement>(null);
+  useEffect(() => setTablePage(0), [search, w.id, w.activeSourceId]);
+  useEffect(() => {
+    tableList.current?.scrollTo({ top: 0 });
+  }, [tablePage, search, w.id, w.activeSourceId]);
+  const filteredTables = useMemo(
+    () =>
+      w.schema.tables.filter((table) =>
+        `${table.namespace ?? ""}.${table.name}`
+          .toLowerCase()
+          .includes(search.toLowerCase()),
+      ),
+    [w.schema.tables, search],
+  );
+  const tablePageCount = Math.max(1, Math.ceil(filteredTables.length / 50));
+  const currentTablePage = Math.min(tablePage, tablePageCount - 1);
   const [expandedTables, setExpandedTables] = useState<string[]>([]);
   const [left, setLeft] = useState(true);
   const [connectionRevision, setConnectionRevision] = useState(0);
@@ -147,9 +152,6 @@ export default function App() {
     columnId?: string;
     anchor: HTMLButtonElement;
   } | null>(null);
-  const [relationshipsTable, setRelationshipsTable] = useState<string | null>(
-    null,
-  );
   const platform = desktopPlatform();
   const [dark, setDark] = useState(readDarkAppearance);
   useDesktopChrome(dark);
@@ -159,36 +161,37 @@ export default function App() {
     saveDarkAppearance(dark);
   }, [dark]);
   const [busy, setBusy] = useState(false);
+  const [localQueryRunning, setLocalQueryRunning] = useState(false);
+  const [localCancelPending, setLocalCancelPending] = useState(false);
+  const localCancelled = useRef(false);
+  const localRunActive = useRef(false);
+  const localExecutionId = useRef(0);
   const [runtime, setRuntime] = useState("");
   const [ready, setReady] = useState(false);
   const [saved, setSaved] = useState("Opening workspace…");
   const [message, setMessage] = useState("");
   const [error, setError] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const [queryResults, setQueryResults] = useState<Record<string, SqlResult[]>>(
-    {},
-  );
+  const [queryResults, setQueryResults] = useSqlResults(w.id);
   const remoteRun = useRef<() => void>(() => {});
   const sqlSelection = useRef({ tabId: "", sql: "" });
 
   const remote = !!(w.postgres || w.mssql);
-  const [manager, setManager] = useState<
-    "create" | "connections" | "attach" | null
-  >(null);
-  const [open, setOpen] = useState(false);
   const [ddl, setDdl] = useState(false);
-  const [workspaces, setWorkspaces] = useState<WorkspaceDefinition[]>([]);
-  const [testResults, setTestResults] = useState<Record<string, string>>({});
+  const [ddlSql, setDdlSql] = useState("");
   const searchInput = useRef<HTMLInputElement>(null);
   const file = useRef<HTMLInputElement>(null);
   const runRef = useRef<() => void>(() => {});
-  const schemaSignature = signature(w);
+  const schemaSignature = useMemo(
+    () => (remote ? "" : signature(w)),
+    [remote, w.schema],
+  );
   const stale = !remote && runtime !== schemaSignature;
   const activeTable =
     w.schema.tables.find((t) => t.id === dataTable) || w.schema.tables[0];
-  const errors = remote ? [] : validateSchema(w.schema);
-  const selectedRelationship = w.schema.relationships.find(
-    (r) => r.id === selected,
+  const errors = useMemo(
+    () => (remote ? [] : validateSchema(w.schema)),
+    [remote, w.schema],
   );
   useEffect(() => {
     let active = true;
@@ -241,8 +244,6 @@ export default function App() {
     let active = true;
     setBusy(true);
     setRuntime("");
-    setQueryResults({});
-    setTestResults({});
     if (remote || (w.sources && mode === "sql")) {
       setBusy(false);
       return;
@@ -324,9 +325,11 @@ export default function App() {
     if (busy) return false;
     if (
       dirty &&
-      !(await confirmAction(
-        "You have unsaved changes. Discard them and continue?",
-      ))
+      !(await confirmAction("Your unsaved changes will be lost.", {
+        title: "Discard changes?",
+        confirmLabel: "Discard",
+        destructive: true,
+      }))
     )
       return false;
     return true;
@@ -347,15 +350,9 @@ export default function App() {
     setMode(next);
   }
   async function chooseTable(tableId: string) {
-    if (tableId === activeTable?.id && mode !== "relations") return;
+    if (tableId === activeTable?.id) return;
     if (!(await leaveDraft())) return;
     setDataTable(tableId);
-    setSelected(tableId);
-    if (mode === "relations") setMode("data");
-  }
-  function inspect(entityId: string) {
-    setSelected(entityId);
-    if (w.schema.tables.some((t) => t.id === entityId)) setDataTable(entityId);
   }
   async function apply() {
     if (busy) return;
@@ -373,32 +370,50 @@ export default function App() {
     });
   }
   async function run(tabId?: string, sql?: string) {
-    if (stale || busy) return;
-    await task(async () => {
-      const tab =
-        sqlTabs(w).find((item) => item.id === tabId) ?? activeSqlTab(w);
-      const selected =
-        sql ??
-        (sqlSelection.current.tabId === tab.id ? sqlSelection.current.sql : "");
-      const results = await executeSqlBatch(
-        selected.trim() ? selected : tab.sql,
-        query,
-      );
-      if (!results.length) return;
-      setQueryResults((previous) => ({ ...previous, [tab.id]: results }));
-      try {
-        const data = await snapshot(w);
-        edit((d) => {
-          d.data = data;
-        });
-      } catch (e) {
-        setRuntime("");
-        throw Error(
-          "SQL ran, but its schema no longer matches the design. Rebuild to restore the visual schema. " +
-            String(e),
+    if (stale || busy || localRunActive.current) return;
+    localRunActive.current = true;
+    localExecutionId.current++;
+    localCancelled.current = false;
+    setLocalQueryRunning(true);
+    setLocalCancelPending(false);
+    try {
+      await task(async () => {
+        const tab =
+          sqlTabs(w).find((item) => item.id === tabId) ?? activeSqlTab(w);
+        const selected =
+          sql ??
+          (sqlSelection.current.tabId === tab.id
+            ? sqlSelection.current.sql
+            : "");
+        const results = await executeSqlBatch(
+          selected.trim() ? selected : tab.sql,
+          async (text) => {
+            if (localCancelled.current)
+              throw Error("Query stopped. Remaining statements were skipped.");
+            return queryCancelable(text);
+          },
         );
-      }
-    });
+        setLocalQueryRunning(false);
+        if (!results.length) return;
+        setQueryResults((previous) => ({ ...previous, [tab.id]: results }));
+        try {
+          const data = await snapshot(w);
+          edit((d) => {
+            d.data = data;
+          });
+        } catch (e) {
+          setRuntime("");
+          throw Error(
+            "SQL ran, but its schema no longer matches the design. Rebuild to restore the visual schema. " +
+              String(e),
+          );
+        }
+      });
+    } finally {
+      localRunActive.current = false;
+      setLocalQueryRunning(false);
+      setLocalCancelPending(false);
+    }
   }
   runRef.current = () => {
     if (mode === "sql") {
@@ -476,9 +491,20 @@ export default function App() {
   async function selectConnection(sourceId: string) {
     if (sourceId === (w.activeSourceId ?? "primary")) return true;
     if (!(await leaveDraft())) return false;
-    edit((draft) => activateSource(draft, sourceId));
+    edit((draft) => {
+      activateSource(draft, sourceId);
+      if (mode === "sql") {
+        const active = activeSqlTab(draft).id;
+        setSqlTabs(
+          draft,
+          sqlTabs(draft).map((tab) =>
+            tab.id === active ? { ...tab, sourceId } : tab,
+          ),
+          active,
+        );
+      }
+    });
     setDataTable("");
-    setSelected("");
     setSearch("");
     return true;
   }
@@ -498,7 +524,6 @@ export default function App() {
       } else activateSource(draft, sourceId);
     });
     setDataTable("");
-    setSelected("");
     setSearch("");
   }
   async function addWorkspaceConnection(profile?: ConnectionProfile) {
@@ -533,7 +558,6 @@ export default function App() {
     });
     setMode("sql");
     setDataTable("");
-    setSelected("");
     setSearch("");
   }
   async function removeWorkspaceConnection(sourceId: string) {
@@ -546,7 +570,12 @@ export default function App() {
       !source ||
       !fallback ||
       !(await confirmAction(
-        `Remove “${source.connection ? source.name : "Local DuckDB"}” from this workspace? Its SQL tabs will keep their text and use “${fallback.connection ? fallback.name : "Local DuckDB"}”. ${source.connection ? "The server database and reusable saved connection will not be deleted." : "Its saved local tables and rows will be removed from this workspace. Export JSON first if you need a backup."}`,
+        `SQL tabs keep their text and switch to “${fallback.connection ? fallback.name : "Local DuckDB"}”. ${source.connection ? "Server data and saved connection settings stay available." : "Local tables and rows will be removed. Export the session first to keep a copy."}`,
+        {
+          title: `Remove “${source.connection ? source.name : "Local DuckDB"}”?`,
+          confirmLabel: "Remove",
+          destructive: true,
+        },
       ))
     )
       return;
@@ -556,135 +585,12 @@ export default function App() {
       invalidateSession(sourceSessionKey(w.id, item.id));
     edit((draft) => removeSource(draft, sourceId));
     setDataTable("");
-    setSelected("");
     setSearch("");
   }
-  async function closeConnectionManager() {
-    setManager(null);
-    if (!w.sources) return;
-    try {
-      const profiles = await storage.connections.toArray();
-      edit((draft) => {
-        captureActiveSource(draft);
-        for (const source of draft.sources ?? []) {
-          if (source.parentSourceId) continue;
-          const profile = profiles.find(
-            (profile) => profile.id === source.connectionId,
-          );
-          if (!profile) continue;
-          const connection = {
-            engine: profile.engine,
-            config: profile.config,
-          } as typeof source.connection;
-          const changed =
-            JSON.stringify(source.connection) !== JSON.stringify(connection);
-          updateSource(draft, source.id, {
-            name: profile.name,
-            connection,
-            ...(changed ? { schema: { tables: [], relationships: [] } } : {}),
-          });
-        }
-      });
-    } catch (e) {
-      setMessage(String(e));
-      setError(true);
-    }
-  }
-  async function newWorkspace() {
-    if (!(await leaveDraft())) return;
-    setManager("create");
-  }
-  async function createFromConnection(
-    profile?: ConnectionProfile,
-    name?: string,
-  ) {
-    if (!(await leaveDraft())) return false;
-    await saveWorkspace(w);
-    const next = createWorkspace(false);
-    next.sql = "";
-    next.name = name || profile?.name || "Untitled workspace";
-    if (profile) {
-      next.sql = "";
-      next.connectionId = profile.id;
-      if (profile.engine === "postgres") next.postgres = profile.config;
-      else next.mssql = profile.config;
-    }
-    load(next);
-    setMode("sql");
-    setSelected("");
-    setDataTable("");
-  }
-  async function openWorkspaces() {
-    if (!(await leaveDraft())) return;
-    await task(async () => {
-      await saveWorkspace(w);
-      setWorkspaces(
-        await storage.workspaces.orderBy("updatedAt").reverse().toArray(),
-      );
-      setOpen(true);
-    });
-  }
-  async function renameWorkspace(workspaceId: string, name: string) {
-    const trimmed = name.trim();
-    if (!trimmed || trimmed.length > 120)
-      throw Error("Use a name between 1 and 120 characters.");
-    setBusy(true);
-    try {
-      if (useStore.getState().workspace.id === workspaceId) {
-        edit((draft) => {
-          draft.name = trimmed;
-        });
-        if (!(await saveWorkspace(useStore.getState().workspace)))
-          throw Error("This workspace was deleted.");
-      } else {
-        const saved = await storage.workspaces.get(workspaceId);
-        if (
-          !saved ||
-          !(await saveWorkspace({
-            ...saved,
-            name: trimmed,
-            updatedAt: Date.now(),
-          }))
-        )
-          throw Error("This workspace was deleted.");
-      }
-      setWorkspaces(
-        await storage.workspaces.orderBy("updatedAt").reverse().toArray(),
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function removeWorkspace(item: WorkspaceDefinition) {
-    if (busy) return;
-    const detail =
-      item.postgres || item.mssql
-        ? "Its saved SQL, tests, layout and workspace settings will be removed from this device."
-        : "Its saved SQL, tables, sample data, tests and layout will be removed from this device.";
-    if (
-      !(await confirmAction(
-        `Delete workspace “${item.name}”? ${detail} Databases on the server and saved connections will not be deleted. Export JSON first if you need a backup.`,
-      ))
-    )
-      return;
-    await task(async () => {
-      const result = await deleteWorkspace(item.id, w.id);
-      invalidateSession(item.id);
-      setWorkspaces(result.workspaces);
-      if (result.replacement) {
-        load(result.replacement);
-        setSelected("");
-        setDataTable("");
-        setSearch("");
-        setDirty(false);
-        setMode("sql");
-        setOpen(false);
-      }
-      setMessage(`Deleted workspace “${item.name}”.`);
-    });
-  }
   async function exportWorkspace() {
-    await task(() => saveJsonFile(w.name, JSON.stringify(w, null, 2)));
+    await task(() =>
+      saveJsonFile(w.name, JSON.stringify(workspaceSnapshot(w), null, 2)),
+    );
   }
   async function generateData() {
     if (stale || busy || dirty) return;
@@ -728,35 +634,6 @@ export default function App() {
       }
     });
   }
-  async function runTests(testId?: string) {
-    if (stale || busy) return;
-    await task(async () => {
-      for (const test of w.tests.filter(
-        (test) => !testId || test.id === testId,
-      )) {
-        try {
-          const expected = JSON.parse(test.expected);
-          if (!Array.isArray(expected))
-            throw Error("Expected rows must be a JSON array.");
-          const actual = (await query(test.sql)).rows;
-          setTestResults((results) => ({
-            ...results,
-            [test.id]:
-              (compareResults(actual, expected, test.ordered)
-                ? "PASS"
-                : "FAIL") +
-              " · " +
-              JSON.stringify(actual),
-          }));
-        } catch (error) {
-          setTestResults((results) => ({
-            ...results,
-            [test.id]: "ERROR · " + String(error),
-          }));
-        }
-      }
-    });
-  }
   return (
     <div
       className={
@@ -771,14 +648,6 @@ export default function App() {
       )}
       <header className="app-header" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region>
-          <span
-            className="workspace-title"
-            aria-label="Workspace name"
-            title={w.name}
-            data-tauri-drag-region
-          >
-            {w.name}
-          </span>
           <div className="titlebar-connection-host" ref={setConnectionHost}>
             {!(mode === "sql" && w.sources) && (
               <WorkspaceConnectionControls
@@ -793,19 +662,10 @@ export default function App() {
               />
             )}
           </div>
-          <ConnectionMenu
+          <ConnectionController
+            onAttach={addWorkspaceConnection}
             workspace={w}
             busy={busy}
-            onAdd={() =>
-              void leaveDraft().then((ok) => {
-                if (ok) setManager("attach");
-              })
-            }
-            onManage={() =>
-              void leaveDraft().then((ok) => {
-                if (ok) setManager("connections");
-              })
-            }
             onRemove={(sourceId) => void removeWorkspaceConnection(sourceId)}
             onBeforeAction={leaveDraft}
             onConnected={() =>
@@ -817,11 +677,7 @@ export default function App() {
             }}
           />
         </div>
-        <nav
-          className="mode-switch"
-          aria-label="Workspace mode"
-          data-tauri-drag-region
-        >
+        <nav className="mode-switch" aria-label="View" data-tauri-drag-region>
           {modes.map((item) => (
             <button
               key={item.id}
@@ -858,7 +714,7 @@ export default function App() {
                 e.currentTarget.removeAttribute("open");
             }}
           >
-            <summary aria-label="Workspace actions">
+            <summary aria-label="App settings">
               <Ellipsis size={17} />
             </summary>
             <div>
@@ -866,17 +722,9 @@ export default function App() {
                 <PanelLeftClose size={15} />
                 {left ? "Hide sidebar" : "Show sidebar"}
               </Button>
-              <Button disabled={busy} onClick={() => void newWorkspace()}>
-                <Plus size={15} />
-                New workspace
-              </Button>
               <Button onClick={() => setAbbreviations(true)}>
                 <Braces size={15} />
                 SQL abbreviations
-              </Button>
-              <Button disabled={busy} onClick={() => void openWorkspaces()}>
-                <FolderOpen size={15} />
-                Open workspace
               </Button>
               <Button
                 disabled={busy}
@@ -885,13 +733,13 @@ export default function App() {
                 }}
               >
                 <Upload size={15} />
-                Import JSON
+                Import session
               </Button>
               <Button
                 disabled={remote}
                 onClick={() => {
                   try {
-                    generateDDL(w.schema);
+                    setDdlSql(generateDDL(w.schema));
                     setDdl(true);
                   } catch (error) {
                     setMessage(String(error));
@@ -904,7 +752,7 @@ export default function App() {
               </Button>
               <Button onClick={exportWorkspace}>
                 <Download size={15} />
-                Export workspace
+                Export session
               </Button>
               <hr />
               <Button
@@ -940,7 +788,6 @@ export default function App() {
             imported.id = id();
             await saveWorkspace(w);
             load(imported);
-            setSelected("");
             setDataTable("");
           });
         }}
@@ -962,7 +809,7 @@ export default function App() {
             <div className="section-heading">
               <span>TABLES</span>
               <span>{w.schema.tables.length}</span>
-              {!remote && mode !== "relations" && (
+              {!remote && (
                 <Button
                   title="Create table"
                   disabled={busy}
@@ -972,20 +819,16 @@ export default function App() {
                 </Button>
               )}
             </div>
-            <div className="table-list">
-              {w.schema.tables
-                .filter((t) =>
-                  t.name.toLowerCase().includes(search.toLowerCase()),
-                )
+            <div className="table-list" ref={tableList}>
+              {filteredTables
+                .slice(currentTablePage * 50, (currentTablePage + 1) * 50)
                 .map((table) => (
                   <div key={table.id}>
                     <div className="tree-table-row">
                       <button
                         className={
                           "tree-table " +
-                          (mode !== "relations" && activeTable?.id === table.id
-                            ? "active"
-                            : "")
+                          (activeTable?.id === table.id ? "active" : "")
                         }
                         onClick={() => void chooseTable(table.id)}
                         onDoubleClick={() => {
@@ -1023,7 +866,6 @@ export default function App() {
                             table.id;
                           if (!(await leaveDraft())) return;
                           setDataTable(table.id);
-                          setSelected(table.id);
                           setExpandedTables((items) =>
                             items.includes(key)
                               ? items.filter((item) => item !== key)
@@ -1088,11 +930,36 @@ export default function App() {
               {!w.schema.tables.length && (
                 <p className="sidebar-empty">Your tables will appear here.</p>
               )}
-              {search &&
-                !w.schema.tables.some((t) =>
-                  t.name.toLowerCase().includes(search.toLowerCase()),
-                ) && <p className="sidebar-empty">No matching tables.</p>}
+              {search && !filteredTables.length && (
+                <p className="sidebar-empty">No matching tables.</p>
+              )}
             </div>
+            {filteredTables.length > 50 && (
+              <nav className="table-pagination" aria-label="Table pages">
+                <Button
+                  title="Previous table page"
+                  disabled={currentTablePage === 0}
+                  onClick={() => setTablePage(currentTablePage - 1)}
+                >
+                  <ChevronLeft size={13} />
+                </Button>
+                <span
+                  role="status"
+                  title={`${filteredTables.length} tables · 50 per page`}
+                >
+                  {currentTablePage * 50 + 1}–
+                  {Math.min((currentTablePage + 1) * 50, filteredTables.length)}{" "}
+                  <span className="muted">/ {filteredTables.length}</span>
+                </span>
+                <Button
+                  title="Next table page"
+                  disabled={currentTablePage + 1 >= tablePageCount}
+                  onClick={() => setTablePage(currentTablePage + 1)}
+                >
+                  <ChevronRight size={13} />
+                </Button>
+              </nav>
+            )}
           </aside>
         )}
         {left && (
@@ -1165,15 +1032,13 @@ export default function App() {
               mode={mode}
               dark={dark}
               activeTable={activeTable}
-              selected={selected}
-              onSelect={inspect}
               runRef={remoteRun}
               onBusy={setBusy}
               onDirty={setDirty}
             />
           ) : (
             <>
-              {stale && !busy && mode !== "relations" && (
+              {stale && !busy && (
                 <div className="sync-banner">
                   <RefreshCw size={13} />
                   <span>Schema changes pending</span>
@@ -1205,16 +1070,6 @@ export default function App() {
                         </span>
                       </div>
                       <div className="row">
-                        <Button
-                          disabled={busy}
-                          onClick={async () => {
-                            if (await leaveDraft())
-                              setRelationshipsTable(activeTable.id);
-                          }}
-                        >
-                          <Link2 size={14} />
-                          Relationships
-                        </Button>
                         <Button
                           disabled={busy || stale || dirty}
                           onClick={() => void generateData()}
@@ -1260,41 +1115,7 @@ export default function App() {
                     </Button>
                   </div>
                 )
-              ) : mode === "relations" ? (
-                <div className="design-view">
-                  <div className="design-workspace">
-                    <div className="compact-toolbar">
-                      <span className="toolbar-count">
-                        {w.schema.tables.length} tables ·{" "}
-                        {w.schema.relationships.length} relationships
-                      </span>
-                      <span className="toolbar-count">
-                        Drag tables to arrange
-                      </span>
-                    </div>
-                    <div className="diagram">
-                      <Diagram select={inspect} selected={selected} />
-                    </div>
-                  </div>
-                  {selectedRelationship && (
-                    <aside className="property-panel">
-                      <div className="panel-title">
-                        <span>Relationship</span>
-                        <Button
-                          title="Close relationship details"
-                          onClick={() => setSelected("")}
-                        >
-                          <X size={14} />
-                        </Button>
-                      </div>
-                      <RelationshipDetails
-                        schema={w.schema}
-                        relationship={selectedRelationship}
-                      />
-                    </aside>
-                  )}
-                </div>
-              ) : mode === "sql" ? (
+              ) : (
                 <SqlWorkspace
                   key={w.id}
                   tabs={sqlTabs(w)}
@@ -1319,6 +1140,28 @@ export default function App() {
                       setSqlTabs(d, tabs, activeSqlTab(d).id);
                     })
                   }
+                  cancelPending={localCancelPending}
+                  onCancel={
+                    localQueryRunning
+                      ? () => {
+                          if (localCancelled.current) return;
+                          localCancelled.current = true;
+                          setLocalCancelPending(true);
+                          const requestId = localExecutionId.current;
+                          void cancelLocalQuery().catch((error) => {
+                            if (
+                              requestId !== localExecutionId.current ||
+                              !localRunActive.current
+                            )
+                              return;
+                            localCancelled.current = false;
+                            setMessage(String(error));
+                            setError(true);
+                            setLocalCancelPending(false);
+                          });
+                        }
+                      : undefined
+                  }
                   onRun={(tabId, sql) => void run(tabId, sql)}
                   disabled={busy || stale}
                   busy={busy}
@@ -1331,12 +1174,6 @@ export default function App() {
                       sql,
                     };
                   }}
-                />
-              ) : (
-                <Requirements
-                  results={testResults}
-                  onRun={(testId) => void runTests(testId)}
-                  disabled={busy || stale}
                 />
               )}
             </>
@@ -1368,13 +1205,6 @@ export default function App() {
             onCommit={commitColumn}
           />
         )}
-      {relationshipsTable &&
-        w.schema.tables.some((t) => t.id === relationshipsTable) && (
-          <RelationshipManager
-            table={w.schema.tables.find((t) => t.id === relationshipsTable)!}
-            onClose={() => setRelationshipsTable(null)}
-          />
-        )}
       {tableEditor && (
         <TableEditor
           key={tableEditor.table.id}
@@ -1382,40 +1212,13 @@ export default function App() {
           isNew={tableEditor.isNew}
           onClose={() => setTableEditor(null)}
           onSaved={(tableId) => {
-            setSelected(tableId);
             setDataTable(tableId);
             setTableEditor(null);
           }}
           onDeleted={() => {
-            setSelected("");
             setDataTable("");
             setTableEditor(null);
           }}
-        />
-      )}
-      {manager && (
-        <WorkspaceManager
-          mode={manager}
-          onCreate={
-            manager === "attach" ? addWorkspaceConnection : createFromConnection
-          }
-          onClose={() => void closeConnectionManager()}
-        />
-      )}
-      {open && (
-        <WorkspaceBrowser
-          items={workspaces}
-          currentId={w.id}
-          busy={busy}
-          onClose={() => setOpen(false)}
-          onDelete={(item) => void removeWorkspace(item)}
-          onOpen={(item) => {
-            load(item);
-            setSelected("");
-            setDataTable("");
-            setOpen(false);
-          }}
-          onRename={renameWorkspace}
         />
       )}
       <Dialog.Root open={ddl} onOpenChange={setDdl}>
@@ -1427,15 +1230,7 @@ export default function App() {
               DuckDB DDL generated from the current design. Logical
               relationships are visual only.
             </Dialog.Description>
-            <pre>
-              {(() => {
-                try {
-                  return generateDDL(w.schema);
-                } catch (e) {
-                  return String(e);
-                }
-              })()}
-            </pre>
+            <pre>{ddlSql}</pre>
             <Dialog.Close asChild>
               <Button>Done</Button>
             </Dialog.Close>

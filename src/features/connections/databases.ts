@@ -11,6 +11,11 @@ import {
   NeedsConnection,
   retainSession,
   withConnectionSession,
+  getSession,
+  findProfileSession,
+  profileSessions,
+  sameServer,
+  replaceSession,
 } from "./sessions";
 import { remoteClient } from "./client";
 
@@ -28,6 +33,10 @@ export async function ensureDatabaseSession(
   if (!source?.connection) return;
   const config = source.connection;
   const key = sourceSessionKey(w.id, sourceId);
+  const root = connectionRoot(w, source);
+  const profileId = root.connectionId;
+  const shared = findProfileSession(profileId, config);
+  if (!getSession(key, config) && shared) retainSession(key, shared);
   try {
     await withConnectionSession(key, config, async () => {});
     return;
@@ -37,33 +46,45 @@ export async function ensureDatabaseSession(
   const pending = opening.get(key);
   if (pending) return pending;
   const promise = (async () => {
-    const root = connectionRoot(w, source);
-    for (const sibling of databaseSources(w, root.id)) {
-      if (sibling.id === source.id || !sibling.connection) continue;
-      try {
-        const result = await withConnectionSession(
-          sourceSessionKey(w.id, sibling.id),
-          sibling.connection,
-          (session) =>
-            invoke<DatabaseConnectionResult>(
-              config.engine === "postgres"
-                ? "pg_open_database"
-                : "ms_open_database",
-              {
-                sessionId: session.sessionId,
-                database: config.config.database,
-              },
-            ),
-        );
-        retainSession(key, {
-          ...result,
-          config,
-          disconnect: remoteClient(config.engine).disconnect,
-        });
-        return;
-      } catch (error) {
-        if (!(error instanceof NeedsConnection)) throw error;
-      }
+    const existing = getSession(key, config, true);
+    const candidates = [
+      existing,
+      ...databaseSources(w, root.id).map((sibling) =>
+        sibling.connection
+          ? getSession(
+              sourceSessionKey(w.id, sibling.id),
+              sibling.connection,
+              true,
+            )
+          : undefined,
+      ),
+      ...profileSessions(profileId),
+    ].filter(
+      (entry): entry is NonNullable<typeof entry> =>
+        !!entry && sameServer(entry.config, config),
+    );
+    const tried = new Set<string>();
+    for (const entry of candidates) {
+      if (tried.has(entry.sessionId)) continue;
+      tried.add(entry.sessionId);
+      const result = await invoke<DatabaseConnectionResult>(
+        config.engine === "postgres" ? "pg_open_database" : "ms_open_database",
+        {
+          sessionId: entry.sessionId,
+          database: config.config.database,
+        },
+      );
+      const value = {
+        ...result,
+        config,
+        profileId,
+        connected: true,
+        disconnect: remoteClient(config.engine).disconnect,
+      };
+      if (existing?.sessionId === entry.sessionId)
+        replaceSession(entry.sessionId, value);
+      retainSession(key, value);
+      return;
     }
     throw new NeedsConnection();
   })();
@@ -99,4 +120,38 @@ export async function listDatabases(
       { sessionId: session.sessionId },
     ),
   );
+}
+
+export async function reconnectDatabase(
+  w: WorkspaceDefinition,
+  source: WorkspaceSource,
+) {
+  if (!source.connection) return;
+  const key = sourceSessionKey(w.id, source.id);
+  const existing =
+    getSession(key, source.connection, true) ??
+    profileSessions(connectionRoot(w, source).connectionId).find((entry) =>
+      sameServer(entry.config, source.connection!),
+    );
+  if (!existing) throw new NeedsConnection();
+  const result = await invoke<DatabaseConnectionResult>(
+    source.connection.engine === "postgres"
+      ? "pg_open_database"
+      : "ms_open_database",
+    {
+      sessionId: existing.sessionId,
+      database: source.connection.config.database,
+    },
+  );
+  const value = {
+    ...result,
+    config: source.connection,
+    profileId: connectionRoot(w, source).connectionId,
+    connected: true,
+    disconnect: remoteClient(source.connection.engine).disconnect,
+  };
+  if (existing.config.config.database === source.connection.config.database)
+    replaceSession(existing.sessionId, value);
+  retainSession(key, value);
+  return result;
 }

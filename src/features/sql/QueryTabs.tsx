@@ -103,7 +103,12 @@ export function QueryTabs({
               if (
                 tab.sql.trim() &&
                 !(await confirmAction(
-                  `Close ${tab.name}? Its SQL will be removed from this workspace.`,
+                  `The SQL in “${tab.name}” will be removed from this session.`,
+                  {
+                    title: "Close query?",
+                    confirmLabel: "Close query",
+                    destructive: true,
+                  },
                 ))
               )
                 return;
