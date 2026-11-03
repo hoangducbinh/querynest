@@ -1,6 +1,7 @@
+import { sqlEditorView, rememberSqlEditorView } from "./view-state";
 import type { DatabaseSchema } from "../../types/schema";
 import type { SqlDialect } from "./data-types";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Editor, { loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor/editor/editor.api";
 import "monaco-editor/languages/definitions/sql/register";
@@ -28,8 +29,10 @@ const kinds = {
   type: monaco.languages.CompletionItemKind.TypeParameter,
 };
 export function SqlEditor({
+  viewKey,
   value,
   autoFocus = false,
+  readOnly = false,
   schema: suppliedSchema,
   dialect: suppliedDialect,
   onChange,
@@ -41,7 +44,9 @@ export function SqlEditor({
   validationSource = "DuckDB",
 }: {
   value: string;
+  viewKey?: string;
   autoFocus?: boolean;
+  readOnly?: boolean;
   schema?: DatabaseSchema;
   dialect?: SqlDialect;
   dark?: boolean;
@@ -52,6 +57,13 @@ export function SqlEditor({
   onValidation?: (status: string) => void;
   onChange: (sql: string) => void;
 }) {
+  const alive = useRef(true);
+  useLayoutEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
   const [editorInstance, setEditorInstance] =
     useState<monaco.editor.IStandaloneCodeEditor | null>(null);
   const storedSchema = useStore((s) => s.workspace.schema);
@@ -179,16 +191,27 @@ export function SqlEditor({
       onChange={(next) => onChange(next ?? "")}
       onMount={(editor) => {
         setEditorInstance(editor);
+        const saved = viewKey ? sqlEditorView(viewKey) : undefined;
+        if (saved) editor.restoreViewState(saved);
         if (autoFocus) editor.focus();
-        selectionCallback.current?.("");
-        editor.onDidChangeCursorSelection(() => {
+        const saveView = () => {
+          if (alive.current && viewKey && !editor.getModel()?.isDisposed())
+            rememberSqlEditorView(viewKey, editor.saveViewState());
+        };
+        const publishSelection = () => {
+          if (!alive.current) return;
           const selection = editor.getSelection();
           selectionCallback.current?.(
             selection && !selection.isEmpty()
               ? (editor.getModel()?.getValueInRange(selection) ?? "")
               : "",
           );
-        });
+          saveView();
+        };
+        publishSelection();
+        editor.onDidChangeCursorSelection(publishSelection);
+        editor.onDidScrollChange(saveView);
+        editor.onDidBlurEditorWidget(saveView);
         editor.addCommand(
           monaco.KeyMod.CtrlCmd | monaco.KeyCode.Slash,
           () => void editor.getAction("editor.action.blockComment")?.run(),
@@ -245,6 +268,9 @@ export function SqlEditor({
         );
       }}
       options={{
+        contextmenu: false,
+        readOnly,
+        domReadOnly: readOnly,
         renderValidationDecorations: "on",
         hover: { enabled: "on" },
         minimap: { enabled: false },

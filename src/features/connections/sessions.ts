@@ -1,3 +1,5 @@
+import { releaseTableSession } from "./table-state";
+import { releaseGridSession } from "../sample-data/view-state";
 import type { PgCatalog } from "../postgres/model";
 import { useSyncExternalStore } from "react";
 import type { RemoteConfig } from "./model";
@@ -99,8 +101,11 @@ export function findProfileSession(
   );
 }
 function closeIfUnreferenced(value: RetainedSession) {
-  if (![...sessions.values()].some((s) => s.sessionId === value.sessionId))
+  if (![...sessions.values()].some((s) => s.sessionId === value.sessionId)) {
+    releaseTableSession(value.sessionId);
+    releaseGridSession(value.sessionId);
     void value.disconnect(value.sessionId).catch(() => {});
+  }
 }
 export function retainSession(key: string, value: RetainedSession) {
   if (

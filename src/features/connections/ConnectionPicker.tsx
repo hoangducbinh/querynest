@@ -102,7 +102,7 @@ export function ConnectionPicker({
           disabled={disabled}
           title={
             active.connection
-              ? `${active.name} · ${active.connection.config.host}`
+              ? `${active.name} · ${active.connection.config.host} · ${connected(active) ? "Connected" : "Disconnected"}`
               : "Local DuckDB"
           }
         >

@@ -1,3 +1,4 @@
+import { gridPosition, rememberGridPosition } from "./view-state";
 import { useMemo } from "react";
 import {
   ColumnResizeHandle,
@@ -9,9 +10,11 @@ import { cellText } from "./model";
 import { Terminal } from "lucide-react";
 
 export function ResultGrid({
+  viewKey,
   rows,
   columns,
 }: {
+  viewKey?: string;
   rows: Record<string, unknown>[];
   columns: string[];
 }) {
@@ -30,10 +33,27 @@ export function ResultGrid({
   const widths = columns.map((name, index) =>
     sizing.width(name, defaultWidths[index]),
   );
-  const viewport = useColumnWindow(widths, 48);
+  const viewport = useColumnWindow(
+    widths,
+    48,
+    viewKey ? gridPosition(viewKey) : undefined,
+  );
   const visibleColumns = columns.slice(viewport.start, viewport.end);
   return (
-    <div className="grid-scroll" ref={viewport.ref}>
+    <div
+      className="grid-scroll"
+      ref={viewport.ref}
+      tabIndex={0}
+      aria-label="Query result data"
+      onScroll={(event) => {
+        if (viewKey)
+          rememberGridPosition(
+            viewKey,
+            event.currentTarget.scrollTop,
+            event.currentTarget.scrollLeft,
+          );
+      }}
+    >
       {columns.length ? (
         <table
           className="resizable-results"

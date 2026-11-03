@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import * as Popover from "@radix-ui/react-popover";
+import { useEffect, useRef, useState } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
 import { ChevronDown, Columns3, Plus, Trash2, X } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { confirmAction } from "../../lib/dialogs";
@@ -41,12 +41,6 @@ export function RemoteColumnEditor({
   const changed =
     JSON.stringify(draft) !== JSON.stringify(columnDraft(initial, engine));
   const restrictions = columnRestrictions(context, initial, engine);
-  const virtualAnchor = useMemo(
-    () => ({
-      current: { getBoundingClientRect: () => anchor.getBoundingClientRect() },
-    }),
-    [anchor],
-  );
   useEffect(() => {
     onDirty(changed);
     return () => onDirty(false);
@@ -98,22 +92,17 @@ export function RemoteColumnEditor({
     }
   }
   return (
-    <Popover.Root
+    <Dialog.Root
       open
       modal
       onOpenChange={(open) => {
         if (!open) void close();
       }}
     >
-      <Popover.Anchor virtualRef={virtualAnchor} />
-      <Popover.Portal>
-        <Popover.Content
+      <Dialog.Portal>
+        <Dialog.Overlay className="modal-overlay" />
+        <Dialog.Content
           className={`column-popover ${dark ? "dark" : ""}`}
-          side="bottom"
-          align="start"
-          sideOffset={8}
-          collisionPadding={12}
-          avoidCollisions
           aria-describedby={undefined}
           onOpenAutoFocus={(e) => {
             e.preventDefault();
@@ -148,9 +137,9 @@ export function RemoteColumnEditor({
             <span className="column-popover-icon">
               <Columns3 size={16} />
             </span>
-            <Popover.Title>
+            <Dialog.Title>
               {initial ? "Edit column" : "Add column"}
-            </Popover.Title>
+            </Dialog.Title>
             <span className="column-popover-table">
               {context.schema}.{context.table}
             </span>
@@ -330,13 +319,8 @@ export function RemoteColumnEditor({
               </Button>
             </div>
           </form>
-          <Popover.Arrow
-            className="column-popover-arrow"
-            width={12}
-            height={6}
-          />
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

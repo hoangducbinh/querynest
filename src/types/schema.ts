@@ -66,6 +66,8 @@ export interface WorkspaceSource {
 }
 export interface SqlTab {
   sourceId?: string;
+  pinned?: boolean;
+  locked?: boolean;
   id: string;
   name: string;
   sql: string;

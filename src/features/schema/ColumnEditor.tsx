@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import * as Popover from "@radix-ui/react-popover";
+import * as Dialog from "@radix-ui/react-dialog";
 import { ChevronDown, Columns3, Plus, Trash2, X } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { confirmAction } from "../../lib/dialogs";
@@ -41,12 +41,6 @@ export function ColumnEditor({
   const nameInput = useRef<HTMLInputElement>(null);
   const saved = useRef(false);
   const inFlight = useRef(false);
-  const virtualAnchor = useMemo(
-    () => ({
-      current: { getBoundingClientRect: () => anchor.getBoundingClientRect() },
-    }),
-    [anchor],
-  );
   const changed =
     JSON.stringify(column) !==
       JSON.stringify(initial ?? newColumnBaseline(column.id)) ||
@@ -125,22 +119,17 @@ export function ColumnEditor({
   }
   const issue = error || (column.name.trim() ? plan.errors.join(" ") : "");
   return (
-    <Popover.Root
+    <Dialog.Root
       open
       modal
       onOpenChange={(open) => {
         if (!open) void close();
       }}
     >
-      <Popover.Anchor virtualRef={virtualAnchor} />
-      <Popover.Portal>
-        <Popover.Content
+      <Dialog.Portal>
+        <Dialog.Overlay className="modal-overlay" />
+        <Dialog.Content
           className={"column-popover " + (dark ? "dark" : "")}
-          side="bottom"
-          align="start"
-          sideOffset={8}
-          collisionPadding={12}
-          avoidCollisions
           aria-describedby={undefined}
           onOpenAutoFocus={(event) => {
             event.preventDefault();
@@ -187,9 +176,9 @@ export function ColumnEditor({
             <span className="column-popover-icon">
               <Columns3 size={16} />
             </span>
-            <Popover.Title>
+            <Dialog.Title>
               {initial ? "Edit column" : "Add column"}
-            </Popover.Title>
+            </Dialog.Title>
             <span className="column-popover-table">{table.name}</span>
             <Button
               title="Close column editor"
@@ -342,14 +331,9 @@ export function ColumnEditor({
               </Button>
             </div>
           </form>
-          <Popover.Arrow
-            className="column-popover-arrow"
-            width={12}
-            height={6}
-          />
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 function newColumnBaseline(id: string): ColumnDefinition {

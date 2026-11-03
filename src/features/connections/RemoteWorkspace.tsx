@@ -1,3 +1,12 @@
+import { editableResult } from "../sql/editable-result";
+import { saveQueryResult } from "./save-query-result";
+import { currentSource } from "./sources";
+import {
+  cachedTablePage,
+  loadTablePage,
+  invalidateTable,
+  tableState,
+} from "./table-state";
 import { useSqlResults } from "../sql/result-state";
 import {
   useConnectionSession,
@@ -10,12 +19,13 @@ import { RemoteColumnEditor } from "./RemoteColumnEditor";
 import type { ColumnContext, ColumnChange } from "./columns";
 import {
   useCallback,
+  useMemo,
   useEffect,
   useRef,
   useState,
   type MutableRefObject,
 } from "react";
-import { RefreshCw } from "lucide-react";
+import { LoaderCircle, RefreshCw, Rows3, Table2, X } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import type { TableDefinition, WorkspaceDefinition } from "../../types/schema";
 import { useStore } from "../schema/store";
@@ -31,12 +41,18 @@ import { remoteClient } from "../connections/client";
 import { engineName, type RemoteConfig } from "../connections/model";
 import { catalogSchema, pgError, type PgCatalog } from "../postgres/model";
 import { isTauri, type PgQueryResult } from "../postgres/client";
+const EMPTY_ROWS: Record<string, unknown>[] = [];
 interface Props {
   workspace: WorkspaceDefinition;
   sessionKey?: string;
   mode: "data" | "sql";
   dark: boolean;
   activeTable?: TableDefinition;
+  openTables?: TableDefinition[];
+  dataLayout?: "tabs" | "stack";
+  onDataLayoutChange?: (layout: "tabs" | "stack") => void;
+  onSelectTable?: (tableId: string) => void;
+  onCloseTable?: (tableId: string) => void;
   runRef: MutableRefObject<() => void>;
   onBusy: (busy: boolean) => void;
   onDirty: (dirty: boolean) => void;
@@ -47,6 +63,11 @@ export function RemoteWorkspace({
   mode,
   dark,
   activeTable,
+  openTables = activeTable ? [activeTable] : [],
+  dataLayout = "tabs",
+  onDataLayoutChange,
+  onSelectTable,
+  onCloseTable,
   runRef,
   onBusy,
   onDirty,
@@ -73,7 +94,20 @@ export function RemoteWorkspace({
   const cancelled = useRef(false);
   const sqlRunning = useRef(false);
   const executionId = useRef(0);
-  const [page, setPage] = useState(0);
+  const tableId = activeTable?.id;
+  const cacheScope = `${sessionId}:${sessionKey}`;
+  const [, setPageRevision] = useState(0);
+  const page = tableId ? tableState(cacheScope, tableId).page : 0;
+  const tableSignature = useMemo(
+    () => JSON.stringify(activeTable),
+    [activeTable],
+  );
+  function setPage(next: number | ((previous: number) => number)) {
+    if (!tableId) return;
+    const state = tableState(cacheScope, tableId);
+    state.page = typeof next === "function" ? next(state.page) : next;
+    setPageRevision((revision) => revision + 1);
+  }
   const [gridDirty, setGridDirty] = useState(false);
   const [columnDirty, setColumnDirty] = useState(false);
   const [schemaStale, setSchemaStale] = useState(false);
@@ -96,7 +130,83 @@ export function RemoteWorkspace({
   const [data, setData] = useState<PgQueryResult>();
   const [dataLoading, setDataLoading] = useState(false);
   const [refresh, setRefresh] = useState(0);
-  const tableId = activeTable?.id;
+  const [collapsedStackTables, setCollapsedStackTables] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [stackTableHeights, setStackTableHeights] = useState<
+    Record<string, number>
+  >({});
+  const stackResizeDrag = useRef<{
+    tableId: string;
+    startY: number;
+    startHeight: number;
+  } | null>(null);
+  useEffect(() => {
+    if (
+      mode !== "data" ||
+      dataLayout !== "stack" ||
+      !sessionId ||
+      openTables.length <= 1
+    ) {
+      return;
+    }
+    let stale = false;
+    for (const tbl of openTables) {
+      const tblPage = tableState(cacheScope, tbl.id).page;
+      const sig = JSON.stringify(tbl);
+      if (!cachedTablePage(cacheScope, tbl.id, tblPage, sig)) {
+        void loadTablePage(cacheScope, tbl.id, tblPage, sig, () =>
+          client.page(sessionId, tbl.id, tblPage),
+        )
+          .then(() => {
+            if (!stale) setPageRevision((r) => r + 1);
+          })
+          .catch(() => {});
+      }
+    }
+    return () => {
+      stale = true;
+    };
+  }, [mode, dataLayout, sessionId, cacheScope, openTables, refresh]);
+  const [displayed, setDisplayed] = useState<{
+    sessionId: string;
+    table: TableDefinition;
+    page: number;
+    result: PgQueryResult;
+    refresh: number;
+  }>();
+  const [showLoading, setShowLoading] = useState(false);
+  useEffect(() => {
+    if (!dataLoading) {
+      setShowLoading(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowLoading(true), 150);
+    return () => clearTimeout(timer);
+  }, [dataLoading]);
+  const cached = tableId
+    ? cachedTablePage(cacheScope, tableId, page, tableSignature)
+    : undefined;
+  const visible =
+    cached && activeTable
+      ? {
+          sessionId,
+          table: activeTable,
+          page,
+          result: cached,
+          refresh: tableState(cacheScope, tableId!).generation,
+        }
+      : displayed?.sessionId === sessionId
+        ? displayed
+        : undefined;
+  const gridTable = visible?.table ?? activeTable;
+  const gridPage = visible?.page ?? page;
+  const gridReady =
+    !!visible &&
+    visible.table.id === tableId &&
+    visible.page === page &&
+    visible.result === data &&
+    !dataLoading;
   const applyCatalog = useCallback(
     (catalog: PgCatalog) => {
       setSchemaStale(false);
@@ -142,26 +252,46 @@ export function RemoteWorkspace({
   const requestConnect = () =>
     requestConnection(w.id, w.activeSourceId ?? "primary");
   useEffect(() => {
-    setPage(0);
-    setData(undefined);
-  }, [tableId]);
-  useEffect(() => {
     if (mode !== "data" || !sessionId || !tableId) {
       setDataLoading(false);
       return;
     }
     let stale = false;
+    const existing = cachedTablePage(cacheScope, tableId, page, tableSignature);
+    if (existing) {
+      setData(existing);
+      setDisplayed({
+        sessionId,
+        table: activeTable!,
+        page,
+        result: existing,
+        refresh: tableState(cacheScope, tableId).generation,
+      });
+      setDataLoading(false);
+      setError("");
+      return;
+    }
     setDataLoading(true);
     setData(undefined);
     setError("");
-    void client
-      .page(sessionId, tableId, page)
+    void loadTablePage(cacheScope, tableId, page, tableSignature, () =>
+      client.page(sessionId, tableId, page),
+    )
       .then((result) => {
-        if (!stale) setData(result);
+        if (!stale) {
+          setData(result);
+          setDisplayed({
+            sessionId,
+            table: activeTable!,
+            page,
+            result,
+            refresh: tableState(cacheScope, tableId).generation,
+          });
+        }
       })
       .catch((e) => {
         if (!stale) {
-          setError(pgError(e));
+          setError(`Could not load ${activeTable?.name}: ${pgError(e)}`);
           if (e && typeof e === "object" && "closed" in e && e.closed) {
             session.current = "";
             setSessionId("");
@@ -175,7 +305,7 @@ export function RemoteWorkspace({
     return () => {
       stale = true;
     };
-  }, [sessionId, tableId, page, mode, refresh]);
+  }, [sessionId, tableId, page, mode, refresh, tableSignature]);
   async function task(fn: () => Promise<void>) {
     if (pending) return;
     setPending(true);
@@ -211,7 +341,16 @@ export function RemoteWorkspace({
         markConnectionUnavailable(sessionKey);
         setError(pgError(e));
       }
-      throw Error(pgError(e));
+      throw Object.assign(new Error(pgError(e)), {
+        resultSets:
+          e && typeof e === "object" && "resultSets" in e
+            ? e.resultSets
+            : undefined,
+        messages:
+          e && typeof e === "object" && "messages" in e
+            ? e.messages
+            : undefined,
+      });
     }
   }
   async function run(tabId?: string, suppliedSql?: string) {
@@ -253,8 +392,22 @@ export function RemoteWorkspace({
   );
   async function reloadPage() {
     if (!tableId) throw Error("Choose a table first.");
-    const result = await client.page(sessionId, tableId, page);
+    invalidateTable(cacheScope, tableId);
+    const result = await loadTablePage(
+      cacheScope,
+      tableId,
+      page,
+      tableSignature,
+      () => client.page(sessionId, tableId, page),
+    );
     setData(result);
+    setDisplayed({
+      sessionId,
+      table: activeTable!,
+      page,
+      result,
+      refresh: tableState(cacheScope, tableId).generation,
+    });
     return result.rows;
   }
   async function saveRows(rows: DraftRow[]) {
@@ -306,6 +459,7 @@ export function RemoteWorkspace({
   }
   async function refreshData() {
     if (pending || dataLoading || !(await leaveGrid())) return;
+    if (tableId) invalidateTable(cacheScope, tableId);
     setRefresh((n) => n + 1);
   }
   const readOnlyReason = currentConfig.config.readOnly
@@ -348,6 +502,7 @@ export function RemoteWorkspace({
         }
         throw error;
       }
+      invalidateTable(cacheScope, tableId);
       // DDL already committed: never leave a retryable draft if refresh fails.
       try {
         applyCatalog(await client.refresh(sessionId));
@@ -419,6 +574,36 @@ export function RemoteWorkspace({
           disabled={pending}
           busy={pending}
           dark={dark}
+          tabContext={{
+            sourceId: sessionKey,
+            schema: w.schema,
+            dialect: engine === "mssql" ? "mssql" : "postgres",
+            label,
+            remote: true,
+          }}
+          onEditingResult={onBusy}
+          getEditableResult={(_tabId, result) =>
+            currentConfig.config.readOnly
+              ? undefined
+              : editableResult(result, w.schema, engine)
+          }
+          onSaveResult={async (tabId, result, drafts, index) => {
+            const rows = await saveQueryResult(
+              w,
+              currentSource(w),
+              result,
+              drafts,
+            );
+            setResults((previous) => ({
+              ...previous,
+              [tabId]: previous[tabId].map((item, position) =>
+                position === index
+                  ? { ...item, rows, status: `${rows.length} rows · updated` }
+                  : item,
+              ),
+            }));
+            return rows;
+          }}
           allResults={results}
           queryResults={results[activeSqlTab(w).id]}
           onSelection={(sql, tabId) => {
@@ -445,14 +630,97 @@ export function RemoteWorkspace({
           }
         />
       ) : (
-        <div className="pg-data">
-          <div className="compact-toolbar">
-            <span>
-              {activeTable
-                ? `${activeTable.namespace}.${activeTable.name}`
-                : "Choose a table"}
-            </span>
+        <div className="pg-data" aria-busy={dataLoading}>
+          <div className="compact-toolbar data-tables-toolbar">
+            {openTables.length > 0 ? (
+              <div
+                className="data-table-tabs"
+                role="tablist"
+                aria-label="Open tables"
+              >
+                {openTables.map((tbl) => {
+                  const isCurrent =
+                    dataLayout === "tabs" && tbl.id === activeTable?.id;
+                  return (
+                    <div
+                      key={tbl.id}
+                      className={`data-table-tab${isCurrent ? " is-active" : ""}`}
+                    >
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={isCurrent}
+                        className="data-table-tab-btn"
+                        onClick={() => {
+                          onSelectTable?.(tbl.id);
+                          if (dataLayout === "stack") {
+                            setCollapsedStackTables((prev) => {
+                              if (!prev.has(tbl.id)) return prev;
+                              const next = new Set(prev);
+                              next.delete(tbl.id);
+                              return next;
+                            });
+                          }
+                        }}
+                      >
+                        <Table2 size={12} />
+                        <span className="data-table-tab-name">
+                          {tbl.namespace
+                            ? `${tbl.namespace}.${tbl.name}`
+                            : tbl.name}
+                        </span>
+                      </button>
+                      {openTables.length > 1 && onCloseTable && (
+                        <button
+                          type="button"
+                          className="data-table-tab-close"
+                          title={`Close ${tbl.name}`}
+                          aria-label={`Close ${tbl.name}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onCloseTable(tbl.id);
+                          }}
+                        >
+                          <X size={11} />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <span>
+                {gridTable
+                  ? `${gridTable.namespace ? gridTable.namespace + "." : ""}${gridTable.name}`
+                  : "Choose a table"}
+              </span>
+            )}
             <div className="row">
+              {openTables.length > 1 && onDataLayoutChange && (
+                <Button
+                  className={dataLayout === "stack" ? "is-active" : undefined}
+                  aria-pressed={dataLayout === "stack"}
+                  title={
+                    dataLayout === "stack"
+                      ? "Switch to single table tab view"
+                      : "Stack open tables vertically"
+                  }
+                  onClick={() =>
+                    onDataLayoutChange(
+                      dataLayout === "stack" ? "tabs" : "stack",
+                    )
+                  }
+                >
+                  <Rows3 size={12} />
+                  <span>Stack</span>
+                </Button>
+              )}
+              {showLoading && (
+                <span className="table-loading-status" role="status">
+                  <LoaderCircle className="spin" size={12} />
+                  Loading {activeTable?.name}…
+                </span>
+              )}
               <span className="toolbar-count">
                 100 rows/page
                 {!activeTable?.primaryKey.length && !readOnlyReason
@@ -468,16 +736,178 @@ export function RemoteWorkspace({
               </Button>
             </div>
           </div>
-          {dataLoading ? (
-            <div className="empty-state">Loading rows…</div>
-          ) : activeTable ? (
+          {dataLayout === "stack" && openTables.length > 1 ? (
+            <div className="sql-all-results data-stack-container">
+              {openTables.map((tbl) => {
+                const tblPage = tableState(cacheScope, tbl.id).page;
+                const tblCached = cachedTablePage(
+                  cacheScope,
+                  tbl.id,
+                  tblPage,
+                  JSON.stringify(tbl),
+                );
+                const tblRows = tblCached?.rows ?? EMPTY_ROWS;
+                const isCollapsed = collapsedStackTables.has(tbl.id);
+                const visibleRowCount = Math.min(
+                  Math.max(tblRows.length, 1),
+                  6,
+                );
+                const defaultHeight = 24 + 26 + visibleRowCount * 25 + 8;
+                const blockHeight =
+                  stackTableHeights[tbl.id] ?? defaultHeight;
+                return (
+                  <section
+                    key={tbl.id}
+                    className="sql-result-block data-stack-block"
+                    data-collapsed={isCollapsed}
+                    style={!isCollapsed ? { height: blockHeight } : undefined}
+                  >
+                    <Spreadsheet
+                      key={`${sessionId}:${tbl.id}:${tblPage}:${tableState(cacheScope, tbl.id).generation}`}
+                      table={tbl}
+                      dialect={engine === "mssql" ? "mssql" : "postgres"}
+                      viewKey={`${cacheScope}:${tbl.id}:${tblPage}`}
+                      rows={tblRows}
+                      disabled={
+                        pending ||
+                        !tblCached ||
+                        !!readOnlyReason ||
+                        schemaStale ||
+                        !!tbl.readOnly
+                      }
+                      structureDisabled={
+                        pending ||
+                        !tblCached ||
+                        !!readOnlyReason ||
+                        schemaStale ||
+                        !!tbl.readOnly
+                      }
+                      onDirty={reportDirty}
+                      onSave={async (rows) => {
+                        const changes = gridChanges(rows);
+                        if (!changes.length) return tblRows;
+                        await client.save(sessionId, tbl.id, changes);
+                        invalidateTable(cacheScope, tbl.id);
+                        const next = await loadTablePage(
+                          cacheScope,
+                          tbl.id,
+                          tblPage,
+                          JSON.stringify(tbl),
+                          () => client.page(sessionId, tbl.id, tblPage),
+                        );
+                        setPageRevision((r) => r + 1);
+                        return next.rows;
+                      }}
+                      readOnlyReason={readOnlyReason}
+                      serverPage={{
+                        index: tblPage,
+                        hasNext: !!tblCached?.truncated,
+                        onChange: (next) => {
+                          tableState(cacheScope, tbl.id).page = next;
+                          setPageRevision((r) => r + 1);
+                        },
+                      }}
+                      stackHeader={{
+                        collapsed: isCollapsed,
+                        onToggleCollapse: () =>
+                          setCollapsedStackTables((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(tbl.id)) next.delete(tbl.id);
+                            else next.add(tbl.id);
+                            return next;
+                          }),
+                        onMaximize: () => {
+                          onSelectTable?.(tbl.id);
+                          onDataLayoutChange?.("tabs");
+                        },
+                        onClose:
+                          openTables.length > 1 && onCloseTable
+                            ? () => onCloseTable(tbl.id)
+                            : undefined,
+                      }}
+                    />
+                    {!isCollapsed && (
+                      <div
+                        className="stack-block-resizer"
+                        role="separator"
+                        aria-orientation="horizontal"
+                        aria-label={`Resize ${tbl.name} height`}
+                        title="Drag to adjust table height · Double-click to reset"
+                        onPointerDown={(event) => {
+                          event.preventDefault();
+                          event.currentTarget.setPointerCapture(
+                            event.pointerId,
+                          );
+                          stackResizeDrag.current = {
+                            tableId: tbl.id,
+                            startY: event.clientY,
+                            startHeight: blockHeight,
+                          };
+                        }}
+                        onPointerMove={(event) => {
+                          const activeDrag = stackResizeDrag.current;
+                          if (
+                            !activeDrag ||
+                            activeDrag.tableId !== tbl.id
+                          )
+                            return;
+                          const nextHeight = Math.max(
+                            84,
+                            Math.min(
+                              900,
+                              Math.round(
+                                activeDrag.startHeight +
+                                  (event.clientY - activeDrag.startY),
+                              ),
+                            ),
+                          );
+                          setStackTableHeights((prev) =>
+                            prev[tbl.id] === nextHeight
+                              ? prev
+                              : { ...prev, [tbl.id]: nextHeight },
+                          );
+                        }}
+                        onPointerUp={(event) => {
+                          if (
+                            event.currentTarget.hasPointerCapture(
+                              event.pointerId,
+                            )
+                          ) {
+                            event.currentTarget.releasePointerCapture(
+                              event.pointerId,
+                            );
+                          }
+                          stackResizeDrag.current = null;
+                        }}
+                        onPointerCancel={() => {
+                          stackResizeDrag.current = null;
+                        }}
+                        onDoubleClick={() => {
+                          setStackTableHeights((prev) => {
+                            if (!(tbl.id in prev)) return prev;
+                            const next = { ...prev };
+                            delete next[tbl.id];
+                            return next;
+                          });
+                        }}
+                      />
+                    )}
+                  </section>
+                );
+              })}
+            </div>
+          ) : gridTable ? (
             <Spreadsheet
-              key={`${sessionId}:${tableId}:${page}:${refresh}`}
-              table={activeTable}
-              rows={data?.rows ?? []}
-              disabled={pending || !data || !!readOnlyReason || schemaStale}
+              key={`${sessionId}:${gridTable.id}:${gridPage}:${visible?.refresh ?? refresh}`}
+              table={gridTable}
+              dialect={engine === "mssql" ? "mssql" : "postgres"}
+              viewKey={`${cacheScope}:${gridTable.id}:${gridPage}`}
+              rows={visible?.result.rows ?? EMPTY_ROWS}
+              disabled={
+                pending || !gridReady || !!readOnlyReason || schemaStale
+              }
               structureDisabled={
-                pending || !data || !!readOnlyReason || schemaStale
+                pending || !gridReady || !!readOnlyReason || schemaStale
               }
               onAddColumn={(anchor) => void openColumn(anchor)}
               onEditColumn={(columnId, anchor) =>
@@ -488,8 +918,8 @@ export function RemoteWorkspace({
               onDiscard={discardRows}
               readOnlyReason={readOnlyReason}
               serverPage={{
-                index: page,
-                hasNext: !!data?.truncated,
+                index: gridPage,
+                hasNext: !!visible?.result.truncated,
                 onChange: (next) => void changeDataPage(next),
               }}
             />

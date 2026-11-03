@@ -128,3 +128,181 @@ export function mssqlBatches(sql: string) {
     result.push({ sql: sql.slice(start), start });
   return result;
 }
+
+function isCteStart(
+  tokens: ReturnType<typeof tokenize>,
+  withIndex: number,
+): boolean {
+  const following = tokens
+    .slice(withIndex + 1)
+    .filter((item) => item.kind !== "comment");
+  if (following[0]?.text.toUpperCase() === "RECURSIVE") following.shift();
+  const name = following[0];
+  if (
+    !name ||
+    !["word", "identifier"].includes(name.kind) ||
+    (name.kind === "word" &&
+      /^(ORDINALITY|TIES|CHECK|NOCHECK|NOLOCK|ROWLOCK|UPDLOCK|HOLDLOCK|READPAST|NOWAIT|TABLOCK|TABLOCKX|PAGLOCK|XLOCK|FORCESEEK|FORCESCAN)$/i.test(
+        name.text,
+      ))
+  ) {
+    return false;
+  }
+  const afterName = following[1];
+  if (!afterName) return false;
+  if (afterName.text.toUpperCase() === "AS") {
+    return following[2]?.text === "(";
+  }
+  if (afterName.text === "(") {
+    const closeIdx = following.findIndex(
+      (t, idx) => idx > 1 && t.text === ")" && t.scope.length === name.scope.length,
+    );
+    return (
+      closeIdx > 1 &&
+      following[closeIdx + 1]?.text.toUpperCase() === "AS" &&
+      following[closeIdx + 2]?.text === "("
+    );
+  }
+  return false;
+}
+
+/**
+ * Splits a batch (including T-SQL batches with semicolon-less or semicolon-separated statements)
+ * into individual statement strings so each result set maps to its own query.
+ */
+export function batchStatements(
+  sql: string,
+  dialect: "default" | "mssql" = "default",
+): string[] {
+  const tokens = tokenize(sql, dialect);
+  const statements: string[] = [];
+  let start = 0;
+  let topTokens: typeof tokens = [];
+
+  const emit = (end: number) => {
+    const text = sql.slice(start, end).trim();
+    if (topTokens.length && text) statements.push(text);
+    topTokens = [];
+  };
+
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.kind === "comment") continue;
+    if (token.scope.length === 0 && token.kind === "symbol" && token.text === ";") {
+      emit(token.start);
+      start = token.end;
+      continue;
+    }
+
+    if (token.scope.length === 0 && token.kind === "word" && topTokens.length > 0) {
+      const upper = token.text.toUpperCase();
+      const firstUpper = topTokens[0]?.text.toUpperCase() ?? "";
+      const prevTop = topTokens.at(-1);
+      const prevUpper = prevTop?.kind === "word" ? prevTop.text.toUpperCase() : "";
+
+      if (upper === "SELECT") {
+        const isSetContinuation = /^(UNION|INTERSECT|EXCEPT|ALL|DISTINCT|INTO|AS|FOR|RETURN)$/i.test(
+          prevUpper,
+        );
+        const isFirstSelectOfCte =
+          firstUpper === "WITH" &&
+          !topTokens.some(
+            (t, idx) =>
+              idx > 0 &&
+              t.kind === "word" &&
+              /^(SELECT|INSERT|UPDATE|DELETE|MERGE)$/i.test(t.text),
+          );
+        const isInsertSelect =
+          firstUpper === "INSERT" &&
+          !topTokens.some(
+            (t) =>
+              t.kind === "word" &&
+              /^(SELECT|VALUES|EXEC|EXECUTE|DEFAULT)$/i.test(t.text),
+          );
+        if (!isSetContinuation && !isFirstSelectOfCte && !isInsertSelect) {
+          emit(token.start);
+          start = token.start;
+        }
+      } else if (upper === "WITH" && isCteStart(tokens, i)) {
+        emit(token.start);
+        start = token.start;
+      } else if (
+        (upper === "EXEC" || upper === "EXECUTE") &&
+        firstUpper !== "INSERT" &&
+        !/^(INSERT|INTO)$/i.test(prevUpper)
+      ) {
+        emit(token.start);
+        start = token.start;
+      } else if (
+        /^(DECLARE|USE|PRINT|TRUNCATE)$/i.test(upper) &&
+        prevTop &&
+        sql.slice(prevTop.end, token.start).includes("\n")
+      ) {
+        emit(token.start);
+        start = token.start;
+      }
+    }
+
+    if (token.scope.length === 0) {
+      topTokens.push(token);
+    }
+  }
+
+  emit(sql.length);
+  return statements;
+}
+
+export function isResultProducingStatement(
+  sql: string,
+  dialect: "default" | "mssql" = "default",
+): boolean {
+  const topWords = tokenize(sql, dialect).filter(
+    (t) => t.kind === "word" && t.scope.length === 0,
+  );
+  if (!topWords.length) return false;
+  const first = topWords[0].text.toUpperCase();
+  if (
+    /^(SELECT|WITH|EXEC|EXECUTE|CALL|VALUES|TABLE|SHOW|DESCRIBE|EXPLAIN|PRAGMA)$/i.test(
+      first,
+    )
+  ) {
+    return true;
+  }
+  if (/^(INSERT|UPDATE|DELETE|MERGE)$/i.test(first)) {
+    return topWords.some((w) => /^(OUTPUT|RETURNING)$/i.test(w.text));
+  }
+  return false;
+}
+
+export function resolveBatchResultSqls(
+  batchSql: string,
+  dialect: "default" | "mssql" = "default",
+  setCount: number,
+): string[] {
+  const trimmed = batchSql.trim();
+  if (setCount <= 0) return [];
+  const allStmts = batchStatements(batchSql, dialect);
+  if (allStmts.length <= 1) {
+    return Array.from({ length: setCount }, () => allStmts[0] ?? trimmed);
+  }
+  const queryStmts = allStmts.filter((s) =>
+    isResultProducingStatement(s, dialect),
+  );
+  if (queryStmts.length === setCount) {
+    return queryStmts;
+  }
+  if (allStmts.length === setCount) {
+    return allStmts;
+  }
+  if (queryStmts.length > 0) {
+    return Array.from(
+      { length: setCount },
+      (_, idx) => queryStmts[idx] ?? allStmts[idx] ?? trimmed,
+    );
+  }
+  return Array.from(
+    { length: setCount },
+    (_, idx) => allStmts[idx] ?? trimmed,
+  );
+}
+

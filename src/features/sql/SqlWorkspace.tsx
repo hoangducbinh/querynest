@@ -1,3 +1,6 @@
+import { QueryResults, type ResultEditing } from "./QueryResults";
+import { useSqlTabView } from "./view-state";
+import { useStore } from "../schema/store";
 import { DatabasePicker } from "../connections/DatabasePicker";
 import { ConnectionPicker } from "../connections/ConnectionPicker";
 import { createPortal } from "react-dom";
@@ -17,12 +20,14 @@ import {
   Square,
   Columns2,
   ArrowLeftRight,
+  FolderOpen,
+  Download,
 } from "lucide-react";
 import type { SqlDialect } from "./data-types";
 import type { SqlTab, SqlLayout, DatabaseSchema } from "../../types/schema";
-import { QueryTabs } from "./QueryTabs";
+import { QueryTabs, openSqlFilesIntoTabs } from "./QueryTabs";
+import { saveSqlFile } from "../../lib/platform/save-file";
 import { Button } from "../../components/ui/button";
-import { ResultGrid } from "../sample-data/ResultGrid";
 import { SqlEditor } from "./Editor";
 import type { SqlResult } from "./execution";
 import type { SqlDiagnostic } from "./diagnostics";
@@ -36,7 +41,7 @@ export interface TabContext {
   label: string;
   remote: boolean;
 }
-interface Props {
+interface Props extends ResultEditing {
   connectionHost?: HTMLElement | null;
   connectionOptions?: { id: string; name: string }[];
   newTabSourceId?: string;
@@ -137,29 +142,63 @@ function SqlPane({
   onDiscoverTabDatabases,
   onMoveTab,
   splitOpen,
+  getEditableResult,
+  onSaveResult,
+  onEditingResult,
 }: Props) {
-  const [selection, setSelection] = useState<{ tab: string; sql: string }>({
-    tab: "",
-    sql: "",
-  });
-  const [resultTabs, setResultTabs] = useState<Record<string, number>>({});
-  const resultIndex = Math.min(
-    resultTabs[activeId] ?? 0,
-    Math.max(0, (queryResults?.length ?? 0) - 1),
-  );
-  const result = queryResults?.[resultIndex];
-  const hasSelection = selection.tab === activeId && !!selection.sql.trim();
+  const workspaceId = useStore((state) => state.workspace.id);
+  const viewKey = `${workspaceId}:${activeId}`;
+  const [view, updateView] = useSqlTabView(viewKey);
+  const selection = view.selection;
+  const hasSelection = !!selection.trim();
   const [validationStatus, setValidationStatus] = useState("");
-  const [ratio, setRatio] = useState(0.7);
-  const [results, setResults] = useState(true);
+  const ratio = view.ratio;
+  const results = view.resultsVisible;
+  const setResults = (resultsVisible: boolean) =>
+    updateView({ resultsVisible });
+  const setRatio = (next: number | ((previous: number) => number)) =>
+    updateView({ ratio: typeof next === "function" ? next(ratio) : next });
   const split = useRef<HTMLDivElement>(null);
+  const sqlFileInput = useRef<HTMLInputElement>(null);
+  const openTargetTabId = useRef<string | undefined>(undefined);
+
+  function triggerOpenSqlFile(targetTabId?: string) {
+    openTargetTabId.current = targetTabId ?? activeId;
+    sqlFileInput.current?.click();
+  }
+
+  async function handleOpenSqlFiles(files: FileList | null) {
+    const res = await openSqlFilesIntoTabs(
+      tabs,
+      activeId,
+      openTargetTabId.current ?? activeId,
+      files,
+    );
+    if (res) onTabsChange(res.tabs, res.activeId);
+  }
+
+  function handleSaveSqlTab(tab?: SqlTab) {
+    const target = tab ?? tabs.find((t) => t.id === activeId) ?? tabs[0];
+    if (!target) return;
+    void saveSqlFile(target.name, target.sql);
+  }
+
   return (
     <section
       className="sql-workspace"
-      onFocusCapture={() =>
-        onSelection(selection.tab === activeId ? selection.sql : "")
-      }
+      onFocusCapture={() => onSelection(selection)}
     >
+      <input
+        ref={sqlFileInput}
+        type="file"
+        accept=".sql,.txt,application/sql,text/plain"
+        multiple
+        hidden
+        onChange={(e) => {
+          void handleOpenSqlFiles(e.target.files);
+          e.currentTarget.value = "";
+        }}
+      />
       <div className="compact-toolbar">
         <QueryTabs
           tabs={tabs}
@@ -171,8 +210,13 @@ function SqlPane({
             connectionOptions?.find((source) => source.id === newTabSourceId)
               ?.name
           }
+          onTabConnectionChange={onTabConnectionChange}
+          onTabDatabaseChange={onTabDatabaseChange}
+          onDiscoverTabDatabases={onDiscoverTabDatabases}
+          onOpenSqlFile={triggerOpenSqlFile}
+          onSaveSqlFile={handleSaveSqlTab}
         />
-        <div className="row">
+        <div className="row sql-toolbar-actions">
           {!connectionHost && (
             <SqlConnectionControls
               tabContext={tabContext}
@@ -194,32 +238,68 @@ function SqlPane({
           >
             {validationStatus}
           </span>
-          {splitOpen && (
+          <div
+            className="sql-toolbar-group"
+            role="group"
+            aria-label="SQL file actions"
+          >
             <Button
-              title="Move tab to other pane"
-              onClick={onMoveTab}
+              className="sql-icon-button"
+              title="Open SQL file (.sql)"
+              aria-label="Open SQL file"
+              disabled={busy}
+              onClick={() => triggerOpenSqlFile(activeId)}
+            >
+              <FolderOpen size={14} />
+            </Button>
+            <Button
+              className="sql-icon-button"
+              title="Save active SQL tab (.sql)"
+              aria-label="Save SQL file"
+              disabled={busy || !tabs.length}
+              onClick={() => handleSaveSqlTab()}
+            >
+              <Download size={14} />
+            </Button>
+          </div>
+          <span className="sql-toolbar-divider" aria-hidden="true" />
+          <div
+            className="sql-toolbar-group"
+            role="group"
+            aria-label="SQL view actions"
+          >
+            {splitOpen && (
+              <Button
+                className="sql-icon-button"
+                title="Move tab to other pane"
+                onClick={onMoveTab}
+                disabled={busy}
+              >
+                <ArrowLeftRight size={14} />
+              </Button>
+            )}
+            <Button
+              title={splitOpen ? "Close SQL split" : "Split SQL editor"}
+              aria-pressed={!!splitOpen}
+              className={
+                "sql-icon-button" + (splitOpen ? " is-active" : "")
+              }
+              onClick={onSplit}
               disabled={busy}
             >
-              <ArrowLeftRight size={14} />
+              <Columns2 size={14} />
             </Button>
-          )}
-          <Button
-            title={splitOpen ? "Close SQL split" : "Split SQL editor"}
-            aria-pressed={!!splitOpen}
-            className={splitOpen ? "is-active" : undefined}
-            onClick={onSplit}
-            disabled={busy}
-          >
-            <Columns2 size={14} />
-          </Button>
-          <Button
-            title={results ? "Hide results" : "Show results"}
-            aria-pressed={results}
-            className={results ? "is-active" : undefined}
-            onClick={() => setResults(!results)}
-          >
-            <PanelBottom size={14} />
-          </Button>
+            <Button
+              title={results ? "Hide results" : "Show results"}
+              disabled={busy}
+              aria-pressed={results}
+              className={"sql-icon-button" + (results ? " is-active" : "")}
+              onClick={() => setResults(!results)}
+            >
+              <PanelBottom size={14} />
+            </Button>
+          </div>
+          <span className="sql-toolbar-divider" aria-hidden="true" />
           {busy && onCancel && (
             <Button
               className="sql-stop-button"
@@ -247,9 +327,7 @@ function SqlPane({
             className="sql-run-button"
             aria-label={hasSelection ? "Run selected SQL" : "Run SQL"}
             disabled={disabled}
-            onClick={() =>
-              onRun(activeId, hasSelection ? selection.sql : value)
-            }
+            onClick={() => onRun(activeId, hasSelection ? selection : value)}
           >
             {busy ? (
               <LoaderCircle className="spin" size={14} />
@@ -268,7 +346,9 @@ function SqlPane({
         >
           <SqlEditor
             key={activeId}
+            viewKey={viewKey}
             autoFocus={autoFocus}
+            readOnly={!!tabs.find((t) => t.id === activeId)?.locked}
             schema={tabContext?.schema}
             dialect={tabContext?.dialect}
             validationEnabled={
@@ -280,7 +360,7 @@ function SqlPane({
             validationSource={validationSource}
             onValidation={setValidationStatus}
             onSelection={(sql) => {
-              setSelection({ tab: activeId, sql });
+              updateView({ selection: sql });
               onSelection(sql);
             }}
             value={value}
@@ -342,54 +422,19 @@ function SqlPane({
             >
               <span />
             </div>
-            <div className="sql-results-pane">
-              <div className="results-heading">
-                <div className="row" role="tablist" aria-label="Query results">
-                  {queryResults?.length ? (
-                    queryResults.map((item, index) => (
-                      <button
-                        role="tab"
-                        aria-selected={index === resultIndex}
-                        title={item.sql}
-                        key={index}
-                        onClick={() =>
-                          setResultTabs((current) => ({
-                            ...current,
-                            [activeId]: index,
-                          }))
-                        }
-                      >
-                        Result {index + 1}
-                        {item.error ? " · Error" : ""}
-                      </button>
-                    ))
-                  ) : (
-                    <span>Results</span>
-                  )}
-                </div>
-                <span>
-                  {result?.error
-                    ? "Query failed · remaining statements skipped"
-                    : result?.status || "No results"}
-                </span>
-              </div>
-              {result && (
-                <details className="result-query-details" key={result.sql}>
-                  <summary>SQL</summary>
-                  <pre className="result-query">{result.sql}</pre>
-                </details>
-              )}
-              {result?.error ? (
-                <pre className="sheet-error" role="alert">
-                  {result.status}
-                </pre>
-              ) : (
-                <ResultGrid
-                  rows={result?.rows ?? []}
-                  columns={result?.columns ?? []}
-                />
-              )}
-            </div>
+            <QueryResults
+              results={queryResults ?? []}
+              tabId={activeId}
+              viewKey={`sql:${viewKey}:${tabContext?.sourceId ?? "local"}`}
+              view={view}
+              updateView={updateView}
+              busy={busy}
+              schema={tabContext?.schema}
+              dialect={tabContext?.dialect}
+              getEditableResult={getEditableResult}
+              onSaveResult={onSaveResult}
+              onEditingResult={onEditingResult}
+            />
           </>
         )}
       </div>
@@ -474,6 +519,7 @@ export function SqlWorkspace(props: Props) {
                 : "1 1 0",
             }}
             onFocusCapture={() => {
+              if (props.busy) return;
               if (props.activeId !== tab.id)
                 props.onTabsChange(props.tabs, tab.id);
             }}
@@ -481,8 +527,8 @@ export function SqlWorkspace(props: Props) {
             <SqlPane
               {...props}
               tabs={paneTabs}
-              autoFocus={focusTabId === tab.id}
-              tabContext={props.getTabContext?.(tab.id)}
+              autoFocus={focusTabId === tab.id || props.activeId === tab.id}
+              tabContext={props.getTabContext?.(tab.id) ?? props.tabContext}
               validate={
                 props.validateTab
                   ? (sql) => props.validateTab!(tab.id, sql)

@@ -275,3 +275,19 @@ Previously committed writes are not undone by stopping. Local DuckDB SQL uses
 pending queries so the worker can receive cancellation and remain usable for a
 subsequent query. Grid saves/schema edits are separate operations and do not show
 the SQL Stop button.
+
+### build exe on Macbook
+PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$HOME/.cargo/bin:$PATH" \
+RUSTFLAGS="-C target-feature=+crt-static" \
+npm run desktop:build -- \
+  --runner "$HOME/.cargo/bin/cargo-xwin" \
+  --target x86_64-pc-windows-msvc \
+  --bundles nsis \
+  --config '{"build":{"windows":{"staticVCRuntime":false}}}'
+Data keeps loaded table pages, each table’s selected page, filter and horizontal/vertical scroll in memory for the current native session. Revisiting tables or returning from SQL reuses those pages without a network read. Refresh reloads the selected table; saving rows or changing its structure invalidates that table’s cached pages. Disconnect/reconnect releases the old session cache. Restarting the app clears the in-memory cache.
+
+SQL tabs also retain Monaco cursor/selections and horizontal/vertical editor scroll, selected result set and result-grid scroll, editor/results divider and results visibility in runtime memory. Switching to Data or moving between query tabs restores these views without rerunning SQL. Reloading the app clears this runtime view state.
+
+SQL output has three views: Results (one grid), All results (stacked independently scrollable/resizable grids), and Messages. SQL Server PRINT/informational tokens and affected-row counts are collected with completed batches; errors keep messages and grids returned before the failure. Server output is bounded to 1,000 messages per request, with an explicit truncation notice. All results initially expands two grids; additional grids are collapsed to avoid rendering every result at once.
+
+Edit rows is available for a single full-row SELECT from an unambiguous physical table with a primary key, on a writable remote connection. TOP and simple WHERE/ORDER BY clauses are supported; joins, CTEs, projections, aggregates and function predicates remain read-only. Saving uses the same native transaction and original-row concurrency checks as Data, invalidates that table’s page cache, and reloads only the verified read query. If a committed write cannot refresh its result, editing is blocked until the query is run again; writes are never automatically replayed. Finish editing before switching tools or SQL tabs.

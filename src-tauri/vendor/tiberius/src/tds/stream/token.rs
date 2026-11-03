@@ -151,6 +151,7 @@ where
     async fn get_done_value(&mut self) -> crate::Result<ReceivedToken> {
         let done = TokenDone::decode(self.conn).await?;
         if done.is_attention() { self.conn.cancellation.acknowledge(); }
+        if let Some(rows) = done.affected_rows() { self.conn.cancellation.record_message(format!("({rows} rows affected)")); }
         event!(Level::TRACE, "{}", done);
         Ok(ReceivedToken::Done(done))
     }
@@ -158,6 +159,7 @@ where
     async fn get_done_proc_value(&mut self) -> crate::Result<ReceivedToken> {
         let done = TokenDone::decode(self.conn).await?;
         if done.is_attention() { self.conn.cancellation.acknowledge(); }
+        if let Some(rows) = done.affected_rows() { self.conn.cancellation.record_message(format!("({rows} rows affected)")); }
         event!(Level::TRACE, "{}", done);
         Ok(ReceivedToken::DoneProc(done))
     }
@@ -165,6 +167,7 @@ where
     async fn get_done_in_proc_value(&mut self) -> crate::Result<ReceivedToken> {
         let done = TokenDone::decode(self.conn).await?;
         if done.is_attention() { self.conn.cancellation.acknowledge(); }
+        if let Some(rows) = done.affected_rows() { self.conn.cancellation.record_message(format!("({rows} rows affected)")); }
         event!(Level::TRACE, "{}", done);
         Ok(ReceivedToken::DoneInProc(done))
     }
@@ -194,6 +197,7 @@ where
 
     async fn get_info(&mut self) -> crate::Result<ReceivedToken> {
         let info = TokenInfo::decode(self.conn).await?;
+        self.conn.cancellation.record_message(info.message.clone());
         event!(Level::INFO, "{}", info.message);
         Ok(ReceivedToken::Info(info))
     }

@@ -92,3 +92,64 @@ it("skips later GO batches after a stop request", async () => {
   expect(result.at(-1)?.error).toBe(true);
   expect(result.at(-1)?.status).toContain("Query stopped");
 });
+
+it("retains server messages once for multiple results, and messages preceding an error", async () => {
+  const result = await executeSqlBatch(
+    "SELECT 1; SELECT 2",
+    async () => ({
+      columns: ["n"],
+      rows: [],
+      messages: ["Printed output", "(1 rows affected)"],
+      resultSets: [
+        { columns: ["n"], rows: [{ n: 1 }] },
+        { columns: ["n"], rows: [{ n: 2 }] },
+      ],
+    }),
+    "mssql",
+  );
+  expect(result).toHaveLength(2);
+  expect(result[0].sql).toBe("SELECT 1");
+  expect(result[1].sql).toBe("SELECT 2");
+  expect(result[0].messages).toEqual(["Printed output", "(1 rows affected)"]);
+  expect(result[1].messages).toBeUndefined();
+  const failed = await executeSqlBatch("SELECT bad", async () => {
+    throw { message: "Invalid column", messages: ["Before error"] };
+  });
+  expect(failed[0].status).toBe("Invalid column");
+  expect(failed[0].messages).toEqual(["Before error"]);
+});
+
+it("maps each SQL Server result set in a multi-query batch to its own statement SQL", async () => {
+  const results = await executeSqlBatch(
+    "DECLARE @id INT = 1;\nSELECT * FROM dbo.Customers WHERE id = @id\nSELECT * FROM dbo.Orders",
+    async () => ({
+      columns: ["id"],
+      rows: [],
+      resultSets: [
+        { columns: ["id"], rows: [{ id: 1 }] },
+        { columns: ["order_id"], rows: [{ order_id: 10 }] },
+      ],
+    }),
+    "mssql",
+  );
+  expect(results).toHaveLength(2);
+  expect(results[0].sql).toBe("SELECT * FROM dbo.Customers WHERE id = @id");
+  expect(results[1].sql).toBe("SELECT * FROM dbo.Orders");
+});
+
+it("keeps grids returned earlier in a SQL Server batch that later fails", async () => {
+  const results = await executeSqlBatch(
+    "SELECT 1; SELECT bad",
+    async () => {
+      throw {
+        message: "bad column",
+        messages: ["before error"],
+        resultSets: [{ columns: ["n"], rows: [{ n: 1 }] }],
+      };
+    },
+    "mssql",
+  );
+  expect(results).toHaveLength(2);
+  expect(results[0].rows).toEqual([{ n: 1 }]);
+  expect(results[1].error).toBe(true);
+});

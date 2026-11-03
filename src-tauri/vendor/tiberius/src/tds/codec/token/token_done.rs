@@ -50,6 +50,7 @@ impl TokenDone {
         })
     }
 
+    pub(crate) fn affected_rows(&self) -> Option<u64> { self.status.contains(DoneStatus::Count).then_some(self.done_rows) }
     pub(crate) fn is_attention(&self) -> bool { self.status.contains(DoneStatus::Attention) }
 
     pub(crate) fn is_final(&self) -> bool {

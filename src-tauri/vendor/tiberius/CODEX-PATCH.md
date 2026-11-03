@@ -24,3 +24,9 @@ Protocol references:
 Regression coverage in `mssql::tests::live_sqlserver_driver` cancels WAITFOR and
 streaming result sets repeatedly, verifies no remaining server request, and
 checks unchanged SPID, local temporary table, CONTEXT_INFO and open transaction.
+
+The connection handle also collects bounded informational INFO messages and DONE
+row counts via `take_messages()`. Collection is cleared before each app query;
+PRINT and messages preceding an error are serialized alongside results. The
+app retains already decoded grids on a later batch error. The live driver test
+covers PRINT, affected-row counts, error messages and partial grids.

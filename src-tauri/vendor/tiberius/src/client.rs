@@ -37,11 +37,22 @@ struct CancelState {
     // 0 idle, 1 armed, 2 requested, 3 sent, 4 acknowledged.
     phase: std::sync::atomic::AtomicU8,
     waker: futures_util::task::AtomicWaker,
+    messages: std::sync::Mutex<Vec<String>>,
 }
 impl std::fmt::Debug for CancelHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("CancelHandle") }
 }
 impl CancelHandle {
+    /// Drain informational messages observed on this physical connection.
+    pub fn take_messages(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.messages.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+    pub(crate) fn record_message(&self, text: String) {
+        let mut messages = self.0.messages.lock().unwrap_or_else(|e| e.into_inner());
+        if messages.len() < 1000 { messages.push(text.chars().take(8192).collect()); }
+        else if messages.len() == 1000 { messages.push("Further server messages omitted (1,000 message limit).".into()); }
+    }
+
     /// Begin one request scope before sending a query.
     pub fn arm(&self) { self.0.phase.store(1, std::sync::atomic::Ordering::Release); }
     /// Request cancellation of the currently armed query; idle requests are ignored.

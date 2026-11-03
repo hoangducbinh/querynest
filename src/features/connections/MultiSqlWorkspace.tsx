@@ -1,3 +1,6 @@
+import { editableResult } from "../sql/editable-result";
+import { saveGridChanges } from "../sample-data/mutations";
+import { saveQueryResult } from "./save-query-result";
 import { useSqlResults } from "../sql/result-state";
 import {
   listDatabases,
@@ -28,7 +31,6 @@ import { remoteClient } from "./client";
 import { engineName } from "./model";
 import {
   NeedsConnection,
-  useConnectionStatus,
   useSessionRevision,
   markConnectionUnavailable,
   requestConnection,
@@ -80,10 +82,6 @@ export function MultiSqlWorkspace({
   const sources = workspaceSources(w);
   const activeSource = tabSource(w, activeSqlTab(w));
   const activeSourceId = activeSource.id;
-  const connectionStatus = useConnectionStatus(
-    sourceSessionKey(w.id, activeSourceId),
-    activeSource.connection,
-  );
   useEffect(() => {
     if (activeSourceId !== w.activeSourceId)
       edit((draft) => syncActiveSqlSource(draft));
@@ -255,14 +253,6 @@ export function MultiSqlWorkspace({
   };
   return (
     <section className="multi-sql-workspace">
-      <div className="compact-toolbar pg-connection-bar" role="status">
-        <span className="toolbar-count">
-          {connectionStatus} ·{" "}
-          {activeSource.connection
-            ? activeSource.connection.config.database
-            : "Local DuckDB"}
-        </span>
-      </div>
       {error && (
         <div className="sheet-error" role="alert">
           {error}
@@ -290,6 +280,46 @@ export function MultiSqlWorkspace({
         disabled={busy}
         busy={busy}
         dark={dark}
+        onEditingResult={onBusy}
+        getEditableResult={(tabId, result) => {
+          const source = sourceFor(tabId);
+          if (source.connection?.config.readOnly) return undefined;
+          return editableResult(
+            result,
+            source.schema,
+            source.connection?.engine ?? "default",
+          );
+        }}
+        onSaveResult={async (tabId, result, drafts, index) => {
+          const source = sourceFor(tabId);
+          let rows: Record<string, unknown>[];
+          if (source.connection) {
+            rows = await saveQueryResult(w, source, result, drafts);
+          } else {
+            const table = editableResult(result, source.schema, "default");
+            if (!table)
+              throw Error(
+                "Only full rows from a single table with a primary key can be edited.",
+              );
+            await ensureLocal(source);
+            const data = await saveGridChanges(
+              { ...w, schema: source.schema, data: source.data ?? {} },
+              table,
+              drafts,
+            );
+            edit((draft) => updateSource(draft, source.id, { data }));
+            rows = (await queryCancelable(result.sql)).rows;
+          }
+          setResults((previous) => ({
+            ...previous,
+            [tabId]: previous[tabId].map((item, position) =>
+              position === index
+                ? { ...item, rows, status: `${rows.length} rows · updated` }
+                : item,
+            ),
+          }));
+          return rows;
+        }}
         allResults={Object.fromEntries(
           Object.entries(results).filter(([tabId]) => {
             const tab = sqlTabs(w).find((tab) => tab.id === tabId);

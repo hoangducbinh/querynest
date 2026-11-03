@@ -8,10 +8,9 @@ import {
   ensureSources,
   updateSource,
   workspaceSources,
-  sourceSessionKey,
 } from "./sources";
 import { listDatabases } from "./databases";
-import { NeedsConnection, useConnectionStatus } from "./sessions";
+import { NeedsConnection } from "./sessions";
 import { isTauri } from "../postgres/client";
 
 export function WorkspaceConnectionControls({
@@ -33,10 +32,6 @@ export function WorkspaceConnectionControls({
       (source) => source.id === (workspace.activeSourceId ?? "primary"),
     ) ?? sources[0];
   const root = connectionRoot(workspace, active);
-  const status = useConnectionStatus(
-    sourceSessionKey(workspace.id, active.id),
-    active.connection,
-  );
   const databases = active.connection
     ? [
         ...new Set([
@@ -67,13 +62,6 @@ export function WorkspaceConnectionControls({
       role="group"
       aria-label="Database"
     >
-      <span
-        className="toolbar-count"
-        role="status"
-        title="Connection shared by SQL and Data"
-      >
-        {status}
-      </span>
       <ConnectionPicker
         value={root.id}
         disabled={busy}

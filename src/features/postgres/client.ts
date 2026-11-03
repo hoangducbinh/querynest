@@ -11,6 +11,7 @@ export interface PgQueryResult {
   affectedRows: number;
   truncated: boolean;
   resultSets?: PgQueryResult[];
+  messages?: string[];
 }
 export const connectPostgres = (config: PostgresConfig, password: string) =>
   invoke<{ sessionId: string; serverVersion: string; catalog: PgCatalog }>(

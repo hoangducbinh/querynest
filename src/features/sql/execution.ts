@@ -1,11 +1,16 @@
 import { tokenize } from "./lexer";
-import { sqlStatements, mssqlBatches } from "./statements";
+import {
+  sqlStatements,
+  mssqlBatches,
+  resolveBatchResultSqls,
+} from "./statements";
 export interface SqlResult {
   sql: string;
   rows: Record<string, unknown>[];
   columns: string[];
   status: string;
   error?: boolean;
+  messages?: string[];
 }
 export async function executeSqlBatch(
   sql: string,
@@ -13,10 +18,12 @@ export async function executeSqlBatch(
     rows: Record<string, unknown>[];
     columns: string[];
     status?: string;
+    messages?: string[];
     resultSets?: {
       rows: Record<string, unknown>[];
       columns: string[];
       status?: string;
+      messages?: string[];
     }[];
   }>,
   dialect: "default" | "mssql" = "default",
@@ -28,11 +35,19 @@ export async function executeSqlBatch(
     const start = performance.now();
     try {
       const result = await query(statement.sql);
-      for (const set of result.resultSets?.length
-        ? result.resultSets
-        : [result])
+      const sets = result.resultSets?.length ? result.resultSets : [result];
+      const setSqls = resolveBatchResultSqls(
+        statement.sql,
+        dialect,
+        sets.length,
+      );
+      for (const [index, set] of sets.entries())
         results.push({
-          sql: statement.sql.trim(),
+          messages:
+            index === 0
+              ? (result.messages ?? sets.flatMap((item) => item.messages ?? []))
+              : undefined,
+          sql: setSqls[index] ?? statement.sql.trim(),
           rows: set.rows,
           columns: set.columns,
           status:
@@ -40,11 +55,61 @@ export async function executeSqlBatch(
             `${set.rows.length} rows · ${Math.round(performance.now() - start)} ms`,
         });
     } catch (error) {
+      let partialCount = 0;
+      if (
+        error &&
+        typeof error === "object" &&
+        "resultSets" in error &&
+        Array.isArray(error.resultSets)
+      ) {
+        const validPartials = error.resultSets.filter(
+          (
+            partial,
+          ): partial is {
+            columns: string[];
+            rows: Record<string, unknown>[];
+            truncated?: boolean;
+          } =>
+            !!partial &&
+            Array.isArray(partial.columns) &&
+            Array.isArray(partial.rows),
+        );
+        partialCount = validPartials.length;
+        const setSqls = resolveBatchResultSqls(
+          statement.sql,
+          dialect,
+          partialCount + 1,
+        );
+        for (const [partialIndex, partial] of validPartials.entries()) {
+          results.push({
+            sql: setSqls[partialIndex] ?? statement.sql.trim(),
+            columns: partial.columns,
+            rows: partial.rows,
+            status: `${partial.rows.length} rows · before error${partial.truncated ? " · truncated" : ""}`,
+          });
+        }
+      }
+      const errorSqls =
+        partialCount > 0
+          ? resolveBatchResultSqls(statement.sql, dialect, partialCount + 1)
+          : undefined;
       results.push({
-        sql: statement.sql.trim(),
+        sql: errorSqls?.[partialCount] ?? statement.sql.trim(),
         rows: [],
         columns: [],
-        status: String(error),
+        status:
+          error instanceof Error
+            ? error.message
+            : error && typeof error === "object" && "message" in error
+              ? String(error.message)
+              : String(error),
+        messages:
+          error &&
+          typeof error === "object" &&
+          "messages" in error &&
+          Array.isArray(error.messages)
+            ? error.messages.map(String)
+            : undefined,
         error: true,
       });
       break;

@@ -212,12 +212,23 @@ export function columnWindow(
   end = Math.min(widths.length, Math.max(start + 1, end + overscan));
   return { start, end };
 }
-export function useColumnWindow(widths: number[], gutter = 40) {
+export function useColumnWindow(
+  widths: number[],
+  gutter = 40,
+  initialPosition?: { top: number; left: number },
+) {
   const ref = useRef<HTMLDivElement>(null);
-  const [viewport, setViewport] = useState({ left: 0, width: 1000 });
+  const [viewport, setViewport] = useState({
+    left: initialPosition?.left ?? 0,
+    width: 1000,
+  });
   useLayoutEffect(() => {
     const element = ref.current;
     if (!element) return;
+    if (initialPosition) {
+      element.scrollTop = initialPosition.top;
+      element.scrollLeft = initialPosition.left;
+    }
     let frame = 0;
     const measure = () => {
       frame = 0;

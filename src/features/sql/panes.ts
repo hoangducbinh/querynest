@@ -16,11 +16,12 @@ export function updatePaneTabs(
   activeId: string,
 ) {
   const owned = new Set(groups[index].ids);
-  const updates = new Map(paneTabs.map((tab) => [tab.id, tab]));
+  const retainedPaneTabs = paneTabs.filter((tab) => owned.has(tab.id));
+  let cursor = 0;
   const tabs = allTabs.flatMap((tab) =>
     owned.has(tab.id)
-      ? updates.has(tab.id)
-        ? [updates.get(tab.id)!]
+      ? cursor < retainedPaneTabs.length
+        ? [retainedPaneTabs[cursor++]]
         : []
       : [tab],
   );

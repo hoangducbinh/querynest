@@ -101,6 +101,7 @@ const profile: React.ProfilerOnRenderCallback = (id, phase, duration) => {
   };
   requestAnimationFrame(write);
 };
+const mockResultRows = structuredClone(rows) as Record<string, unknown>[];
 let nativeMockInstalled = false;
 const mockWaiters = new Map<
   string,
@@ -121,6 +122,11 @@ function installConnectionMocks() {
         sql?: string;
         database?: string;
         tableId?: string;
+        changes?: {
+          original?: Record<string, unknown>;
+          cells: Record<string, string | null>;
+          deleted: boolean;
+        }[];
       };
       const counts = (metrics.mockCommands ??= {}) as Record<string, number>;
       counts[command] = (counts[command] ?? 0) + 1;
@@ -140,10 +146,33 @@ function installConnectionMocks() {
         metrics.lastGridSession = args.sessionId;
         return {
           columns: wide.columns.map((column) => column.name),
-          rows: args.tableId === wide.id ? rows : [],
+          rows: args.tableId === wide.id ? mockResultRows : [],
           affectedRows: 0,
           truncated: false,
         };
+      }
+      if (command === "ms_save_grid") {
+        for (const change of args.changes ?? []) {
+          const index = change.original
+            ? mockResultRows.findIndex(
+                (row) =>
+                  JSON.stringify(row) === JSON.stringify(change.original),
+              )
+            : -1;
+          if (change.deleted) {
+            if (index >= 0) mockResultRows.splice(index, 1);
+            continue;
+          }
+          if (index >= 0)
+            for (const [name, value] of Object.entries(change.cells)) {
+              mockResultRows[index][name] =
+                value !== null &&
+                typeof mockResultRows[index][name] === "number"
+                  ? Number(value)
+                  : value;
+            }
+        }
+        return args.changes?.length ?? 0;
       }
       if (command === "ms_query") {
         metrics.lastQuerySession = args.sessionId;
@@ -160,6 +189,14 @@ function installConnectionMocks() {
             }, 15000);
             mockWaiters.set(args.sessionId!, { reject, timer });
           });
+        if (/StressTest\.WideRows/i.test(args.sql ?? ""))
+          return {
+            columns: wide.columns.map((column) => column.name),
+            rows: mockResultRows,
+            messages: ["Fixture server output", "(100 rows affected)"],
+            affectedRows: 0,
+            truncated: false,
+          };
         return {
           columns: ["spid"],
           rows: [{ spid: 77 }],

@@ -41,6 +41,7 @@ import {
   Plus,
   Redo2,
   RefreshCw,
+  Rows3,
   Search,
   Settings2,
   Sun,
@@ -59,6 +60,7 @@ import { newTable } from "../features/schema/table-edit";
 import { ColumnEditor } from "../features/schema/ColumnEditor";
 import { planTableEdit } from "../features/schema/table-edit";
 import { activeSqlTab, sqlTabs, setSqlTabs } from "../features/sql/tabs";
+import { editableResult } from "../features/sql/editable-result";
 import { executeSqlBatch } from "../features/sql/execution";
 import { SqlWorkspace } from "../features/sql/SqlWorkspace";
 
@@ -189,6 +191,37 @@ export default function App() {
   const stale = !remote && runtime !== schemaSignature;
   const activeTable =
     w.schema.tables.find((t) => t.id === dataTable) || w.schema.tables[0];
+  const [openDataTableIds, setOpenDataTableIds] = useState<string[]>([]);
+  const [dataLayout, setDataLayout] = useState<"tabs" | "stack">("tabs");
+  const [collapsedDataTables, setCollapsedDataTables] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [stackTableHeights, setStackTableHeights] = useState<
+    Record<string, number>
+  >({});
+  const stackResizeDrag = useRef<{
+    tableId: string;
+    startY: number;
+    startHeight: number;
+  } | null>(null);
+  useEffect(() => {
+    setOpenDataTableIds([]);
+    setCollapsedDataTables(new Set());
+    setStackTableHeights({});
+  }, [w.id, w.activeSourceId]);
+  useEffect(() => {
+    if (!activeTable) return;
+    setOpenDataTableIds((prev) =>
+      prev.includes(activeTable.id) ? prev : [...prev, activeTable.id],
+    );
+  }, [activeTable?.id]);
+  const openDataTables = useMemo(() => {
+    const valid = openDataTableIds
+      .map((tid) => w.schema.tables.find((t) => t.id === tid))
+      .filter((t): t is TableDefinition => Boolean(t));
+    if (!valid.length && activeTable) return [activeTable];
+    return valid;
+  }, [openDataTableIds, w.schema.tables, activeTable]);
   const errors = useMemo(
     () => (remote ? [] : validateSchema(w.schema)),
     [remote, w.schema],
@@ -291,8 +324,15 @@ export default function App() {
           });
       }
     };
+    const blockNativeContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+    };
     window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
+    window.addEventListener("contextmenu", blockNativeContextMenu);
+    return () => {
+      window.removeEventListener("keydown", handler);
+      window.removeEventListener("contextmenu", blockNativeContextMenu);
+    };
   }, []);
   useEffect(() => {
     if (!dirty) return;
@@ -350,9 +390,21 @@ export default function App() {
     setMode(next);
   }
   async function chooseTable(tableId: string) {
+    setOpenDataTableIds((prev) =>
+      prev.includes(tableId) ? prev : [...prev, tableId],
+    );
     if (tableId === activeTable?.id) return;
     if (!(await leaveDraft())) return;
     setDataTable(tableId);
+  }
+  async function closeDataTable(tableId: string) {
+    if (openDataTables.length <= 1) return;
+    if (tableId === activeTable?.id && !(await leaveDraft())) return;
+    const remaining = openDataTables.filter((t) => t.id !== tableId);
+    setOpenDataTableIds(remaining.map((t) => t.id));
+    if (tableId === activeTable?.id && remaining.length > 0) {
+      setDataTable(remaining[remaining.length - 1].id);
+    }
   }
   async function apply() {
     if (busy) return;
@@ -421,12 +473,15 @@ export default function App() {
       else void run();
     }
   };
-  async function saveRows(rows: DraftRow[]) {
-    if (stale || busy || !activeTable)
+  async function saveRowsForTable(
+    targetTable: TableDefinition,
+    rows: DraftRow[],
+  ) {
+    if (stale || busy)
       throw Error("Wait for the database to be ready before saving.");
     setBusy(true);
     try {
-      const data = await saveGridChanges(w, activeTable, rows);
+      const data = await saveGridChanges(w, targetTable, rows);
       edit((d) => {
         d.data = data;
       });
@@ -438,10 +493,15 @@ export default function App() {
         );
         setError(true);
       }
-      return data[activeTable.id] ?? [];
+      return data[targetTable.id] ?? [];
     } finally {
       setBusy(false);
     }
+  }
+  async function saveRows(rows: DraftRow[]) {
+    if (!activeTable)
+      throw Error("Wait for the database to be ready before saving.");
+    return saveRowsForTable(activeTable, rows);
   }
   async function addTable() {
     if (!(await leaveDraft())) return;
@@ -1032,6 +1092,11 @@ export default function App() {
               mode={mode}
               dark={dark}
               activeTable={activeTable}
+              openTables={openDataTables}
+              dataLayout={dataLayout}
+              onDataLayoutChange={setDataLayout}
+              onSelectTable={(id) => void chooseTable(id)}
+              onCloseTable={(id) => void closeDataTable(id)}
               runRef={remoteRun}
               onBusy={setBusy}
               onDirty={setDirty}
@@ -1050,26 +1115,88 @@ export default function App() {
               {mode === "data" ? (
                 activeTable ? (
                   <section className="data-view">
-                    <div className="compact-toolbar">
-                      <div className="row">
-                        <Table2 size={14} />
-                        <select
-                          className="table-selector"
-                          aria-label="Selected table"
-                          value={activeTable.id}
-                          onChange={(e) => void chooseTable(e.target.value)}
-                        >
-                          {w.schema.tables.map((table) => (
-                            <option key={table.id} value={table.id}>
-                              {table.name}
-                            </option>
-                          ))}
-                        </select>
-                        <span className="toolbar-count">
-                          {(w.data[activeTable.id] ?? []).length} rows
-                        </span>
+                    <div className="compact-toolbar data-tables-toolbar">
+                      <div
+                        className="data-table-tabs"
+                        role="tablist"
+                        aria-label="Open tables"
+                      >
+                        {openDataTables.map((table) => {
+                          const isCurrent =
+                            dataLayout === "tabs" &&
+                            table.id === activeTable.id;
+                          return (
+                            <div
+                              key={table.id}
+                              className={`data-table-tab${isCurrent ? " is-active" : ""}`}
+                            >
+                              <button
+                                type="button"
+                                role="tab"
+                                aria-selected={isCurrent}
+                                className="data-table-tab-btn"
+                                onClick={() => {
+                                  void chooseTable(table.id);
+                                  if (dataLayout === "stack") {
+                                    setCollapsedDataTables((prev) => {
+                                      if (!prev.has(table.id)) return prev;
+                                      const next = new Set(prev);
+                                      next.delete(table.id);
+                                      return next;
+                                    });
+                                  }
+                                }}
+                              >
+                                <Table2 size={12} />
+                                <span className="data-table-tab-name">
+                                  {table.namespace
+                                    ? `${table.namespace}.${table.name}`
+                                    : table.name}
+                                </span>
+                                <span className="data-table-tab-count">
+                                  {(w.data[table.id] ?? []).length}
+                                </span>
+                              </button>
+                              {openDataTables.length > 1 && (
+                                <button
+                                  type="button"
+                                  className="data-table-tab-close"
+                                  title={`Close ${table.name}`}
+                                  aria-label={`Close ${table.name}`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void closeDataTable(table.id);
+                                  }}
+                                >
+                                  <X size={11} />
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                       <div className="row">
+                        {openDataTables.length > 1 && (
+                          <Button
+                            className={
+                              dataLayout === "stack" ? "is-active" : undefined
+                            }
+                            aria-pressed={dataLayout === "stack"}
+                            title={
+                              dataLayout === "stack"
+                                ? "Switch to single table tab view"
+                                : "Stack open tables vertically"
+                            }
+                            onClick={() =>
+                              setDataLayout((cur) =>
+                                cur === "stack" ? "tabs" : "stack",
+                              )
+                            }
+                          >
+                            <Rows3 size={12} />
+                            <span>Stack</span>
+                          </Button>
+                        )}
                         <Button
                           disabled={busy || stale || dirty}
                           onClick={() => void generateData()}
@@ -1085,21 +1212,153 @@ export default function App() {
                         </Button>
                       </div>
                     </div>
-                    <Spreadsheet
-                      key={w.id + activeTable.id + schemaSignature}
-                      table={activeTable}
-                      rows={w.data[activeTable.id] ?? EMPTY_ROWS}
-                      disabled={busy || stale}
-                      onDirty={setDirty}
-                      onSave={saveRows}
-                      onAddColumn={(anchor) =>
-                        void openColumn(activeTable.id, undefined, anchor)
-                      }
-                      onEditColumn={(columnId, anchor) =>
-                        void openColumn(activeTable.id, columnId, anchor)
-                      }
-                      structureDisabled={busy}
-                    />
+                    {dataLayout === "stack" && openDataTables.length > 1 ? (
+                      <div className="sql-all-results data-stack-container">
+                        {openDataTables.map((table) => {
+                          const tableRows = w.data[table.id] ?? EMPTY_ROWS;
+                          const isCollapsed = collapsedDataTables.has(table.id);
+                          const visibleRowCount = Math.min(
+                            Math.max(tableRows.length, 1),
+                            6,
+                          );
+                          const defaultHeight =
+                            24 + 26 + visibleRowCount * 25 + 8;
+                          const blockHeight =
+                            stackTableHeights[table.id] ?? defaultHeight;
+                          return (
+                            <section
+                              key={table.id}
+                              className="sql-result-block data-stack-block"
+                              data-collapsed={isCollapsed}
+                              style={
+                                !isCollapsed
+                                  ? { height: blockHeight }
+                                  : undefined
+                              }
+                            >
+                              <Spreadsheet
+                                key={w.id + table.id + schemaSignature}
+                                table={table}
+                                viewKey={`local:${w.id}:${w.activeSourceId ?? "primary"}:${table.id}`}
+                                rows={tableRows}
+                                disabled={busy || stale}
+                                onDirty={setDirty}
+                                onSave={(rows) => saveRowsForTable(table, rows)}
+                                onAddColumn={(anchor) =>
+                                  void openColumn(table.id, undefined, anchor)
+                                }
+                                onEditColumn={(columnId, anchor) =>
+                                  void openColumn(table.id, columnId, anchor)
+                                }
+                                structureDisabled={busy}
+                                stackHeader={{
+                                  collapsed: isCollapsed,
+                                  onToggleCollapse: () =>
+                                    setCollapsedDataTables((prev) => {
+                                      const next = new Set(prev);
+                                      if (next.has(table.id))
+                                        next.delete(table.id);
+                                      else next.add(table.id);
+                                      return next;
+                                    }),
+                                  onMaximize: () => {
+                                    void chooseTable(table.id);
+                                    setDataLayout("tabs");
+                                  },
+                                  onClose:
+                                    openDataTables.length > 1
+                                      ? () => void closeDataTable(table.id)
+                                      : undefined,
+                                }}
+                              />
+                              {!isCollapsed && (
+                                <div
+                                  className="stack-block-resizer"
+                                  role="separator"
+                                  aria-orientation="horizontal"
+                                  aria-label={`Resize ${table.name} height`}
+                                  title="Drag to adjust table height · Double-click to reset"
+                                  onPointerDown={(event) => {
+                                    event.preventDefault();
+                                    event.currentTarget.setPointerCapture(
+                                      event.pointerId,
+                                    );
+                                    stackResizeDrag.current = {
+                                      tableId: table.id,
+                                      startY: event.clientY,
+                                      startHeight: blockHeight,
+                                    };
+                                  }}
+                                  onPointerMove={(event) => {
+                                    const activeDrag = stackResizeDrag.current;
+                                    if (
+                                      !activeDrag ||
+                                      activeDrag.tableId !== table.id
+                                    )
+                                      return;
+                                    const nextHeight = Math.max(
+                                      84,
+                                      Math.min(
+                                        900,
+                                        Math.round(
+                                          activeDrag.startHeight +
+                                            (event.clientY - activeDrag.startY),
+                                        ),
+                                      ),
+                                    );
+                                    setStackTableHeights((prev) =>
+                                      prev[table.id] === nextHeight
+                                        ? prev
+                                        : { ...prev, [table.id]: nextHeight },
+                                    );
+                                  }}
+                                  onPointerUp={(event) => {
+                                    if (
+                                      event.currentTarget.hasPointerCapture(
+                                        event.pointerId,
+                                      )
+                                    ) {
+                                      event.currentTarget.releasePointerCapture(
+                                        event.pointerId,
+                                      );
+                                    }
+                                    stackResizeDrag.current = null;
+                                  }}
+                                  onPointerCancel={() => {
+                                    stackResizeDrag.current = null;
+                                  }}
+                                  onDoubleClick={() => {
+                                    setStackTableHeights((prev) => {
+                                      if (!(table.id in prev)) return prev;
+                                      const next = { ...prev };
+                                      delete next[table.id];
+                                      return next;
+                                    });
+                                  }}
+                                />
+                              )}
+                            </section>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <Spreadsheet
+                        key={w.id + activeTable.id + schemaSignature}
+                        table={activeTable}
+                        viewKey={`local:${w.id}:${w.activeSourceId ?? "primary"}:${activeTable.id}`}
+                        rows={w.data[activeTable.id] ?? EMPTY_ROWS}
+                        disabled={busy || stale}
+                        onDirty={setDirty}
+                        onSave={saveRows}
+                        onAddColumn={(anchor) =>
+                          void openColumn(activeTable.id, undefined, anchor)
+                        }
+                        onEditColumn={(columnId, anchor) =>
+                          void openColumn(activeTable.id, columnId, anchor)
+                        }
+                        structureDisabled={busy}
+                      />
+                    )}
                   </section>
                 ) : (
                   <div className="empty-state">
@@ -1166,6 +1425,38 @@ export default function App() {
                   disabled={busy || stale}
                   busy={busy}
                   dark={dark}
+                  tabContext={{
+                    sourceId: "local",
+                    schema: w.schema,
+                    dialect: "default",
+                    label: "DuckDB",
+                    remote: false,
+                  }}
+                  onEditingResult={setDirty}
+                  getEditableResult={(_tabId, result) =>
+                    stale ? undefined : editableResult(result, w.schema, "default")
+                  }
+                  onSaveResult={async (tabId, result, drafts, index) => {
+                    const table = editableResult(result, w.schema, "default");
+                    if (!table)
+                      throw Error(
+                        "Only full rows from a single table with a primary key can be edited.",
+                      );
+                    const data = await saveGridChanges(w, table, drafts);
+                    edit((d) => {
+                      d.data = data;
+                    });
+                    const rows = (await query(result.sql)).rows;
+                    setQueryResults((previous) => ({
+                      ...previous,
+                      [tabId]: (previous[tabId] ?? []).map((item, position) =>
+                        position === index
+                          ? { ...item, rows, status: `${rows.length} rows · updated` }
+                          : item,
+                      ),
+                    }));
+                    return rows;
+                  }}
                   allResults={queryResults}
                   queryResults={queryResults[activeSqlTab(w).id]}
                   onSelection={(sql, tabId) => {

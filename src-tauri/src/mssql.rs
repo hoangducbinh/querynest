@@ -60,6 +60,8 @@ pub struct Failure {
     line: Option<u32>,
     closed: bool,
     uncertain: bool,
+    messages: Vec<String>,
+    result_sets: Vec<ResultSet>,
 }
 impl Failure {
     fn message(message: impl Into<String>) -> Self {
@@ -69,6 +71,8 @@ impl Failure {
             line: None,
             closed: false,
             uncertain: false,
+            messages: vec![],
+            result_sets: vec![],
         }
     }
     fn closed(message: &str) -> Self {
@@ -87,6 +91,8 @@ impl From<tiberius::error::Error> for Failure {
                 line: Some(e.line()),
                 closed: false,
                 uncertain: false,
+                messages: vec![],
+                result_sets: vec![],
             },
             e => Self {
                 closed: matches!(
@@ -113,6 +119,7 @@ struct ResultSet {
     rows: Vec<Value>,
     affected_rows: u64,
     truncated: bool,
+    messages: Vec<String>,
 }
 fn quote(name: &str) -> String {
     format!("[{}]", name.replace(']', "]]"))
@@ -248,43 +255,62 @@ async fn collect(
     sql: &str,
     limit: usize,
 ) -> Result<Vec<ResultSet>, Failure> {
-    let mut stream = client.simple_query(sql).await?;
+    let observer = client.cancellation_handle();
+    observer.take_messages();
     let mut sets: Vec<ResultSet> = vec![];
-    let mut total = 0;
-    while let Some(item) = stream.try_next().await? {
-        match item {
-            QueryItem::Metadata(metadata) => {
-                if sets.len() >= 50 {
-                    return Err(Failure::closed(
-                        "Too many result sets (maximum 50). Reconnect and narrow the batch.",
-                    ));
+    let result: Result<(), Failure> = async {
+        let mut stream = client.simple_query(sql).await?;
+        let mut total = 0;
+        while let Some(item) = stream.try_next().await? {
+            match item {
+                QueryItem::Metadata(metadata) => {
+                    if sets.len() >= 50 {
+                        return Err(Failure::closed(
+                            "Too many result sets (maximum 50). Reconnect and narrow the batch.",
+                        ));
+                    }
+                    sets.push(ResultSet {
+                        columns: unique_names(
+                            metadata.columns().iter().map(|c| c.name().to_owned()),
+                        ),
+                        ..Default::default()
+                    });
                 }
-                sets.push(ResultSet {
-                    columns: unique_names(metadata.columns().iter().map(|c| c.name().to_owned())),
-                    ..Default::default()
-                });
-            }
-            QueryItem::Row(row) => {
-                let set = sets
-                    .last_mut()
-                    .ok_or_else(|| Failure::message("Missing SQL Server result metadata."))?;
-                if set.rows.len() >= limit || total >= 10000 {
-                    set.truncated = true;
-                    continue;
+                QueryItem::Row(row) => {
+                    let set = sets
+                        .last_mut()
+                        .ok_or_else(|| Failure::message("Missing SQL Server result metadata."))?;
+                    if set.rows.len() >= limit || total >= 10000 {
+                        set.truncated = true;
+                        continue;
+                    }
+                    let mut record = Map::new();
+                    for (name, value) in set.columns.iter().zip(row) {
+                        record.insert(name.clone(), cell(value)?);
+                    }
+                    set.rows.push(Value::Object(record));
+                    total += 1;
                 }
-                let mut record = Map::new();
-                for (name, value) in set.columns.iter().zip(row) {
-                    record.insert(name.clone(), cell(value)?);
-                }
-                set.rows.push(Value::Object(record));
-                total += 1;
             }
         }
+        Ok(())
     }
-    if sets.is_empty() {
-        sets.push(ResultSet::default());
+    .await;
+    let messages = observer.take_messages();
+    match result {
+        Ok(()) => {
+            if sets.is_empty() {
+                sets.push(ResultSet::default());
+            }
+            sets[0].messages = messages;
+            Ok(sets)
+        }
+        Err(mut error) => {
+            error.messages = messages;
+            error.result_sets = sets;
+            Err(error)
+        }
     }
-    Ok(sets)
 }
 // SQL Server has no per-transaction READ ONLY mode. This is a conservative query
 // guard, not a permission boundary. Restricted SQL logins enforce access at the server.
@@ -1083,6 +1109,37 @@ mod tests {
             cancel: Notify::new(),
             validation: Mutex::new(()),
         });
+        let printed = run(
+            &session,
+            "SET NOCOUNT OFF; PRINT N'Query output QA'; SELECT 1 AS a; SELECT 2 AS b;",
+            1000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(printed.len(), 2);
+        assert!(printed[0].messages.iter().any(|m| m == "Query output QA"));
+        assert!(
+            printed[0]
+                .messages
+                .iter()
+                .any(|m| m.contains("rows affected"))
+        );
+        let failure = run(
+            &session,
+            "SELECT 99 AS before_error; PRINT N'Before error QA'; RAISERROR('Expected QA error',16,1);",
+            1000,
+        )
+        .await
+        .unwrap_err();
+        assert!(failure.messages.iter().any(|m| m == "Before error QA"));
+        assert_eq!(failure.result_sets[0].rows[0]["before_error"], json!(99));
+        let clean = run(&session, "SELECT 3 AS c", 1000).await.unwrap();
+        assert!(
+            !clean[0]
+                .messages
+                .iter()
+                .any(|m| m.contains("Before error QA"))
+        );
         let result=run(&session,"SELECT CONVERT(bigint,9007199254740993) AS id, CONVERT(decimal(20,4),12.3400) AS amount, CONVERT(nvarchar(40),N'Xin chào') AS name, NULL AS missing; SELECT 2 AS n;",1000).await.unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].rows[0]["id"], json!("9007199254740993"));
