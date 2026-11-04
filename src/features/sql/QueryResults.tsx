@@ -9,7 +9,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { Button } from "../../components/ui/button";
-import { ResultGrid } from "../sample-data/ResultGrid";
+import { EmptyResults } from "../sample-data/EmptyResults";
 import type { DraftRow } from "../sample-data/model";
 import type { DatabaseSchema, TableDefinition } from "../../types/schema";
 import type { SqlDialect } from "./data-types";
@@ -479,14 +479,14 @@ export function QueryResults({
               </section>
             );
           })}
-          {!results.length && <ResultGrid rows={[]} columns={[]} />}
+          {!results.length && <EmptyResults />}
         </div>
       ) : (
         <div className="sql-single-result" key={`${viewKey}:${selected}`}>
           {results[selected] ? (
             renderResultContent(results[selected], selected)
           ) : (
-            <ResultGrid rows={[]} columns={[]} />
+            <EmptyResults />
           )}
         </div>
       )}

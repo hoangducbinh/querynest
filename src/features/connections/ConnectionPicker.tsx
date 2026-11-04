@@ -85,9 +85,7 @@ export function ConnectionPicker({
   const matches = (text: string) =>
     text.toLowerCase().includes(search.toLowerCase());
   const visible = sources.filter((s) =>
-    matches(
-      `${s.connection ? s.name : "Local DuckDB"} ${s.connection?.config.host ?? ""}`,
-    ),
+    matches(`${s.name} ${s.connection?.config.host ?? ""}`),
   );
   const unattached = profiles.filter(
     (p) => !sources.some((s) => s.connectionId === p.id),
@@ -103,11 +101,11 @@ export function ConnectionPicker({
           title={
             active.connection
               ? `${active.name} · ${active.connection.config.host} · ${connected(active) ? "Connected" : "Disconnected"}`
-              : "Local DuckDB"
+              : active.name || "No connection"
           }
         >
           <Database size={13} />
-          <span>{active.connection ? active.name : "Local DuckDB"}</span>
+          <span>{active.name || "No connection"}</span>
           <ChevronDown size={11} />
         </Button>
       </Menu.Trigger>
@@ -136,7 +134,7 @@ export function ConnectionPicker({
           )}
           <div className="connection-menu-list">
             {visible.map((source) => {
-              const name = source.connection ? source.name : "Local DuckDB";
+              const name = source.name;
               const target =
                 current?.parentSourceId === source.id ? current : source;
               const ready = connected(source);
@@ -147,7 +145,7 @@ export function ConnectionPicker({
                     title={
                       source.connection
                         ? `${source.connection.config.host} · ${ready ? "Connected" : "Disconnected"}`
-                        : "Local DuckDB"
+                        : source.name
                     }
                     onSelect={(event) => {
                       if (source.id === active.id) return;

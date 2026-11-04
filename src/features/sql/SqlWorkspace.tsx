@@ -28,7 +28,7 @@ import type { SqlTab, SqlLayout, DatabaseSchema } from "../../types/schema";
 import { QueryTabs, openSqlFilesIntoTabs } from "./QueryTabs";
 import { saveSqlFile } from "../../lib/platform/save-file";
 import { Button } from "../../components/ui/button";
-import { SqlEditor } from "./Editor";
+import { SqlEditor } from "./LazySqlEditor";
 import type { SqlResult } from "./execution";
 import type { SqlDiagnostic } from "./diagnostics";
 export interface TabContext {

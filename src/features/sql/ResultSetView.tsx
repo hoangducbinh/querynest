@@ -32,7 +32,22 @@ import {
 } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { confirmAction } from "../../lib/dialogs";
-import { duckCellHint } from "../../lib/duckdb/values";
+export function columnTypeHint(type: string): string {
+  const upper = type.toUpperCase();
+  if (upper.includes("JSON")) return "JSON data";
+  if (upper.includes("[]") || upper.includes("ARRAY")) return "Array data";
+  if (
+    upper.includes("BYTEA") ||
+    upper.includes("BINARY") ||
+    upper.includes("BLOB") ||
+    upper.includes("IMAGE")
+  )
+    return "Binary data";
+  if (upper.includes("XML")) return "XML data";
+  if (upper.includes("GEOMETRY") || upper.includes("GEOGRAPHY"))
+    return "Spatial data";
+  return type;
+}
 import type {
   ColumnDefinition,
   DatabaseSchema,
@@ -544,7 +559,7 @@ export function ResultSetView({
             index: viewport.start + offset,
             column,
             hint: column
-              ? duckCellHint(column.nativeType ?? column.type)
+              ? columnTypeHint(column.nativeType ?? column.type)
               : undefined,
           };
         }),

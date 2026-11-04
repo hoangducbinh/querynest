@@ -196,8 +196,8 @@ export function QueryTabs({
   function getTabContextInfo(tab: SqlTab) {
     const source = tabSource(workspace, tab);
     const root = connectionRoot(workspace, source);
-    const connName = root.connection ? root.name : "Local";
-    const connFullName = root.connection ? root.name : "Local DuckDB";
+    const connName = root.name || "Database";
+    const connFullName = root.name || "Database";
     const dbName = source.connection?.config.database ?? "main";
     const databases = source.connection
       ? [
@@ -800,7 +800,7 @@ export function QueryTabs({
           {contextMenu.section === "connection" && (
             <div className="sql-tab-ctx-sublist" role="group">
               {rootSources.map((src) => {
-                const label = src.connection ? src.name : "Local DuckDB";
+                const label = src.name || "Database";
                 const isSelected = src.id === contextInfo.root.id;
                 const ready = isRootConnected(src);
                 return (
@@ -852,7 +852,7 @@ export function QueryTabs({
             title={
               contextInfo.isRemote
                 ? "Switch database for this SQL tab"
-                : "Local DuckDB uses the default main database"
+                : "Select database"
             }
             onClick={() => {
               if (!contextInfo.isRemote) return;

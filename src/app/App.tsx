@@ -1,4 +1,3 @@
-import { useSqlResults } from "../features/sql/result-state";
 import { WorkspaceConnectionControls } from "../features/connections/WorkspaceConnectionControls";
 import { SnippetSettings } from "../features/sql/SnippetSettings";
 import { useLoadSnippetPreferences } from "../features/sql/snippet-preferences";
@@ -20,8 +19,10 @@ import {
 } from "../features/connections/sources";
 import { restoreSqlLayout, updatePaneTabs } from "../features/sql/panes";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { sampleDuckValue } from "../lib/duckdb/values";
-import { invalidateSession } from "../features/connections/sessions";
+import {
+  invalidateSession,
+  requestConnection,
+} from "../features/connections/sessions";
 import { readDarkAppearance, saveDarkAppearance } from "./appearance";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
@@ -40,10 +41,7 @@ import {
   PanelLeftClose,
   Plus,
   Redo2,
-  RefreshCw,
-  Rows3,
   Search,
-  Settings2,
   Sun,
   Table2,
   Terminal,
@@ -60,21 +58,7 @@ import { newTable } from "../features/schema/table-edit";
 import { ColumnEditor } from "../features/schema/ColumnEditor";
 import { planTableEdit } from "../features/schema/table-edit";
 import { activeSqlTab, sqlTabs, setSqlTabs } from "../features/sql/tabs";
-import { editableResult } from "../features/sql/editable-result";
-import { executeSqlBatch } from "../features/sql/execution";
-import { SqlWorkspace } from "../features/sql/SqlWorkspace";
-
-import { Spreadsheet } from "../features/sample-data/Spreadsheet";
-import { saveGridChanges } from "../features/sample-data/mutations";
-import type { DraftRow } from "../features/sample-data/model";
-import { generateDDL, orderedTables, quote } from "../lib/ddl/generate";
-import {
-  query,
-  queryCancelable,
-  cancelLocalQuery,
-  rebuild,
-  snapshot,
-} from "../lib/duckdb/engine";
+import { generateDDL } from "../lib/ddl/generate";
 import { RemoteWorkspace } from "../features/connections/RemoteWorkspace";
 import type { ConnectionProfile } from "../features/connections/model";
 import { saveJsonFile } from "../lib/platform/save-file";
@@ -84,24 +68,12 @@ import {
   workspaceSnapshot,
   storage,
 } from "../lib/storage/workspaces";
-import type { TableDefinition, WorkspaceDefinition } from "../types/schema";
+import type { TableDefinition } from "../types/schema";
 type Mode = "data" | "sql";
 const modes = [
   { id: "data", label: "Data", icon: Table2 },
   { id: "sql", label: "SQL", icon: Code2 },
 ] as const;
-const EMPTY_ROWS: Record<string, unknown>[] = [];
-function signature(w: WorkspaceDefinition) {
-  return JSON.stringify({
-    ...w.schema,
-    tables: w.schema.tables.map((t) => ({
-      id: t.id,
-      name: t.name,
-      columns: t.columns,
-      primaryKey: t.primaryKey,
-    })),
-  });
-}
 export default function App() {
   useLoadSnippetPreferences();
   const [abbreviations, setAbbreviations] = useState(false);
@@ -123,12 +95,12 @@ export default function App() {
     tableList.current?.scrollTo({ top: 0 });
   }, [tablePage, search, w.id, w.activeSourceId]);
   const filteredTables = useMemo(
-    () =>
-      w.schema.tables.filter((table) =>
-        `${table.namespace ?? ""}.${table.name}`
-          .toLowerCase()
-          .includes(search.toLowerCase()),
-      ),
+    () => {
+      const needle = search.toLowerCase();
+      return w.schema.tables.filter((table) =>
+        `${table.namespace ?? ""}.${table.name}`.toLowerCase().includes(needle),
+      );
+    },
     [w.schema.tables, search],
   );
   const tablePageCount = Math.max(1, Math.ceil(filteredTables.length / 50));
@@ -163,20 +135,12 @@ export default function App() {
     saveDarkAppearance(dark);
   }, [dark]);
   const [busy, setBusy] = useState(false);
-  const [localQueryRunning, setLocalQueryRunning] = useState(false);
-  const [localCancelPending, setLocalCancelPending] = useState(false);
-  const localCancelled = useRef(false);
-  const localRunActive = useRef(false);
-  const localExecutionId = useRef(0);
-  const [runtime, setRuntime] = useState("");
   const [ready, setReady] = useState(false);
   const [saved, setSaved] = useState("Opening workspace…");
   const [message, setMessage] = useState("");
   const [error, setError] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const [queryResults, setQueryResults] = useSqlResults(w.id);
   const remoteRun = useRef<() => void>(() => {});
-  const sqlSelection = useRef({ tabId: "", sql: "" });
 
   const remote = !!(w.postgres || w.mssql);
   const [ddl, setDdl] = useState(false);
@@ -184,30 +148,15 @@ export default function App() {
   const searchInput = useRef<HTMLInputElement>(null);
   const file = useRef<HTMLInputElement>(null);
   const runRef = useRef<() => void>(() => {});
-  const schemaSignature = useMemo(
-    () => (remote ? "" : signature(w)),
-    [remote, w.schema],
+  const tablesById = useMemo(
+    () => new Map(w.schema.tables.map((table) => [table.id, table])),
+    [w.schema.tables],
   );
-  const stale = !remote && runtime !== schemaSignature;
-  const activeTable =
-    w.schema.tables.find((t) => t.id === dataTable) || w.schema.tables[0];
+  const activeTable = tablesById.get(dataTable) ?? w.schema.tables[0];
   const [openDataTableIds, setOpenDataTableIds] = useState<string[]>([]);
   const [dataLayout, setDataLayout] = useState<"tabs" | "stack">("tabs");
-  const [collapsedDataTables, setCollapsedDataTables] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const [stackTableHeights, setStackTableHeights] = useState<
-    Record<string, number>
-  >({});
-  const stackResizeDrag = useRef<{
-    tableId: string;
-    startY: number;
-    startHeight: number;
-  } | null>(null);
   useEffect(() => {
     setOpenDataTableIds([]);
-    setCollapsedDataTables(new Set());
-    setStackTableHeights({});
   }, [w.id, w.activeSourceId]);
   useEffect(() => {
     if (!activeTable) return;
@@ -217,11 +166,11 @@ export default function App() {
   }, [activeTable?.id]);
   const openDataTables = useMemo(() => {
     const valid = openDataTableIds
-      .map((tid) => w.schema.tables.find((t) => t.id === tid))
+      .map((tid) => tablesById.get(tid))
       .filter((t): t is TableDefinition => Boolean(t));
     if (!valid.length && activeTable) return [activeTable];
     return valid;
-  }, [openDataTableIds, w.schema.tables, activeTable]);
+  }, [openDataTableIds, tablesById, activeTable]);
   const errors = useMemo(
     () => (remote ? [] : validateSchema(w.schema)),
     [remote, w.schema],
@@ -271,34 +220,7 @@ export default function App() {
       clearTimeout(timer);
     };
   }, [w, ready]);
-  // Reconstruct a workspace once on open; later design changes require an explicit sync.
-  useEffect(() => {
-    if (!ready) return;
-    let active = true;
-    setBusy(true);
-    setRuntime("");
-    if (remote || (w.sources && mode === "sql")) {
-      setBusy(false);
-      return;
-    }
-    rebuild(w)
-      .then(() => {
-        if (active) setRuntime(signature(w));
-      })
-      .catch((e) => {
-        if (active) {
-          setMessage(e instanceof Error ? e.message : String(e));
-          setError(true);
-        }
-      })
-      .finally(() => {
-        if (active) setBusy(false);
-      });
-    return () => {
-      active = false;
-    };
-    // The workspace id is the boundary; edits must not implicitly rebuild the runtime.
-  }, [ready, w.id, w.activeSourceId, !!w.sources && mode === "sql"]);
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -406,103 +328,11 @@ export default function App() {
       setDataTable(remaining[remaining.length - 1].id);
     }
   }
-  async function apply() {
-    if (busy) return;
-    if (
-      runtime &&
-      !(await confirmAction(
-        "Sync the design with your local database? Saved rows will be restored. Incompatible changes will be rejected without replacing the current database.",
-      ))
-    )
-      return;
-    await task(async () => {
-      await rebuild(w);
-      setRuntime(schemaSignature);
-      setMessage("Your database is up to date.");
-    });
-  }
-  async function run(tabId?: string, sql?: string) {
-    if (stale || busy || localRunActive.current) return;
-    localRunActive.current = true;
-    localExecutionId.current++;
-    localCancelled.current = false;
-    setLocalQueryRunning(true);
-    setLocalCancelPending(false);
-    try {
-      await task(async () => {
-        const tab =
-          sqlTabs(w).find((item) => item.id === tabId) ?? activeSqlTab(w);
-        const selected =
-          sql ??
-          (sqlSelection.current.tabId === tab.id
-            ? sqlSelection.current.sql
-            : "");
-        const results = await executeSqlBatch(
-          selected.trim() ? selected : tab.sql,
-          async (text) => {
-            if (localCancelled.current)
-              throw Error("Query stopped. Remaining statements were skipped.");
-            return queryCancelable(text);
-          },
-        );
-        setLocalQueryRunning(false);
-        if (!results.length) return;
-        setQueryResults((previous) => ({ ...previous, [tab.id]: results }));
-        try {
-          const data = await snapshot(w);
-          edit((d) => {
-            d.data = data;
-          });
-        } catch (e) {
-          setRuntime("");
-          throw Error(
-            "SQL ran, but its schema no longer matches the design. Rebuild to restore the visual schema. " +
-              String(e),
-          );
-        }
-      });
-    } finally {
-      localRunActive.current = false;
-      setLocalQueryRunning(false);
-      setLocalCancelPending(false);
-    }
-  }
   runRef.current = () => {
-    if (mode === "sql") {
-      if (remote || w.sources) remoteRun.current();
-      else void run();
+    if (mode === "sql" && (remote || w.sources)) {
+      remoteRun.current();
     }
   };
-  async function saveRowsForTable(
-    targetTable: TableDefinition,
-    rows: DraftRow[],
-  ) {
-    if (stale || busy)
-      throw Error("Wait for the database to be ready before saving.");
-    setBusy(true);
-    try {
-      const data = await saveGridChanges(w, targetTable, rows);
-      edit((d) => {
-        d.data = data;
-      });
-      try {
-        await saveWorkspace({ ...w, data, updatedAt: Date.now() });
-      } catch (e) {
-        setMessage(
-          "Rows saved in DuckDB, but browser persistence failed: " + String(e),
-        );
-        setError(true);
-      }
-      return data[targetTable.id] ?? [];
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function saveRows(rows: DraftRow[]) {
-    if (!activeTable)
-      throw Error("Wait for the database to be ready before saving.");
-    return saveRowsForTable(activeTable, rows);
-  }
   async function addTable() {
     if (!(await leaveDraft())) return;
     setTableEditor({ table: newTable(w), isNew: true });
@@ -523,30 +353,9 @@ export default function App() {
   async function commitColumn(plan: ReturnType<typeof planTableEdit>) {
     if (busy) throw Error("The database is busy. Try again.");
     if (plan.errors.length) throw Error(plan.errors.join(" "));
-    const candidate = {
-      ...w,
-      schema: plan.schema,
-      data: plan.data,
-      updatedAt: Date.now(),
-    };
-    setBusy(true);
-    setMessage("");
-    let swapped = false;
-    try {
-      await rebuild(candidate);
-      swapped = true;
-      const data = await snapshot(candidate);
-      edit((workspace) => {
-        workspace.schema = plan.schema;
-        workspace.data = data;
-      });
-      setRuntime(signature(candidate));
-    } catch (error) {
-      if (swapped) setRuntime("");
-      throw error;
-    } finally {
-      setBusy(false);
-    }
+    edit((workspace) => {
+      workspace.schema = plan.schema;
+    });
   }
   async function selectConnection(sourceId: string) {
     if (sourceId === (w.activeSourceId ?? "primary")) return true;
@@ -630,9 +439,9 @@ export default function App() {
       !source ||
       !fallback ||
       !(await confirmAction(
-        `SQL tabs keep their text and switch to “${fallback.connection ? fallback.name : "Local DuckDB"}”. ${source.connection ? "Server data and saved connection settings stay available." : "Local tables and rows will be removed. Export the session first to keep a copy."}`,
+        `SQL tabs keep their text and switch to “${fallback.name}”. Server data and saved connection settings stay available.`,
         {
-          title: `Remove “${source.connection ? source.name : "Local DuckDB"}”?`,
+          title: `Remove “${source.name}”?`,
           confirmLabel: "Remove",
           destructive: true,
         },
@@ -651,48 +460,6 @@ export default function App() {
     await task(() =>
       saveJsonFile(w.name, JSON.stringify(workspaceSnapshot(w), null, 2)),
     );
-  }
-  async function generateData() {
-    if (stale || busy || dirty) return;
-    await task(async () => {
-      await query("BEGIN TRANSACTION");
-      try {
-        for (const table of orderedTables(w.schema)) {
-          if (
-            (await query(`SELECT * FROM ${quote(table.name)} LIMIT 1`)).rows
-              .length
-          )
-            continue;
-          const values = table.columns.map((column, index) => {
-            const r = w.schema.relationships.find(
-              (r) =>
-                r.kind === "physical" &&
-                r.sourceTable === table.id &&
-                r.sourceColumns.includes(column.id),
-            );
-            if (r) {
-              const target = w.schema.tables.find(
-                (t) => t.id === r.targetTable,
-              )!;
-              return `(SELECT ${quote(target.columns.find((c) => c.id === r.targetColumns[r.sourceColumns.indexOf(column.id)])!.name)} FROM ${quote(target.name)} LIMIT 1)`;
-            }
-            return sampleDuckValue(column, index);
-          });
-          await query(
-            `INSERT INTO ${quote(table.name)} VALUES (${values.join(",")})`,
-          );
-        }
-        const data = await snapshot(w);
-        await query("COMMIT");
-        edit((d) => {
-          d.data = data;
-        });
-        setMessage("Sample records added to empty tables.");
-      } catch (e) {
-        await query("ROLLBACK");
-        throw e;
-      }
-    });
   }
   return (
     <div
@@ -757,7 +524,7 @@ export default function App() {
           >
             <span
               className={
-                "status-dot " + (stale || errors.length ? "amber" : "")
+                "status-dot " + (errors.length ? "amber" : "")
               }
             />
           </span>
@@ -1102,372 +869,25 @@ export default function App() {
               onDirty={setDirty}
             />
           ) : (
-            <>
-              {stale && !busy && (
-                <div className="sync-banner">
-                  <RefreshCw size={13} />
-                  <span>Schema changes pending</span>
-                  <Button disabled={dirty} onClick={() => void apply()}>
-                    Sync database
-                  </Button>
-                </div>
-              )}
-              {mode === "data" ? (
-                activeTable ? (
-                  <section className="data-view">
-                    <div className="compact-toolbar data-tables-toolbar">
-                      <div
-                        className="data-table-tabs"
-                        role="tablist"
-                        aria-label="Open tables"
-                      >
-                        {openDataTables.map((table) => {
-                          const isCurrent =
-                            dataLayout === "tabs" &&
-                            table.id === activeTable.id;
-                          return (
-                            <div
-                              key={table.id}
-                              className={`data-table-tab${isCurrent ? " is-active" : ""}`}
-                            >
-                              <button
-                                type="button"
-                                role="tab"
-                                aria-selected={isCurrent}
-                                className="data-table-tab-btn"
-                                onClick={() => {
-                                  void chooseTable(table.id);
-                                  if (dataLayout === "stack") {
-                                    setCollapsedDataTables((prev) => {
-                                      if (!prev.has(table.id)) return prev;
-                                      const next = new Set(prev);
-                                      next.delete(table.id);
-                                      return next;
-                                    });
-                                  }
-                                }}
-                              >
-                                <Table2 size={12} />
-                                <span className="data-table-tab-name">
-                                  {table.namespace
-                                    ? `${table.namespace}.${table.name}`
-                                    : table.name}
-                                </span>
-                                <span className="data-table-tab-count">
-                                  {(w.data[table.id] ?? []).length}
-                                </span>
-                              </button>
-                              {openDataTables.length > 1 && (
-                                <button
-                                  type="button"
-                                  className="data-table-tab-close"
-                                  title={`Close ${table.name}`}
-                                  aria-label={`Close ${table.name}`}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    void closeDataTable(table.id);
-                                  }}
-                                >
-                                  <X size={11} />
-                                </button>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                      <div className="row">
-                        {openDataTables.length > 1 && (
-                          <Button
-                            className={
-                              dataLayout === "stack" ? "is-active" : undefined
-                            }
-                            aria-pressed={dataLayout === "stack"}
-                            title={
-                              dataLayout === "stack"
-                                ? "Switch to single table tab view"
-                                : "Stack open tables vertically"
-                            }
-                            onClick={() =>
-                              setDataLayout((cur) =>
-                                cur === "stack" ? "tabs" : "stack",
-                              )
-                            }
-                          >
-                            <Rows3 size={12} />
-                            <span>Stack</span>
-                          </Button>
-                        )}
-                        <Button
-                          disabled={busy || stale || dirty}
-                          onClick={() => void generateData()}
-                        >
-                          Sample data
-                        </Button>
-                        <Button
-                          disabled={busy}
-                          onClick={() => void editTable(activeTable.id)}
-                        >
-                          <Settings2 size={14} />
-                          Edit table
-                        </Button>
-                      </div>
-                    </div>
-                    {dataLayout === "stack" && openDataTables.length > 1 ? (
-                      <div className="sql-all-results data-stack-container">
-                        {openDataTables.map((table) => {
-                          const tableRows = w.data[table.id] ?? EMPTY_ROWS;
-                          const isCollapsed = collapsedDataTables.has(table.id);
-                          const visibleRowCount = Math.min(
-                            Math.max(tableRows.length, 1),
-                            6,
-                          );
-                          const defaultHeight =
-                            24 + 26 + visibleRowCount * 25 + 8;
-                          const blockHeight =
-                            stackTableHeights[table.id] ?? defaultHeight;
-                          return (
-                            <section
-                              key={table.id}
-                              className="sql-result-block data-stack-block"
-                              data-collapsed={isCollapsed}
-                              style={
-                                !isCollapsed
-                                  ? { height: blockHeight }
-                                  : undefined
-                              }
-                            >
-                              <Spreadsheet
-                                key={w.id + table.id + schemaSignature}
-                                table={table}
-                                viewKey={`local:${w.id}:${w.activeSourceId ?? "primary"}:${table.id}`}
-                                rows={tableRows}
-                                disabled={busy || stale}
-                                onDirty={setDirty}
-                                onSave={(rows) => saveRowsForTable(table, rows)}
-                                onAddColumn={(anchor) =>
-                                  void openColumn(table.id, undefined, anchor)
-                                }
-                                onEditColumn={(columnId, anchor) =>
-                                  void openColumn(table.id, columnId, anchor)
-                                }
-                                structureDisabled={busy}
-                                stackHeader={{
-                                  collapsed: isCollapsed,
-                                  onToggleCollapse: () =>
-                                    setCollapsedDataTables((prev) => {
-                                      const next = new Set(prev);
-                                      if (next.has(table.id))
-                                        next.delete(table.id);
-                                      else next.add(table.id);
-                                      return next;
-                                    }),
-                                  onMaximize: () => {
-                                    void chooseTable(table.id);
-                                    setDataLayout("tabs");
-                                  },
-                                  onClose:
-                                    openDataTables.length > 1
-                                      ? () => void closeDataTable(table.id)
-                                      : undefined,
-                                }}
-                              />
-                              {!isCollapsed && (
-                                <div
-                                  className="stack-block-resizer"
-                                  role="separator"
-                                  aria-orientation="horizontal"
-                                  aria-label={`Resize ${table.name} height`}
-                                  title="Drag to adjust table height · Double-click to reset"
-                                  onPointerDown={(event) => {
-                                    event.preventDefault();
-                                    event.currentTarget.setPointerCapture(
-                                      event.pointerId,
-                                    );
-                                    stackResizeDrag.current = {
-                                      tableId: table.id,
-                                      startY: event.clientY,
-                                      startHeight: blockHeight,
-                                    };
-                                  }}
-                                  onPointerMove={(event) => {
-                                    const activeDrag = stackResizeDrag.current;
-                                    if (
-                                      !activeDrag ||
-                                      activeDrag.tableId !== table.id
-                                    )
-                                      return;
-                                    const nextHeight = Math.max(
-                                      84,
-                                      Math.min(
-                                        900,
-                                        Math.round(
-                                          activeDrag.startHeight +
-                                            (event.clientY - activeDrag.startY),
-                                        ),
-                                      ),
-                                    );
-                                    setStackTableHeights((prev) =>
-                                      prev[table.id] === nextHeight
-                                        ? prev
-                                        : { ...prev, [table.id]: nextHeight },
-                                    );
-                                  }}
-                                  onPointerUp={(event) => {
-                                    if (
-                                      event.currentTarget.hasPointerCapture(
-                                        event.pointerId,
-                                      )
-                                    ) {
-                                      event.currentTarget.releasePointerCapture(
-                                        event.pointerId,
-                                      );
-                                    }
-                                    stackResizeDrag.current = null;
-                                  }}
-                                  onPointerCancel={() => {
-                                    stackResizeDrag.current = null;
-                                  }}
-                                  onDoubleClick={() => {
-                                    setStackTableHeights((prev) => {
-                                      if (!(table.id in prev)) return prev;
-                                      const next = { ...prev };
-                                      delete next[table.id];
-                                      return next;
-                                    });
-                                  }}
-                                />
-                              )}
-                            </section>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <Spreadsheet
-                        key={w.id + activeTable.id + schemaSignature}
-                        table={activeTable}
-                        viewKey={`local:${w.id}:${w.activeSourceId ?? "primary"}:${activeTable.id}`}
-                        rows={w.data[activeTable.id] ?? EMPTY_ROWS}
-                        disabled={busy || stale}
-                        onDirty={setDirty}
-                        onSave={saveRows}
-                        onAddColumn={(anchor) =>
-                          void openColumn(activeTable.id, undefined, anchor)
-                        }
-                        onEditColumn={(columnId, anchor) =>
-                          void openColumn(activeTable.id, columnId, anchor)
-                        }
-                        structureDisabled={busy}
-                      />
-                    )}
-                  </section>
-                ) : (
-                  <div className="empty-state">
-                    <Database size={32} />
-                    <h2>No tables yet</h2>
-                    <Button
-                      className="primary"
-                      disabled={busy}
-                      onClick={() => void addTable()}
-                    >
-                      <Plus size={14} />
-                      Create table
-                    </Button>
-                  </div>
-                )
-              ) : (
-                <SqlWorkspace
-                  key={w.id}
-                  tabs={sqlTabs(w)}
-                  activeId={activeSqlTab(w).id}
-                  layout={w.sqlLayout}
-                  onLayoutChange={(layout) =>
-                    edit((d) => {
-                      d.sqlLayout = layout;
-                    })
-                  }
-                  onTabsChange={(tabs, active, layout) =>
-                    edit((d) => {
-                      setSqlTabs(d, tabs, active, layout);
-                    })
-                  }
-                  value={activeSqlTab(w).sql}
-                  onChange={(sql) =>
-                    edit((d) => {
-                      const tabs = sqlTabs(d);
-                      tabs.find((tab) => tab.id === activeSqlTab(d).id)!.sql =
-                        sql;
-                      setSqlTabs(d, tabs, activeSqlTab(d).id);
-                    })
-                  }
-                  cancelPending={localCancelPending}
-                  onCancel={
-                    localQueryRunning
-                      ? () => {
-                          if (localCancelled.current) return;
-                          localCancelled.current = true;
-                          setLocalCancelPending(true);
-                          const requestId = localExecutionId.current;
-                          void cancelLocalQuery().catch((error) => {
-                            if (
-                              requestId !== localExecutionId.current ||
-                              !localRunActive.current
-                            )
-                              return;
-                            localCancelled.current = false;
-                            setMessage(String(error));
-                            setError(true);
-                            setLocalCancelPending(false);
-                          });
-                        }
-                      : undefined
-                  }
-                  onRun={(tabId, sql) => void run(tabId, sql)}
-                  disabled={busy || stale}
-                  busy={busy}
-                  dark={dark}
-                  tabContext={{
-                    sourceId: "local",
-                    schema: w.schema,
-                    dialect: "default",
-                    label: "DuckDB",
-                    remote: false,
-                  }}
-                  onEditingResult={setDirty}
-                  getEditableResult={(_tabId, result) =>
-                    stale ? undefined : editableResult(result, w.schema, "default")
-                  }
-                  onSaveResult={async (tabId, result, drafts, index) => {
-                    const table = editableResult(result, w.schema, "default");
-                    if (!table)
-                      throw Error(
-                        "Only full rows from a single table with a primary key can be edited.",
-                      );
-                    const data = await saveGridChanges(w, table, drafts);
-                    edit((d) => {
-                      d.data = data;
-                    });
-                    const rows = (await query(result.sql)).rows;
-                    setQueryResults((previous) => ({
-                      ...previous,
-                      [tabId]: (previous[tabId] ?? []).map((item, position) =>
-                        position === index
-                          ? { ...item, rows, status: `${rows.length} rows · updated` }
-                          : item,
-                      ),
-                    }));
-                    return rows;
-                  }}
-                  allResults={queryResults}
-                  queryResults={queryResults[activeSqlTab(w).id]}
-                  onSelection={(sql, tabId) => {
-                    sqlSelection.current = {
-                      tabId: tabId ?? activeSqlTab(w).id,
-                      sql,
-                    };
-                  }}
-                />
-              )}
-            </>
+            <div className="empty-slate">
+              <Database size={32} className="accent" />
+              <h2>No database connected</h2>
+              <p>
+                Connect to a PostgreSQL or SQL Server database to explore tables, view data, and run SQL queries.
+              </p>
+              <Button
+                className="primary"
+                onClick={() =>
+                  requestConnection(
+                    w.id,
+                    w.activeSourceId ?? "primary",
+                    "new",
+                  )
+                }
+              >
+                Add connection
+              </Button>
+            </div>
           )}
         </main>
       </div>

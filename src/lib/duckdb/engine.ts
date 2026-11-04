@@ -1,6 +1,6 @@
 import { decimalText } from "./decimal";
 import { duckValue, snapshotColumn } from "./values";
-import * as duckdb from "@duckdb/duckdb-wasm";
+import type * as duckdb from "@duckdb/duckdb-wasm";
 import wasm from "@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url";
 import ehWasm from "@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url";
 import ehWorker from "@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?url";
@@ -24,6 +24,7 @@ export const normalize = (value: unknown): unknown =>
 export { literal } from "./literals";
 export async function rebuild(w: WorkspaceDefinition) {
   const ddl = generateDDL(w.schema);
+  const duckdb = await import("@duckdb/duckdb-wasm");
   const bundle = await duckdb.selectBundle({
     mvp: { mainModule: wasm, mainWorker: workerUrl },
     eh: { mainModule: ehWasm, mainWorker: ehWorker },
@@ -76,24 +77,34 @@ type ArrowResult = Pick<
   "schema" | "toArray"
 >;
 function queryResult(result: ArrowResult) {
+  // Arrow type inspection is per column, rather than repeated for every cell.
+  const fields = result.schema.fields.map((field) => {
+    const type = field.type.toString();
+    return {
+      name: field.name,
+      decimal: type.startsWith("Decimal"),
+      date: type.startsWith("Date"),
+      timestamp: type.startsWith("Timestamp"),
+      scale: (field.type as unknown as { scale: number }).scale,
+    };
+  });
   return {
-    columns: result.schema.fields.map((f) => f.name),
+    columns: fields.map((field) => field.name),
     rows: result.toArray().map((r) => {
       const row = r.toJSON() as Record<string, unknown>;
-      for (const field of result.schema.fields) {
+      for (const field of fields) {
         const value = row[field.name];
-        const type = field.type.toString();
-        if (type.startsWith("Decimal") && ArrayBuffer.isView(value)) {
+        if (field.decimal && ArrayBuffer.isView(value)) {
           row[field.name] = decimalText(
             value as unknown as ArrayLike<number>,
-            (field.type as unknown as { scale: number }).scale,
+            field.scale,
           );
         } else if (
           typeof value === "number" &&
-          (type.startsWith("Timestamp") || type.startsWith("Date"))
+          (field.timestamp || field.date)
         ) {
           const date = new Date(value);
-          row[field.name] = type.startsWith("Date")
+          row[field.name] = field.date
             ? date.toISOString().slice(0, 10)
             : date.toISOString();
         }
@@ -102,6 +113,7 @@ function queryResult(result: ArrowResult) {
     }),
   };
 }
+
 let activeQuery:
   { connection: duckdb.AsyncDuckDBConnection; cancelled: boolean } | undefined;
 export async function queryCancelable(sql: string) {

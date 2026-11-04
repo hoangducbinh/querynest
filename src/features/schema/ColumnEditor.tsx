@@ -210,7 +210,7 @@ export function ColumnEditor({
               <label htmlFor="column-type">Data type</label>
               <input
                 id="column-type"
-                list="duckdb-column-types"
+                list="sql-column-types"
                 disabled={saving}
                 value={column.type}
                 spellCheck={false}
@@ -218,7 +218,7 @@ export function ColumnEditor({
                 placeholder="e.g. DECIMAL(18,2), INTEGER[]"
                 onChange={(event) => patch({ type: event.target.value })}
               />
-              <datalist id="duckdb-column-types">
+              <datalist id="sql-column-types">
                 {dataTypes.map((type) => (
                   <option key={type} value={type} />
                 ))}

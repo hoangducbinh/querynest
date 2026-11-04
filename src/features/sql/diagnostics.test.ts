@@ -124,3 +124,27 @@ describe("SQL diagnostics", () => {
     expect(sqlStatements("SELECT 1\nSELECT 2")).toHaveLength(1);
   });
 });
+
+import { editingDiagnostics } from "./diagnostics";
+it("detects editing errors without a database connection", () => {
+  expect(editingDiagnostics("SELETC * FROM orders")[0].message).toContain(
+    "SELECT",
+  );
+  expect(editingDiagnostics("SELECT (1")[0].message).toContain(
+    "Missing closing",
+  );
+  expect(editingDiagnostics("SELECT 1)")[0].message).toContain(
+    "Unexpected closing",
+  );
+  expect(editingDiagnostics("SELECT 'hello")[0].message).toContain(
+    "Unclosed quoted",
+  );
+  expect(editingDiagnostics("/* comment")[0].message).toContain(
+    "Unclosed block",
+  );
+});
+it("ignores parentheses inside strings, comments and SQL Server identifiers", () => {
+  expect(editingDiagnostics("SELECT '(' /* ) */ -- (\n")).toEqual([]);
+  expect(editingDiagnostics("SELECT [a(b] FROM [orders]", "mssql")).toEqual([]);
+  expect(editingDiagnostics("SELECT (1 + (2))")).toEqual([]);
+});

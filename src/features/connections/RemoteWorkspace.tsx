@@ -29,7 +29,7 @@ import { LoaderCircle, RefreshCw, Rows3, Table2, X } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import type { TableDefinition, WorkspaceDefinition } from "../../types/schema";
 import { useStore } from "../schema/store";
-import { ResultGrid } from "../sample-data/ResultGrid";
+import { EmptyResults } from "../sample-data/EmptyResults";
 import { Spreadsheet } from "../sample-data/Spreadsheet";
 import type { DraftRow } from "../sample-data/model";
 import { confirmAction } from "../../lib/dialogs";
@@ -924,7 +924,7 @@ export function RemoteWorkspace({
               }}
             />
           ) : (
-            <ResultGrid rows={[]} columns={[]} />
+            <EmptyResults />
           )}
         </div>
       )}

@@ -76,3 +76,15 @@ it("changed schema cannot reuse an in-flight page from the previous structure", 
   releaseTableSession("test");
   expect(cachedTablePage("test:source", "a", 0, "new")).toBeUndefined();
 });
+it("bounds retained pages and keeps recently revisited pages", async () => {
+  const load = vi.fn(async () => result(1));
+  for (let page = 0; page < 10; page++)
+    await loadTablePage("test:source", "a", page, "schema", load);
+  await loadTablePage("test:source", "a", 0, "schema", load);
+  await loadTablePage("test:source", "a", 10, "schema", load);
+  expect(tableState("test:source", "a").pages.size).toBe(10);
+  expect(cachedTablePage("test:source", "a", 0, "schema")).toBeDefined();
+  expect(cachedTablePage("test:source", "a", 1, "schema")).toBeUndefined();
+  await loadTablePage("test:source", "a", 1, "schema", load);
+  expect(load).toHaveBeenCalledTimes(12);
+});

@@ -9,7 +9,7 @@ import {
   useColumnWidths,
   useColumnWindow,
 } from "./column-sizing";
-import { duckCellHint } from "../../lib/duckdb/values";
+import { columnTypeHint } from "../sql/ResultSetView";
 import {
   memo,
   useEffect,
@@ -309,7 +309,7 @@ export function Spreadsheet({
       table.columns.map((column) =>
         fitColumnWidth(
           column.name,
-          rows.map((row) => row[column.name]),
+          rows.slice(0, 100).map((row) => row[column.name]),
           280,
         ),
       ),
@@ -318,7 +318,7 @@ export function Spreadsheet({
   const cellHints = useMemo(
     () =>
       table.columns.map((column) =>
-        duckCellHint(column.nativeType ?? column.type),
+        columnTypeHint(column.nativeType ?? column.type),
       ),
     [table.columns],
   );
@@ -1248,7 +1248,7 @@ export function Spreadsheet({
                           c.id,
                           fitColumnWidth(
                             c.name,
-                            drafts.map((row) => valueAt(row, c.name)),
+                            drafts.slice(0, 100).map((row) => valueAt(row, c.name)),
                           ),
                         )
                       }

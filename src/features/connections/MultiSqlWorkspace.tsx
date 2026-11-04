@@ -1,5 +1,4 @@
 import { editableResult } from "../sql/editable-result";
-import { saveGridChanges } from "../sample-data/mutations";
 import { saveQueryResult } from "./save-query-result";
 import { useSqlResults } from "../sql/result-state";
 import {
@@ -17,14 +16,6 @@ import {
   sqlMayChangeSchema,
   type SqlResult,
 } from "../sql/execution";
-import { validateSql } from "../sql/diagnostics";
-import {
-  queryCancelable,
-  cancelLocalQuery,
-  rebuild,
-  snapshot,
-  withSqlValidator,
-} from "../../lib/duckdb/engine";
 import { catalogSchema, pgError } from "../postgres/model";
 import { isTauri } from "../postgres/client";
 import { remoteClient } from "./client";
@@ -71,8 +62,6 @@ export function MultiSqlWorkspace({
   const [queryRunning, setQueryRunning] = useState(false);
   const [cancelPending, setCancelPending] = useState(false);
   const cancelled = useRef(false);
-  const localReady = useRef("");
-  const localStarting = useRef<Promise<void> | null>(null);
   const resultContext = (source: WorkspaceSource) =>
     JSON.stringify([source.id, source.connection]);
   const activeRun = useRef<{
@@ -120,25 +109,6 @@ export function MultiSqlWorkspace({
     const tab = sqlTabs(w).find((tab) => tab.id === tabId);
     if (!tab) throw Error("SQL tab was closed.");
     return tabSource(w, tab);
-  }
-  async function ensureLocal(source: WorkspaceSource) {
-    const signature = JSON.stringify([w.id, source.id, source.schema]);
-    if (localStarting.current) await localStarting.current;
-    if (localReady.current === signature) return;
-    const starting = rebuild({
-      ...w,
-      schema: source.schema,
-      data: source.data ?? {},
-      postgres: undefined,
-      mssql: undefined,
-    });
-    localStarting.current = starting;
-    try {
-      await starting;
-      localReady.current = signature;
-    } finally {
-      if (localStarting.current === starting) localStarting.current = null;
-    }
   }
   async function run(tabId = activeSqlTab(w).id, suppliedSql?: string) {
     if (busy || running.current) return;
@@ -225,15 +195,7 @@ export function MultiSqlWorkspace({
           return value;
         });
       } else {
-        await ensureLocal(source);
-        output = await executeSqlBatch(text, async (sql) => {
-          if (cancelled.current)
-            throw Error("Query stopped. Remaining statements were skipped.");
-          return queryCancelable(sql);
-        });
-        setQueryRunning(false);
-        const data = await snapshot({ ...w, schema: source.schema });
-        edit((draft) => updateSource(draft, source.id, { data }));
+        throw Error("This tab is not connected to a database.");
       }
       resultContexts[tab.id] = resultContext(source);
       setResults((previous) => ({ ...previous, [tab.id]: output }));
@@ -292,24 +254,10 @@ export function MultiSqlWorkspace({
         }}
         onSaveResult={async (tabId, result, drafts, index) => {
           const source = sourceFor(tabId);
-          let rows: Record<string, unknown>[];
-          if (source.connection) {
-            rows = await saveQueryResult(w, source, result, drafts);
-          } else {
-            const table = editableResult(result, source.schema, "default");
-            if (!table)
-              throw Error(
-                "Only full rows from a single table with a primary key can be edited.",
-              );
-            await ensureLocal(source);
-            const data = await saveGridChanges(
-              { ...w, schema: source.schema, data: source.data ?? {} },
-              table,
-              drafts,
-            );
-            edit((draft) => updateSource(draft, source.id, { data }));
-            rows = (await queryCancelable(result.sql)).rows;
+          if (!source.connection) {
+            throw Error("Select or add a database connection to edit results.");
           }
+          const rows = await saveQueryResult(w, source, result, drafts);
           setResults((previous) => ({
             ...previous,
             [tabId]: previous[tabId].map((item, position) =>
@@ -335,17 +283,17 @@ export function MultiSqlWorkspace({
         newTabConnectionName={(() => {
           const source =
             sources.find((s) => s.id === w.activeSourceId) ?? sources[0];
-          return source.connection
+          return source?.connection
             ? connectionRoot(w, source).name +
                 " / " +
                 source.connection.config.database
-            : "Local DuckDB";
+            : source?.name || "Database";
         })()}
         connectionOptions={sources
           .filter((source) => !source.parentSourceId)
           .map((source) => ({
             id: source.id,
-            name: source.connection ? source.name : "Local DuckDB",
+            name: source.name,
           }))}
         getTabContext={(tabId) => {
           const source = sourceFor(tabId);
@@ -456,16 +404,11 @@ export function MultiSqlWorkspace({
         validationSource={String(revision)}
         validateTab={async (tabId, sql) => {
           const source = sourceFor(tabId);
-          if (source.connection) {
-            const config = source.connection;
-            if (!isTauri()) return [];
-            return withDatabaseSession(w, source, (session) =>
-              remoteClient(config.engine).validate(session.sessionId, sql),
-            );
-          }
-          if (running.current) return [];
-          await ensureLocal(source);
-          return withSqlValidator((prepare) => validateSql(sql, prepare));
+          if (!source?.connection || !isTauri()) return [];
+          const config = source.connection;
+          return withDatabaseSession(w, source, (session) =>
+            remoteClient(config.engine).validate(session.sessionId, sql),
+          ).catch(() => []);
         }}
         cancelPending={cancelPending}
         onCancel={
@@ -477,13 +420,8 @@ export function MultiSqlWorkspace({
                 const requestId = executionId.current;
                 const active = activeRun.current;
                 if (!active?.source.connection) {
-                  void cancelLocalQuery().catch((error) => {
-                    if (executionId.current !== requestId || !running.current)
-                      return;
-                    cancelled.current = false;
-                    setError(pgError(error));
-                    setCancelPending(false);
-                  });
+                  cancelled.current = false;
+                  setCancelPending(false);
                   return;
                 }
                 const config = active.source.connection;

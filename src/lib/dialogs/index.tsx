@@ -1,4 +1,4 @@
-import { useState, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Button } from "../../components/ui/button";
 type ConfirmOptions = {
@@ -8,10 +8,8 @@ type ConfirmOptions = {
 };
 type Request = ConfirmOptions & {
   id: number;
-  kind: "confirm" | "prompt";
   message: string;
-  initial: string;
-  resolve: (value: string | null) => void;
+  resolve: (confirmed: boolean) => void;
 };
 let pending: Request | null = null;
 const listeners = new Set<() => void>();
@@ -22,74 +20,49 @@ const subscribe = (fn: () => void) => {
   };
 };
 const emit = () => listeners.forEach((fn) => fn());
-function request(
-  kind: Request["kind"],
+export const confirmAction = (
   message: string,
-  initial = "",
   options: ConfirmOptions = {},
-) {
-  return new Promise<string | null>((resolve) => {
+) =>
+  new Promise<boolean>((resolve) => {
     if (pending) {
-      resolve(null);
+      resolve(false);
       return;
     }
-    pending = { ...options, id: Date.now(), kind, message, initial, resolve };
+    pending = { ...options, id: Date.now(), message, resolve };
     emit();
   });
-}
-export const confirmAction = async (
-  message: string,
-  options: ConfirmOptions = {},
-) => (await request("confirm", message, "", options)) !== null;
-export const promptValue = (message: string, initial = "") =>
-  request("prompt", message, initial);
-function finish(value: string | null) {
+function finish(confirmed: boolean) {
   const previous = pending;
   pending = null;
   emit();
-  previous?.resolve(value);
+  previous?.resolve(confirmed);
 }
 export function DialogHost() {
   const active = useSyncExternalStore(subscribe, () => pending);
   return active ? <RequestDialog key={active.id} request={active} /> : null;
 }
 function RequestDialog({ request: r }: { request: Request }) {
-  const [value, setValue] = useState(r.initial);
   return (
     <Dialog.Root
       open
       onOpenChange={(open) => {
-        if (!open) finish(null);
+        if (!open) finish(false);
       }}
     >
       <Dialog.Portal>
         <Dialog.Overlay className="modal-overlay" />
-        <Dialog.Content className="modal action-dialog" data-kind={r.kind}>
-          <Dialog.Title>
-            {r.title ?? (r.kind === "confirm" ? "Continue?" : "Edit value")}
-          </Dialog.Title>
+        <Dialog.Content className="modal action-dialog">
+          <Dialog.Title>{r.title ?? "Continue?"}</Dialog.Title>
           <Dialog.Description>{r.message}</Dialog.Description>
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              finish(r.kind === "confirm" ? "yes" : value);
+              finish(true);
             }}
           >
-            {r.kind === "prompt" && (
-              <textarea
-                aria-label="JSON value"
-                autoFocus
-                rows={5}
-                className="action-dialog-value"
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
-              />
-            )}
             <div className="action-dialog-actions">
-              <Button
-                autoFocus={r.kind === "confirm"}
-                onClick={() => finish(null)}
-              >
+              <Button autoFocus onClick={() => finish(false)}>
                 Cancel
               </Button>
               <Button
@@ -98,7 +71,7 @@ function RequestDialog({ request: r }: { request: Request }) {
                   r.destructive ? "action-dialog-destructive" : "primary"
                 }
               >
-                {r.confirmLabel ?? (r.kind === "confirm" ? "Continue" : "Save")}
+                {r.confirmLabel ?? "Continue"}
               </Button>
             </div>
           </form>

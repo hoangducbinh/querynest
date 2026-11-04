@@ -1,6 +1,6 @@
-import { duckTypeSQL, parseDuckType } from "../duckdb/types";
 import type { DatabaseSchema, TableDefinition } from "../../types/schema";
 import { validateSchema } from "../../features/schema/core";
+import { duckTypeSQL, parseDuckType } from "../duckdb/types";
 export const quote = (s: string) => '"' + s.replaceAll('"', '""') + '"';
 export function orderedTables(s: DatabaseSchema): TableDefinition[] {
   const result: TableDefinition[] = [];
@@ -23,6 +23,14 @@ export function orderedTables(s: DatabaseSchema): TableDefinition[] {
   s.tables.forEach(visit);
   return result;
 }
+function formatType(c: { nativeType?: string; type: string }): string {
+  if (c.nativeType) return c.nativeType;
+  try {
+    return duckTypeSQL(parseDuckType(c.type));
+  } catch {
+    return c.type;
+  }
+}
 export function generateDDL(s: DatabaseSchema): string {
   const errors = validateSchema(s);
   if (errors.length) throw Error(errors.join("\n"));
@@ -30,7 +38,7 @@ export function generateDDL(s: DatabaseSchema): string {
     .map((t) => {
       const defs = t.columns.map(
         (c) =>
-          `${quote(c.name)} ${duckTypeSQL(parseDuckType(c.type))}${!c.nullable ? " NOT NULL" : ""}${c.unique ? " UNIQUE" : ""}${c.defaultValue.trim() ? " DEFAULT " + c.defaultValue : ""}`,
+          `${quote(c.name)} ${formatType(c)}${!c.nullable ? " NOT NULL" : ""}${c.unique ? " UNIQUE" : ""}${c.defaultValue.trim() ? " DEFAULT " + c.defaultValue : ""}`,
       );
       if (t.primaryKey.length)
         defs.push(

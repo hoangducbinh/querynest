@@ -1,6 +1,5 @@
 import { validSqlLayout } from "../sql/panes";
 import { sqlTabs } from "../sql/tabs";
-import { validDuckType } from "../../lib/duckdb/types";
 import { parseRemoteConfig } from "../connections/model";
 import { parseMssqlConfig } from "../connections/model";
 import { parsePostgresConfig } from "../postgres/model";
@@ -71,10 +70,8 @@ export function validateSchema(s: DatabaseSchema): string[] {
       if (!c.name.trim() || cols.has(c.name.toLowerCase()))
         errors.push(`${t.name}: column names must be nonempty and unique.`);
       cols.add(c.name.toLowerCase());
-      if (!validDuckType(c.type))
-        errors.push(
-          `${t.name}.${c.name}: invalid or unsupported DuckDB data type.`,
-        );
+      if (!c.type.trim())
+        errors.push(`${t.name}.${c.name}: data type must be specified.`);
     }
     if (t.primaryKey.some((k) => !t.columns.some((c) => c.id === k)))
       errors.push("Invalid primary key.");

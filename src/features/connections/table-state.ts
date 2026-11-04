@@ -8,6 +8,8 @@ type State = {
   pages: Map<number, Page>;
   pending: Map<number, Promise<PgQueryResult>>;
 };
+// Keep the last ten visited pages per table; a miss can be fetched again.
+const MAX_CACHED_PAGES = 10;
 const scopes = new Map<string, Map<string, State>>();
 export function tableState(scope: string, table: string): State {
   let tables = scopes.get(scope);
@@ -28,8 +30,12 @@ export function cachedTablePage(
   page: number,
   signature: string,
 ) {
-  const entry = tableState(scope, table).pages.get(page);
-  return entry?.signature === signature ? entry.result : undefined;
+  const pages = tableState(scope, table).pages;
+  const entry = pages.get(page);
+  if (entry?.signature !== signature) return;
+  pages.delete(page);
+  pages.set(page, entry);
+  return entry.result;
 }
 export function invalidateTable(scope: string, table: string) {
   const state = tableState(scope, table);
@@ -56,8 +62,11 @@ export function loadTablePage(
   const request = Promise.resolve()
     .then(load)
     .then((result) => {
-      if (state.generation === generation)
+      if (state.generation === generation) {
         state.pages.set(page, { signature, result });
+        if (state.pages.size > MAX_CACHED_PAGES)
+          state.pages.delete(state.pages.keys().next().value!);
+      }
       return result;
     })
     .finally(() => {

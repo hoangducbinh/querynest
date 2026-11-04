@@ -9,9 +9,8 @@ import "monaco-editor/editor/contrib/suggest/browser/suggestController";
 import "monaco-editor/editor/contrib/snippet/browser/snippetController2";
 import "monaco-editor/editor/contrib/hover/browser/hoverContribution";
 import "monaco-editor/editor/contrib/comment/browser/comment";
-import { withSqlValidator } from "../../lib/duckdb/engine";
 import type { SqlDiagnostic } from "./diagnostics";
-import { validateSql } from "./diagnostics";
+import { editingDiagnostics } from "./diagnostics";
 import EditorWorker from "monaco-editor/editor/editor.worker.js?worker";
 import { useStore } from "../schema/store";
 import { sqlCompletions } from "./completions";
@@ -41,7 +40,7 @@ export function SqlEditor({
   onValidation,
   onSelection,
   validate,
-  validationSource = "DuckDB",
+  validationSource = "Database",
 }: {
   value: string;
   viewKey?: string;
@@ -109,11 +108,45 @@ export function SqlEditor({
     if (!model) return;
     let cancelled = false;
     const version = model.getVersionId();
+    const localDiagnostics = validationEnabled
+      ? editingDiagnostics(value, dialect)
+      : [];
+    monaco.editor.setModelMarkers(
+      model,
+      "sql-editing",
+      localDiagnostics.map((item) => {
+        const start = model.getPositionAt(item.start);
+        const end = model.getPositionAt(item.end);
+        return {
+          startLineNumber: start.lineNumber,
+          startColumn: start.column,
+          endLineNumber: end.lineNumber,
+          endColumn: end.column,
+          message: item.message,
+          source: "SQL",
+          severity: item.warning
+            ? monaco.MarkerSeverity.Warning
+            : monaco.MarkerSeverity.Error,
+        };
+      }),
+    );
     monaco.editor.setModelMarkers(model, "sql-validation", []);
-    onValidation?.(validationEnabled ? (value.trim() ? "Checking…" : "") : "");
+    onValidation?.(
+      localDiagnostics.length
+        ? `${localDiagnostics.length} SQL issue${localDiagnostics.length === 1 ? "" : "s"}`
+        : validationEnabled && value.trim()
+          ? "Checking…"
+          : "",
+    );
     let timer = setTimeout(
       async function check() {
-        if (!validationEnabled || !value.trim() || cancelled) return;
+        if (
+          !validationEnabled ||
+          !value.trim() ||
+          cancelled ||
+          localDiagnostics.length
+        )
+          return;
         // Coalesce edits while a slow network validation is still in flight.
         if (validationBusy.current) {
           timer = setTimeout(check, 300);
@@ -123,7 +156,7 @@ export function SqlEditor({
         try {
           const diagnostics = validator.current
             ? await validator.current(value)
-            : await withSqlValidator((prepare) => validateSql(value, prepare));
+            : [];
           if (
             cancelled ||
             model.isDisposed() ||
@@ -170,12 +203,15 @@ export function SqlEditor({
     return () => {
       cancelled = true;
       clearTimeout(timer);
-      if (!model.isDisposed())
+      if (!model.isDisposed()) {
         monaco.editor.setModelMarkers(model, "sql-validation", []);
+        monaco.editor.setModelMarkers(model, "sql-editing", []);
+      }
     };
   }, [
     value,
     schema,
+    dialect,
     validationEnabled,
     editorInstance,
     onValidation,

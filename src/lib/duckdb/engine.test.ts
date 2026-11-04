@@ -139,3 +139,33 @@ it("preserves column metadata after the Arrow stream clears it at EOF", async ()
     rows: [{ answer: 42 }],
   });
 });
+
+it("inspects Arrow column types once and preserves date, decimal and bigint conversion", async () => {
+  const { rebuild, query } = await import("./engine");
+  await rebuild(createWorkspace());
+  const dateType = vi.fn(() => "Date32<DAY>");
+  const decimalType = vi.fn(() => "Decimal[18e+2]");
+  const rows = [1, 2].map((id) => ({
+    toJSON: () => ({
+      id: BigInt(id),
+      date: 0,
+      amount: new Uint32Array([12345, 0, 0, 0]),
+    }),
+  }));
+  mocks.instances.at(-1)!.query.mockResolvedValueOnce({
+    schema: {
+      fields: [
+        { name: "id", type: { toString: () => "Int64" } },
+        { name: "date", type: { toString: dateType } },
+        { name: "amount", type: { toString: decimalType, scale: 2 } },
+      ],
+    },
+    toArray: () => rows,
+  });
+  expect((await query("SELECT * FROM values_table")).rows).toEqual([
+    { id: "1", date: "1970-01-01", amount: "123.45" },
+    { id: "2", date: "1970-01-01", amount: "123.45" },
+  ]);
+  expect(dateType).toHaveBeenCalledTimes(1);
+  expect(decimalType).toHaveBeenCalledTimes(1);
+});

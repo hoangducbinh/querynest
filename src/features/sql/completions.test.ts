@@ -247,3 +247,35 @@ it("bounds suggestions on a 3,000-table catalog and resolves columns only for re
     ).suggestions.map((item) => item.label),
   ).toEqual(["table_2999"]);
 });
+
+it("completes explicit and inferred CTE columns", () => {
+  expect(
+    complete(
+      "WITH recent AS (SELECT id, total AS amount FROM orders) SELECT r.| FROM recent r",
+    ).suggestions.map((item) => item.label),
+  ).toEqual(["id", "amount"]);
+  expect(
+    complete(
+      "WITH recent(customer, amount) AS (SELECT customer_id, total FROM orders) SELECT r.| FROM recent r",
+    ).suggestions.map((item) => item.label),
+  ).toEqual(["customer", "amount"]);
+});
+
+it("supports abbreviated column prefixes and dialect-specific functions", () => {
+  expect(
+    complete("SELECT o.ci| FROM orders o").suggestions.map(
+      (item) => item.label,
+    ),
+  ).toContain("customer_id");
+  const sql = "SELECT GETD";
+  expect(
+    sqlCompletions(sql, sql.length, schema, [], "mssql").suggestions.find(
+      (item) => item.label === "GETDATE",
+    )?.insertText,
+  ).toBe("GETDATE()");
+  expect(
+    sqlCompletions(sql, sql.length, schema, [], "postgres").suggestions.map(
+      (item) => item.label,
+    ),
+  ).not.toContain("GETDATE");
+});

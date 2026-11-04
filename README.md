@@ -64,7 +64,7 @@ BIGINT values outside JavaScript's safe integer range, NUMERIC/DECIMAL, arrays, 
 
 Diagnostics prepare statements without executing them, on a separate connection. Uncommitted schema changes and custom session settings may not be reflected in live diagnostics. A non-default PostgreSQL port is supported; SSH tunneling, custom CA/client-certificate pickers are not included in this connection release.
 
-Rust unit tests: `cargo test --manifest-path src-tauri/Cargo.toml`. The ignored `live_postgres_driver` integration test requires the disposable fixture described in `scripts/postgres-qa.sh` and should never target a production database.
+Rust unit tests: `cargo test --manifest-path src-tauri/Cargo.toml`. Run `sh scripts/postgres-qa.sh` for all four PostgreSQL integration tests. It creates disposable, localhost-only fixtures on ports 55439 and 55440, including the database-context fixture, and stops both containers on exit. Use `sh scripts/postgres-qa.sh --keep` to retain successful fixtures for desktop QA; afterwards stop only `dbplayground-pg-qa` and `dbplayground-pg-multidb-qa`. These fixtures must never target a production database.
 
 ### Shared connection across tools
 

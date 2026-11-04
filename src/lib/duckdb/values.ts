@@ -4,9 +4,6 @@ import { duckTypeSQL, parseDuckType, type DuckType } from "./types";
 const quote = (value: string) => '"' + value.replaceAll('"', '""') + '"';
 const compound = (type: DuckType) =>
   ["LIST", "ARRAY", "MAP", "STRUCT", "UNION", "VARIANT"].includes(type.name);
-export function isCompoundType(type: string) {
-  return compound(parseDuckType(type));
-}
 function encode(expression: string, type: DuckType, depth = 0): string {
   const variable = `__cell_${depth}`;
   let result: string;

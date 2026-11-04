@@ -72,14 +72,6 @@ export function useConnectionSession(key: string, config: RemoteConfig) {
 export function useSessionRevision() {
   return useSyncExternalStore(subscribe, () => revision);
 }
-export function useConnectionStatus(key: string, config?: RemoteConfig) {
-  useSessionRevision();
-  return !config
-    ? "Local"
-    : getSession(key, config)
-      ? "Connected"
-      : "Disconnected";
-}
 export function profileSessions(profileId?: string) {
   return profileId
     ? [
@@ -136,14 +128,6 @@ export function forgetSession(key: string) {
   if (!entry) return;
   sessions.delete(key);
   closeIfUnreferenced(entry);
-  changed();
-}
-export function discardConnectionSession(key: string) {
-  const value = lookup(key);
-  if (!value) return;
-  for (const [alias, entry] of sessions)
-    if (entry.sessionId === value.sessionId) sessions.delete(alias);
-  closeIfUnreferenced(value);
   changed();
 }
 export function markConnectionUnavailable(key: string) {
@@ -247,12 +231,4 @@ export function consumeConnectionRequest(id: number) {
     request = undefined;
     changed();
   }
-}
-
-export function connectedProfileCount() {
-  return new Set(
-    [...sessions.values()]
-      .filter((value) => value.connected !== false)
-      .map((value) => value.profileId ?? value.sessionId),
-  ).size;
 }

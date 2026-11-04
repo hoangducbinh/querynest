@@ -195,7 +195,7 @@ export function TableEditor({
                     <td>
                       <input
                         aria-label={`Column type ${index + 1}`}
-                        list="duckdb-table-types"
+                        list="sql-table-types"
                         value={column.type}
                         autoComplete="off"
                         spellCheck={false}
@@ -204,7 +204,7 @@ export function TableEditor({
                         }
                       />
                       {index === 0 && (
-                        <datalist id="duckdb-table-types">
+                        <datalist id="sql-table-types">
                           {dataTypes.map((type) => (
                             <option key={type} value={type} />
                           ))}
