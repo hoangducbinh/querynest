@@ -1,3 +1,4 @@
+import { updateSqlTabView } from "../sql/view-state";
 import { editableResult } from "../sql/editable-result";
 import { saveQueryResult } from "./save-query-result";
 import { useSqlResults } from "../sql/result-state";
@@ -114,6 +115,7 @@ export function MultiSqlWorkspace({
     if (busy || running.current) return;
     const tab = sqlTabs(w).find((tab) => tab.id === tabId);
     if (!tab) return;
+    updateSqlTabView(`${w.id}:${tab.id}`, { resultsVisible: true });
     const source = sourceFor(tabId);
     const text =
       suppliedSql ??

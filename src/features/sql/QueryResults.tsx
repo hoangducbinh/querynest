@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import * as Popover from "@radix-ui/react-popover";
 import {
   Rows3,
   ChevronDown,
@@ -7,6 +8,8 @@ import {
   Maximize2,
   Table2,
   Terminal,
+  MoreHorizontal,
+  Check,
 } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { EmptyResults } from "../sample-data/EmptyResults";
@@ -236,50 +239,147 @@ export function QueryResults({
     }
   }
 
+  const tablistStripRef = useRef<HTMLDivElement>(null);
+  const [stripWidth, setStripWidth] = useState(0);
+  const [overflowOpen, setOverflowOpen] = useState(false);
+
+  useEffect(() => {
+    const el = tablistStripRef.current;
+    if (!el) return;
+    if (el.clientWidth > 0) {
+      setStripWidth(el.clientWidth);
+    }
+    const obs = new ResizeObserver(([entry]) => {
+      setStripWidth(entry.contentRect.width);
+    });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
+  const availableForTabs =
+    stripWidth > 0 ? Math.max(120, stripWidth - 150) : 400;
+  const resultCapacity = Math.max(1, Math.floor(availableForTabs / 150));
+  const hasResultOverflow = results.length > resultCapacity;
+
+  const visibleResults = useMemo(() => {
+    if (!hasResultOverflow) {
+      return results.map((result, index) => ({ result, index }));
+    }
+    const count = Math.max(1, resultCapacity);
+    const list: { result: SqlResult; index: number }[] = [];
+    for (let i = 0; i < count && i < results.length; i++) {
+      list.push({ result: results[i], index: i });
+    }
+    if (mode !== "messages" && !list.some((item) => item.index === selected)) {
+      if (selected >= 0 && selected < results.length) {
+        list[list.length - 1] = { result: results[selected], index: selected };
+      }
+    }
+    return list;
+  }, [results, resultCapacity, hasResultOverflow, selected, mode]);
+
   return (
     <div className="sql-results-pane">
       <div className="query-output-toolbar unified-results-toolbar">
-        <div
-          className="unified-results-tabs"
-          role="tablist"
-          aria-label="Query results"
-        >
-          {results.length ? (
-            results.map((result, index) => (
+        <div ref={tablistStripRef} className="unified-results-left-strip">
+          <div
+            className="unified-results-tabs"
+            role="tablist"
+            aria-label="Query results"
+          >
+            {results.length ? (
+              visibleResults.map(({ result, index }) => (
+                <button
+                  role="tab"
+                  key={index}
+                  aria-selected={mode !== "messages" && index === selected}
+                  className={result.error ? "is-error-tab" : undefined}
+                  title={result.sql}
+                  disabled={
+                    hasDirty && (mode === "messages" || index !== selected)
+                  }
+                  onClick={() => selectResultTab(index)}
+                >
+                  <Table2 size={12} />
+                  <span>
+                    {mode === "all"
+                      ? (resultMeta[index]?.shortLabel ?? `Result ${index + 1}`)
+                      : (resultMeta[index]?.label ?? `Result ${index + 1}`)}
+                  </span>
+                </button>
+              ))
+            ) : (
               <button
                 role="tab"
-                key={index}
-                aria-selected={mode !== "messages" && index === selected}
-                className={result.error ? "is-error-tab" : undefined}
-                title={result.sql}
-                disabled={
-                  hasDirty && (mode === "messages" || index !== selected)
-                }
-                onClick={() => selectResultTab(index)}
+                aria-selected={mode !== "messages"}
+                disabled={hasDirty}
+                onClick={() => updateView({ resultsMode: "tabs" })}
               >
                 <Table2 size={12} />
-                <span>
-                  {mode === "all"
-                    ? (resultMeta[index]?.shortLabel ?? `Result ${index + 1}`)
-                    : (resultMeta[index]?.label ?? `Result ${index + 1}`)}
-                </span>
+                <span>Results</span>
               </button>
-            ))
-          ) : (
-            <button
-              role="tab"
-              aria-selected={mode !== "messages"}
-              disabled={hasDirty}
-              onClick={() => updateView({ resultsMode: "tabs" })}
-            >
-              <Table2 size={12} />
-              <span>Results</span>
-            </button>
+            )}
+          </div>
+
+          {hasResultOverflow && (
+            <Popover.Root open={overflowOpen} onOpenChange={setOverflowOpen}>
+              <Popover.Trigger asChild>
+                <button
+                  type="button"
+                  className="results-tab-overflow-btn"
+                  aria-label="More query results"
+                  title={`All results (${results.length})`}
+                >
+                  <MoreHorizontal size={14} />
+                </button>
+              </Popover.Trigger>
+              <Popover.Portal>
+                <Popover.Content
+                  className="sql-tab-menu results-tab-overflow-menu"
+                  sideOffset={6}
+                  align="start"
+                  onOpenAutoFocus={(e) => e.preventDefault()}
+                >
+                  <div className="sql-tab-menu-list">
+                    {results.map((result, index) => {
+                      const isCurrent =
+                        mode !== "messages" && index === selected;
+                      return (
+                        <button
+                          key={index}
+                          disabled={hasDirty && !isCurrent}
+                          onClick={() => {
+                            selectResultTab(index);
+                            setOverflowOpen(false);
+                          }}
+                        >
+                          <Table2 size={13} />
+                          <span className="sql-tab-menu-item-info">
+                            <span>
+                              {resultMeta[index]?.label ??
+                                `Result ${index + 1}`}
+                            </span>
+                            {result.sql && (
+                              <small>{result.sql.slice(0, 50)}</small>
+                            )}
+                          </span>
+                          {result.error && <span className="status-dot red" />}
+                          {isCurrent && <Check size={14} />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </Popover.Content>
+              </Popover.Portal>
+            </Popover.Root>
           )}
+
           <button
             role="tab"
             aria-selected={mode === "messages"}
-            className={hasError ? "is-error-tab" : undefined}
+            className={
+              "unified-messages-tab" + (hasError ? " is-error-tab" : "")
+            }
             disabled={hasDirty}
             onClick={() => updateView({ resultsMode: "messages" })}
           >

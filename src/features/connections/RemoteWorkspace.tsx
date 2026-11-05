@@ -1,3 +1,4 @@
+import { updateSqlTabView } from "../sql/view-state";
 import { editableResult } from "../sql/editable-result";
 import { saveQueryResult } from "./save-query-result";
 import { currentSource } from "./sources";
@@ -25,7 +26,16 @@ import {
   useState,
   type MutableRefObject,
 } from "react";
-import { LoaderCircle, RefreshCw, Rows3, Table2, X } from "lucide-react";
+import * as Popover from "@radix-ui/react-popover";
+import {
+  Check,
+  LoaderCircle,
+  MoreHorizontal,
+  RefreshCw,
+  Rows3,
+  Table2,
+  X,
+} from "lucide-react";
 import { Button } from "../../components/ui/button";
 import type { TableDefinition, WorkspaceDefinition } from "../../types/schema";
 import { useStore } from "../schema/store";
@@ -184,6 +194,38 @@ export function RemoteWorkspace({
     const timer = setTimeout(() => setShowLoading(true), 150);
     return () => clearTimeout(timer);
   }, [dataLoading]);
+
+  const dataTablistStripRef = useRef<HTMLDivElement>(null);
+  const [dataStripWidth, setDataStripWidth] = useState(0);
+  const [dataOverflowOpen, setDataOverflowOpen] = useState(false);
+
+  useEffect(() => {
+    const el = dataTablistStripRef.current;
+    if (!el) return;
+    if (el.clientWidth > 0) {
+      setDataStripWidth(el.clientWidth);
+    }
+    const obs = new ResizeObserver(([entry]) => {
+      setDataStripWidth(entry.contentRect.width);
+    });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [mode]);
+
+  const availableForDataTabs =
+    dataStripWidth > 0 ? Math.max(120, dataStripWidth - 40) : 400;
+  const dataTableCapacity = Math.max(1, Math.floor(availableForDataTabs / 150));
+  const hasDataTableOverflow = openTables.length > dataTableCapacity;
+
+  const visibleTables = useMemo(() => {
+    if (!hasDataTableOverflow) return openTables;
+    const count = Math.max(1, dataTableCapacity);
+    const list = openTables.slice(0, count);
+    if (activeTable && !list.some((tbl) => tbl.id === activeTable.id)) {
+      list[list.length - 1] = activeTable;
+    }
+    return list;
+  }, [openTables, dataTableCapacity, hasDataTableOverflow, activeTable]);
   const cached = tableId
     ? cachedTablePage(cacheScope, tableId, page, tableSignature)
     : undefined;
@@ -366,6 +408,7 @@ export function RemoteWorkspace({
       (selection.current.id === tab.id && selection.current.sql.trim()
         ? selection.current.sql
         : tab.sql);
+    updateSqlTabView(`${w.id}:${tab.id}`, { resultsVisible: true });
     try {
       await task(async () => {
         setResults((current) => ({ ...current, [tab.id]: [] }));
@@ -633,60 +676,157 @@ export function RemoteWorkspace({
         <div className="pg-data" aria-busy={dataLoading}>
           <div className="compact-toolbar data-tables-toolbar">
             {openTables.length > 0 ? (
-              <div
-                className="data-table-tabs"
-                role="tablist"
-                aria-label="Open tables"
-              >
-                {openTables.map((tbl) => {
-                  const isCurrent =
-                    dataLayout === "tabs" && tbl.id === activeTable?.id;
-                  return (
-                    <div
-                      key={tbl.id}
-                      className={`data-table-tab${isCurrent ? " is-active" : ""}`}
-                    >
-                      <button
-                        type="button"
-                        role="tab"
-                        aria-selected={isCurrent}
-                        className="data-table-tab-btn"
-                        onClick={() => {
-                          onSelectTable?.(tbl.id);
-                          if (dataLayout === "stack") {
-                            setCollapsedStackTables((prev) => {
-                              if (!prev.has(tbl.id)) return prev;
-                              const next = new Set(prev);
-                              next.delete(tbl.id);
-                              return next;
-                            });
-                          }
-                        }}
+              <div ref={dataTablistStripRef} className="data-tables-left-strip">
+                <div
+                  className="data-table-tabs"
+                  role="tablist"
+                  aria-label="Open tables"
+                >
+                  {visibleTables.map((tbl) => {
+                    const isCurrent =
+                      dataLayout === "tabs" && tbl.id === activeTable?.id;
+                    return (
+                      <div
+                        key={tbl.id}
+                        className={`data-table-tab${isCurrent ? " is-active" : ""}`}
+                        onDragStart={(event) => event.preventDefault()}
                       >
-                        <Table2 size={12} />
-                        <span className="data-table-tab-name">
-                          {tbl.namespace
-                            ? `${tbl.namespace}.${tbl.name}`
-                            : tbl.name}
-                        </span>
-                      </button>
-                      {openTables.length > 1 && onCloseTable && (
                         <button
                           type="button"
-                          className="data-table-tab-close"
-                          title={`Close ${tbl.name}`}
-                          aria-label={`Close ${tbl.name}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onCloseTable(tbl.id);
+                          role="tab"
+                          draggable={false}
+                          aria-selected={isCurrent}
+                          className="data-table-tab-btn"
+                          onClick={() => {
+                            onSelectTable?.(tbl.id);
+                            if (dataLayout === "stack") {
+                              setCollapsedStackTables((prev) => {
+                                if (!prev.has(tbl.id)) return prev;
+                                const next = new Set(prev);
+                                next.delete(tbl.id);
+                                return next;
+                              });
+                            }
                           }}
                         >
-                          <X size={11} />
+                          <Table2 size={12} />
+                          <span className="data-table-tab-name">
+                            {tbl.namespace
+                              ? `${tbl.namespace}.${tbl.name}`
+                              : tbl.name}
+                          </span>
                         </button>
-                      )}
-                    </div>
-                  );
-                })}
+                        {openTables.length > 1 && onCloseTable && (
+                          <button
+                            type="button"
+                            className="data-table-tab-close"
+                            title={`Close ${tbl.name}`}
+                            aria-label={`Close ${tbl.name}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onCloseTable(tbl.id);
+                            }}
+                          >
+                            <X size={11} />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {hasDataTableOverflow && (
+                  <Popover.Root
+                    open={dataOverflowOpen}
+                    onOpenChange={setDataOverflowOpen}
+                  >
+                    <Popover.Trigger asChild>
+                      <button
+                        type="button"
+                        className="data-tab-overflow-btn"
+                        aria-label="More open tables"
+                        title={`All open tables (${openTables.length})`}
+                      >
+                        <MoreHorizontal size={14} />
+                      </button>
+                    </Popover.Trigger>
+                    <Popover.Portal>
+                      <Popover.Content
+                        className="sql-tab-menu data-tab-overflow-menu"
+                        sideOffset={6}
+                        align="start"
+                        onOpenAutoFocus={(e) => e.preventDefault()}
+                      >
+                        <div className="sql-tab-menu-list">
+                          {openTables.map((tbl) => {
+                            const isCurrent =
+                              dataLayout === "tabs" &&
+                              tbl.id === activeTable?.id;
+                            const tableName = tbl.namespace
+                              ? `${tbl.namespace}.${tbl.name}`
+                              : tbl.name;
+                            return (
+                              <div
+                                key={tbl.id}
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  width: "100%",
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  style={{ flex: 1, minWidth: 0 }}
+                                  onClick={() => {
+                                    onSelectTable?.(tbl.id);
+                                    if (dataLayout === "stack") {
+                                      setCollapsedStackTables((prev) => {
+                                        if (!prev.has(tbl.id)) return prev;
+                                        const next = new Set(prev);
+                                        next.delete(tbl.id);
+                                        return next;
+                                      });
+                                    }
+                                    setDataOverflowOpen(false);
+                                  }}
+                                >
+                                  <Table2 size={13} />
+                                  <span className="sql-tab-menu-item-info">
+                                    <span>{tableName}</span>
+                                    <small>
+                                      {tbl.columns?.length ?? 0} columns
+                                    </small>
+                                  </span>
+                                  {isCurrent && <Check size={14} />}
+                                </button>
+                                {openTables.length > 1 && onCloseTable && (
+                                  <button
+                                    type="button"
+                                    className="sql-tab-close"
+                                    title={`Close ${tbl.name}`}
+                                    aria-label={`Close ${tbl.name}`}
+                                    style={{
+                                      width: 22,
+                                      height: 22,
+                                      padding: 3,
+                                      flexShrink: 0,
+                                    }}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onCloseTable(tbl.id);
+                                    }}
+                                  >
+                                    <X size={11} />
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </Popover.Content>
+                    </Popover.Portal>
+                  </Popover.Root>
+                )}
               </div>
             ) : (
               <span>

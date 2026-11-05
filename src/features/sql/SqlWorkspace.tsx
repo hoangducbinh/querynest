@@ -325,7 +325,10 @@ function SqlPane({
             className="sql-run-button"
             aria-label={hasSelection ? "Run selected SQL" : "Run SQL"}
             disabled={disabled}
-            onClick={() => onRun(activeId, hasSelection ? selection : value)}
+            onClick={() => {
+              if (!results) setResults(true);
+              onRun(activeId, hasSelection ? selection : value);
+            }}
           >
             {busy ? (
               <LoaderCircle className="spin" size={14} />

@@ -421,7 +421,7 @@ export function QueryTabs({
     onTabsChange(remaining, keepTab.id);
   }
 
-  const capacity = Math.max(1, Math.floor((width - 64) / 168));
+  const capacity = Math.max(1, Math.floor((width - 64) / 160));
   const overflowing = tabs.length > capacity;
   const visible = overflowing
     ? tabs
@@ -471,6 +471,8 @@ export function QueryTabs({
               (tab.locked ? " is-locked" : "")
             }
             key={tab.id}
+            data-tab-id={tab.id}
+            onDragStart={(event) => event.preventDefault()}
             onContextMenu={(event) => {
               event.preventDefault();
               event.stopPropagation();
@@ -521,9 +523,50 @@ export function QueryTabs({
             ) : (
               <button
                 role="tab"
+                draggable={false}
                 disabled={busy}
                 aria-selected={tab.id === activeId}
-                title={`${tab.name} · ${info.connFullName} / ${info.dbName}${tab.locked ? " · Locked" : ""}${tab.pinned ? " · Pinned" : ""}\n${tab.locked ? "Right-click to unlock or manage tab" : "Double-click to rename · Right-click for tab options"}`}
+                tabIndex={tab.id === activeId ? 0 : -1}
+                onKeyDown={(event) => {
+                  if (
+                    busy ||
+                    event.altKey ||
+                    event.ctrlKey ||
+                    event.metaKey ||
+                    !["ArrowLeft", "ArrowRight", "Home", "End"].includes(
+                      event.key,
+                    )
+                  )
+                    return;
+                  event.preventDefault();
+                  const index = tabs.findIndex((item) => item.id === tab.id);
+                  const next =
+                    tabs[
+                      event.key === "Home"
+                        ? 0
+                        : event.key === "End"
+                          ? tabs.length - 1
+                          : (index +
+                              (event.key === "ArrowRight"
+                                ? 1
+                                : tabs.length - 1)) %
+                            tabs.length
+                    ];
+                  onTabsChange(tabs, next.id);
+                  requestAnimationFrame(() => {
+                    const button = Array.from(
+                      container.current?.querySelectorAll<HTMLButtonElement>(
+                        '[role="tab"]',
+                      ) ?? [],
+                    ).find(
+                      (item) =>
+                        item.closest<HTMLElement>("[data-tab-id]")?.dataset
+                          .tabId === next.id,
+                    );
+                    button?.focus();
+                  });
+                }}
+                title={`${tab.name} · ${info.connFullName}${info.dbName ? " / " + info.dbName : ""}${tab.locked ? " · Locked" : ""}${tab.pinned ? " · Pinned" : ""}\n${tab.locked ? "Right-click to unlock or manage tab" : "Double-click to rename · Right-click for tab options"}`}
                 onClick={() => onTabsChange(tabs, tab.id)}
                 onDoubleClick={() => {
                   if (busy || tab.locked) return;
@@ -546,14 +589,17 @@ export function QueryTabs({
                     )}
                   </span>
                   <small className="sql-tab-context">
-                    {info.connName} · {info.dbName}
+                    {info.connName}
+                    {info.dbName ? " · " + info.dbName : ""}
                   </small>
                 </span>
               </button>
             )}
             {!tab.pinned && !tab.locked && (
               <button
+                className="sql-tab-close"
                 aria-label={`Close ${tab.name}`}
+                tabIndex={tab.id === activeId ? 0 : -1}
                 disabled={busy}
                 onClick={() => void closeTab(tab)}
               >
@@ -617,7 +663,8 @@ export function QueryTabs({
                         <span className="sql-tab-menu-item-info">
                           <span>{tab.name}</span>
                           <small>
-                            {info.connName} · {info.dbName}
+                            {info.connName}
+                            {info.dbName ? " · " + info.dbName : ""}
                           </small>
                         </span>
                         {tab.id === activeId && <Check size={14} />}
