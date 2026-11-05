@@ -6,7 +6,7 @@ import {
   saveWorkspace,
   storage,
 } from "./workspaces";
-import { createWorkspace } from "../../features/schema/core";
+import { createWorkspace } from "../../test/fixtures";
 import { defaultMssqlConfig } from "../../features/connections/model";
 beforeEach(async () => {
   await storage.workspaces.clear();

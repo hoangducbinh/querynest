@@ -2,7 +2,7 @@ import "fake-indexeddb/auto";
 import Dexie from "dexie";
 import { it, expect } from "vitest";
 import { storage } from "./workspaces";
-import { createWorkspace } from "../../features/schema/core";
+import { createWorkspace } from "../../test/fixtures";
 import { defaultPostgresConfig } from "../../features/postgres/model";
 it("upgrades old PostgreSQL workspaces without losing SQL or layout", async () => {
   storage.close();

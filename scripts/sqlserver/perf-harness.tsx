@@ -15,7 +15,6 @@ import {
   activateSource,
   updateSource,
   captureActiveSource,
-  ensureSources,
 } from "../../src/features/connections/sources";
 import { sqlCompletions } from "../../src/features/sql/completions";
 import { Spreadsheet } from "../../src/features/sample-data/Spreadsheet";
@@ -53,7 +52,7 @@ function time(name: string, fn: () => unknown, count = 5) {
 }
 function benchmark() {
   time("catalogMapping", () => catalogSchema(catalog));
-  const base = createWorkspace(false);
+  const base = createWorkspace();
   const config = defaultRemoteConfig("mssql");
   config.config.database = "AdventureWorksLT2019_Test";
   const id = attachSource(base, {
@@ -225,7 +224,7 @@ function Harness() {
   const [view, setView] = useState("none");
   const [sql, setSql] = useState("SELECT TOP (3) * FROM StressTest.WideRows");
   async function openApp() {
-    const base = createWorkspace(false);
+    const base = createWorkspace();
     base.id = "stress-perf-workspace";
     const config = defaultRemoteConfig("mssql");
     config.config.database = "AdventureWorksLT2019_Test";
@@ -261,7 +260,7 @@ function Harness() {
     profile.config.user = "sa";
     profile.config.readOnly = false;
     await storage.connections.put(profile);
-    const w = createWorkspace(false);
+    const w = createWorkspace();
     w.id = secondary ? "connection-ux-secondary" : "connection-ux-main";
     w.name = secondary
       ? "Shared connection workspace B"
@@ -278,20 +277,6 @@ function Harness() {
     await storage.workspaces.put(workspaceSnapshot(w));
     setView("app");
   }
-  async function openLocalStopCheck() {
-    setView("none");
-    const w = createWorkspace(false);
-    w.id = "stress-perf-local-stop";
-    w.name = "Local query cancellation check";
-    ensureSources(w);
-    const tabs = sqlTabs(w).map((tab) => ({
-      ...tab,
-      sql: "SELECT sum(a.i * b.i) AS total FROM range(1000000) a(i) CROSS JOIN range(1000000) b(i);\n\nSELECT 99 AS must_not_run;",
-    }));
-    setSqlTabs(w, tabs, tabs[0].id);
-    await storage.workspaces.put(workspaceSnapshot(w));
-    setView("app");
-  }
   return (
     <div className="app" style={{ height: "100vh" }}>
       <div style={{ padding: 12, display: "flex", gap: 10 }}>
@@ -301,7 +286,6 @@ function Harness() {
         <button onClick={() => setView("results")}>Open SQL results</button>
       </div>
       <button onClick={openApp}>Open full workspace</button>
-      <button onClick={openLocalStopCheck}>Open local Stop check</button>
       <button onClick={() => void openConnectionUX()}>
         Open connection UX check
       </button>

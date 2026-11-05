@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import "fake-indexeddb/auto";
 import { defaultMssqlConfig, parseMssqlConfig, parseProfile } from "./model";
-import { createWorkspace, parseWorkspace } from "../schema/core";
+import { parseWorkspace } from "../schema/core";
+import { createWorkspace } from "../../test/fixtures";
 import { storage, saveConnection } from "../../lib/storage/workspaces";
 import { sqlCompletions } from "../sql/completions";
 import { catalogSchema } from "../postgres/model";

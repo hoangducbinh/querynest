@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { createWorkspace } from "../schema/core";
+import { createWorkspace } from "../../test/fixtures";
 import { currentSource } from "./sources";
 import { defaultMssqlConfig } from "./model";
 import { makeDraft } from "../sample-data/model";

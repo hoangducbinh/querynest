@@ -11,7 +11,7 @@ import {
   sourceSessionKey,
   workspaceSources,
 } from "./sources";
-import { defaultRemoteConfig } from "./model";
+import { defaultRemoteConfig, type RemoteConfig } from "./model";
 import {
   ensureDatabaseSession,
   listDatabases,
@@ -35,10 +35,10 @@ afterEach(() => {
   profiles.length = 0;
   vi.mocked(invoke).mockReset();
 });
-function setup() {
-  const w = createWorkspace(false);
+function setup(engine: RemoteConfig["engine"] = "postgres") {
+  const w = createWorkspace();
   ids.push(w.id);
-  const config = defaultRemoteConfig("postgres");
+  const config = defaultRemoteConfig(engine);
   const profile = crypto.randomUUID();
   profiles.push(profile);
   const root = attachSource(w, {
@@ -157,7 +157,7 @@ it("reuses the same saved profile across workspaces without a new login or nativ
     serverVersion: "17",
     disconnect: async () => {},
   });
-  const other = createWorkspace(false);
+  const other = createWorkspace();
   ids.push(other.id);
   const attached = attachSource(other, {
     ...config,
@@ -217,3 +217,50 @@ it("keeps the current session if an explicit reconnect fails", async () => {
   expect(getSession(key, config)?.sessionId).toBe("still-live");
   expect(disconnect).not.toHaveBeenCalled();
 });
+
+it.each(["postgres", "mssql"] as const)(
+  "allows a fresh %s database attempt after failure and coalesces concurrent retries",
+  async (engine) => {
+    const { w, root, child, config } = setup(engine);
+    // Native disconnects are async too, including after the one-off responses below.
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    retainSession(sourceSessionKey(w.id, root), {
+      config,
+      sessionId: "root-retry",
+      serverVersion: "qa",
+      disconnect: async () => {},
+    });
+    vi.mocked(invoke).mockRejectedValueOnce({ message: "temporary failure" });
+    await expect(ensureDatabaseSession(w, child)).rejects.toMatchObject({
+      message: "temporary failure",
+    });
+    vi.mocked(invoke).mockResolvedValueOnce({
+      sessionId: "child-retry",
+      serverVersion: "qa",
+      catalog: { tables: [], relationships: [] },
+    });
+    await Promise.all([
+      ensureDatabaseSession(w, child),
+      ensureDatabaseSession(w, child),
+    ]);
+    const prefix = engine === "postgres" ? "pg" : "ms";
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke).toHaveBeenLastCalledWith(`${prefix}_open_database`, {
+      sessionId: "root-retry",
+      database: "other",
+    });
+    vi.mocked(invoke).mockResolvedValueOnce(["other"]);
+    expect(
+      await listDatabases(
+        w,
+        workspaceSources(w).find((source) => source.id === child)!,
+      ),
+    ).toEqual(["other"]);
+    expect(invoke).toHaveBeenLastCalledWith(`${prefix}_databases`, {
+      sessionId: "child-retry",
+    });
+    expect(getSession(sourceSessionKey(w.id, root), config)?.sessionId).toBe(
+      "root-retry",
+    );
+  },
+);

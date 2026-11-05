@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { sqlCompletions } from "./completions";
-import { createWorkspace } from "../schema/core";
+import { createWorkspace } from "../../test/fixtures";
 import type { SqlDialect } from "./data-types";
 const schema = createWorkspace().schema;
 const complete = (marked: string, dialect: SqlDialect) =>
@@ -41,13 +41,13 @@ describe("database-specific type suggestions", () => {
       ).toBe("NVARCHAR(MAX)");
     }
   });
-  it("keeps PostgreSQL and DuckDB native types distinct", () => {
+  it("keeps PostgreSQL and SQL Server native types distinct", () => {
     expect(
       complete("SELECT 1::json|", "postgres").map((item) => item.label),
     ).toContain("JSONB");
     expect(
       complete("SELECT CAST(1 AS |)", "default").map((item) => item.label),
-    ).toContain("UHUGEINT");
+    ).toContain("JSONB");
     expect(
       complete("SELECT CAST(1 AS |)", "mssql").map((item) => item.label),
     ).not.toContain("BOOLEAN");

@@ -2,7 +2,8 @@ import { defaultPostgresConfig } from "../postgres/model";
 import { describe, expect, it } from "vitest";
 import { produce } from "immer";
 import "fake-indexeddb/auto";
-import { createWorkspace, parseWorkspace } from "../schema/core";
+import { parseWorkspace } from "../schema/core";
+import { createWorkspace } from "../../test/fixtures";
 import { defaultRemoteConfig, type ConnectionProfile } from "./model";
 import {
   attachDatabase,

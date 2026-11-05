@@ -43,23 +43,26 @@ export function ConnectionPicker({
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
   const [error, setError] = useState("");
   const sources = workspaceSources(workspace).filter(
-    (source) => !source.parentSourceId,
+    (source) => source.connection && !source.parentSourceId,
   );
-  const active = sources.find((source) => source.id === value) ?? sources[0];
+  const active =
+    workspaceSources(workspace).find((source) => source.id === value) ??
+    sources[0] ??
+    workspaceSources(workspace)[0];
   const current = workspaceSources(workspace).find(
     (source) => source.id === workspace.activeSourceId,
   );
   const connected = (source: typeof active) =>
-    !source.connection ||
-    !!getSession(
+    !!source.connection &&
+    (!!getSession(
       sourceSessionKey(workspace.id, source.id),
       source.connection,
     ) ||
-    profileSessions(source.connectionId).some(
-      (entry) =>
-        entry.connected !== false &&
-        sameServer(entry.config, source.connection!),
-    );
+      profileSessions(source.connectionId).some(
+        (entry) =>
+          entry.connected !== false &&
+          sameServer(entry.config, source.connection!),
+      ));
   useEffect(() => {
     if (!open) return;
     let stale = false;
@@ -101,11 +104,11 @@ export function ConnectionPicker({
           title={
             active.connection
               ? `${active.name} · ${active.connection.config.host} · ${connected(active) ? "Connected" : "Disconnected"}`
-              : active.name || "No connection"
+              : "Select connection"
           }
         >
           <Database size={13} />
-          <span>{active.name || "No connection"}</span>
+          <span>{active.connection ? active.name : "Select connection"}</span>
           <ChevronDown size={11} />
         </Button>
       </Menu.Trigger>

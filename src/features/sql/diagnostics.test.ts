@@ -1,6 +1,5 @@
 import { sqlStatements } from "./statements";
-import { describe, it, expect, vi } from "vitest";
-import { diagnosticForError, validateSql } from "./diagnostics";
+import { describe, it, expect } from "vitest";
 describe("SQL diagnostics", () => {
   it("splits statements without splitting quoted strings, identifiers or comments", () => {
     const sql = `-- ;\nSELECT ';', $$a;b$$, "a;b"; /* ; /* ; */ */ SELECT 2;`;
@@ -8,61 +7,6 @@ describe("SQL diagnostics", () => {
     expect(statements).toHaveLength(2);
     expect(sql.slice(statements[1].start)).toContain("SELECT 2");
     expect(sqlStatements("-- only comment\n/* x */;")).toEqual([]);
-  });
-  it("maps DuckDB caret locations into the full script", () => {
-    const sql = "\nSELECT * FROM missing_table";
-    const result = diagnosticForError(
-      sql,
-      20,
-      new Error(
-        "Catalog Error: Table with name missing_table does not exist!\n\nLINE 2: SELECT * FROM missing_table\n                      ^",
-      ),
-    );
-    expect(result.start).toBe(20 + sql.indexOf("missing_table"));
-    expect(result.end).toBe(20 + sql.length);
-  });
-  it("finds named identifiers without caret locations and skips literals", () => {
-    const sql = "SELECT 'wrong', wrong FROM customers";
-    const result = diagnosticForError(
-      sql,
-      0,
-      'Binder Error: Referenced column "wrong" not found',
-    );
-    expect(result.start).toBe(sql.indexOf("wrong FROM"));
-  });
-  it("only prepares statements and collects each error without stopping the next", async () => {
-    const prepare = vi.fn(async (sql: string) => {
-      if (sql.includes("missing"))
-        throw Error("Table with name missing does not exist");
-    });
-    const result = await validateSql(
-      "DELETE FROM customers; SELECT * FROM missing; SELECT 1",
-      prepare,
-    );
-    expect(prepare).toHaveBeenCalledTimes(3);
-    expect(result).toHaveLength(1);
-    expect(result[0].start).toBe(
-      "DELETE FROM customers; SELECT * FROM ".length,
-    );
-  });
-  it("uses a warning when earlier DDL has not been applied", async () => {
-    const result = await validateSql(
-      "CREATE TABLE new_table(id INTEGER); SELECT * FROM new_table",
-      async (sql) => {
-        if (sql.includes("SELECT"))
-          throw Error("Table with name new_table does not exist");
-      },
-    );
-    expect(result[0].warning).toBe(true);
-    expect(result[0].message).toContain("earlier schema changes");
-  });
-  it("points incomplete SQL at the end of input", () => {
-    const result = diagnosticForError(
-      "SELECT * FROM",
-      5,
-      "Parser Error: syntax error at end of input",
-    );
-    expect(result.start).toBe(18);
   });
   it("does not split semicolons inside escape-string literals", () => {
     expect(

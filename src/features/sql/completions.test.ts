@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createWorkspace } from "../schema/core";
+import { createWorkspace } from "../../test/fixtures";
 import { sqlCompletions } from "./completions";
 import { DEFAULT_SNIPPETS } from "./snippets";
 const schema = createWorkspace().schema;

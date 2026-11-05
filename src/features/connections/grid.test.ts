@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { gridChanges, gridSaveError } from "./grid";
 import { makeDraft, pasteCells, isChanged } from "../sample-data/model";
-import { createWorkspace } from "../schema/core";
+import { createWorkspace } from "../../test/fixtures";
 import { catalogSchema } from "../postgres/model";
 it("keeps exact remote values and differentiates NULL, empty and defaults", () => {
   const old = makeDraft({

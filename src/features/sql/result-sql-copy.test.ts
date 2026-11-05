@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { createWorkspace } from "../schema/core";
+import { createWorkspace } from "../../test/fixtures";
 import {
   buildCopyAsCsv,
   buildCopyAsInsert,

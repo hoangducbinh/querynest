@@ -245,7 +245,8 @@ export function MultiSqlWorkspace({
         onEditingResult={onBusy}
         getEditableResult={(tabId, result) => {
           const source = sourceFor(tabId);
-          if (source.connection?.config.readOnly) return undefined;
+          if (!source.connection || source.connection.config.readOnly)
+            return undefined;
           return editableResult(
             result,
             source.schema,
@@ -290,7 +291,7 @@ export function MultiSqlWorkspace({
             : source?.name || "Database";
         })()}
         connectionOptions={sources
-          .filter((source) => !source.parentSourceId)
+          .filter((source) => source.connection && !source.parentSourceId)
           .map((source) => ({
             id: source.id,
             name: source.name,
@@ -313,7 +314,9 @@ export function MultiSqlWorkspace({
                 ].sort((a, b) => a.localeCompare(b))
               : undefined,
             sourceId: source.id,
-            schema: source.schema,
+            schema: source.connection
+              ? source.schema
+              : { tables: [], relationships: [] },
             dialect:
               source.connection?.engine === "mssql"
                 ? "mssql"
@@ -322,7 +325,7 @@ export function MultiSqlWorkspace({
                   : "default",
             label: source.connection
               ? engineName(source.connection.engine)
-              : "DuckDB",
+              : "No connection",
             remote: !!source.connection,
           };
         }}

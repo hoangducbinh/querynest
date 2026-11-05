@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import "fake-indexeddb/auto";
-import { createWorkspace, parseWorkspace } from "../schema/core";
+import { parseWorkspace } from "../schema/core";
+import { createWorkspace } from "../../test/fixtures";
 import { DEFAULT_SNIPPETS, validateSnippets } from "./snippets";
 import { saveWorkspace, storage } from "../../lib/storage/workspaces";
 describe("workspace SQL abbreviations", () => {

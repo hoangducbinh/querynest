@@ -9,6 +9,8 @@ import {
   replaceSession,
   markConnectionUnavailable,
   withConnectionSession,
+  sameServer,
+  fingerprint,
 } from "./sessions";
 import { defaultRemoteConfig } from "./model";
 const config = defaultRemoteConfig("postgres");
@@ -233,4 +235,30 @@ it("keeps a saved profile available after its last workspace releases it", () =>
   disconnectProfile("same-profile", []);
   expect(getSession("b", config)).toBeUndefined();
   expect(disconnect).toHaveBeenCalledExactlyOnceWith("global-session");
+});
+
+it("compares server identities without ignoring credentials, TLS or read-only settings", () => {
+  const otherDatabase = structuredClone(config);
+  otherDatabase.config.database = "another_database";
+  expect(sameServer(config, otherDatabase)).toBe(true);
+  expect(fingerprint(config)).not.toBe(fingerprint(otherDatabase));
+  for (const patch of [
+    { host: "another-host" },
+    { port: 55439 },
+    { user: "another-user" },
+    { sslMode: "disable" },
+    { readOnly: !config.config.readOnly },
+  ]) {
+    expect(
+      sameServer(config, {
+        engine: "postgres",
+        config: { ...config.config, ...patch },
+      } as typeof config),
+    ).toBe(false);
+  }
+  const reordered = {
+    ...config,
+    config: Object.fromEntries(Object.entries(config.config).reverse()),
+  } as typeof config;
+  expect(fingerprint(reordered)).toBe(fingerprint(config));
 });

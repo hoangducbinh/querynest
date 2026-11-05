@@ -138,7 +138,7 @@ const fn = (
   detail: string,
   dialects?: SqlDialect[],
 ): SqlFunction => ({ name, args, signature, detail, dialects });
-const DUCK_PG: SqlDialect[] = ["default", "postgres"];
+const POSTGRES: SqlDialect[] = ["postgres"];
 const FUNCTIONS: SqlFunction[] = [
   fn(
     "COUNT",
@@ -257,36 +257,36 @@ const FUNCTIONS: SqlFunction[] = [
     "LAST_VALUE(value) OVER (...)",
     "Last value in the window",
   ),
-  fn("LENGTH", "${1:text}", "LENGTH(text)", "Number of characters", DUCK_PG),
-  fn("NOW", "", "NOW()", "Current timestamp", DUCK_PG),
+  fn("LENGTH", "${1:text}", "LENGTH(text)", "Number of characters", POSTGRES),
+  fn("NOW", "", "NOW()", "Current timestamp", POSTGRES),
   fn(
     "DATE_TRUNC",
     "'${1:month}', ${2:timestamp}",
     "DATE_TRUNC(unit, timestamp)",
     "Truncate to a date part",
-    DUCK_PG,
+    POSTGRES,
   ),
   fn(
     "EXTRACT",
     "${1:YEAR} FROM ${2:timestamp}",
     "EXTRACT(field FROM timestamp)",
     "Get a date part",
-    DUCK_PG,
+    POSTGRES,
   ),
   fn(
     "ARRAY_AGG",
     "${1:expression}",
     "ARRAY_AGG(expression)",
     "Aggregate values into a list",
-    DUCK_PG,
+    POSTGRES,
   ),
-  fn("RANDOM", "", "RANDOM()", "Random number between 0 and 1", DUCK_PG),
+  fn("RANDOM", "", "RANDOM()", "Random number between 0 and 1", POSTGRES),
   fn(
     "REGEXP_REPLACE",
     "${1:text}, ${2:pattern}, ${3:replacement}",
     "REGEXP_REPLACE(text, pattern, replacement)",
     "Regular-expression replace",
-    DUCK_PG,
+    POSTGRES,
   ),
   fn(
     "TO_CHAR",
@@ -294,34 +294,6 @@ const FUNCTIONS: SqlFunction[] = [
     "TO_CHAR(value, format)",
     "Format a value as text",
     ["postgres"],
-  ),
-  fn(
-    "STRFTIME",
-    "${1:timestamp}, '${2:%Y-%m-%d}'",
-    "STRFTIME(timestamp, format)",
-    "Format a timestamp",
-    ["default"],
-  ),
-  fn(
-    "DATE_DIFF",
-    "'${1:day}', ${2:start}, ${3:end}",
-    "DATE_DIFF(part, start, end)",
-    "Difference between dates",
-    ["default"],
-  ),
-  fn(
-    "REGEXP_MATCHES",
-    "${1:text}, ${2:pattern}",
-    "REGEXP_MATCHES(text, pattern)",
-    "Whether text matches a pattern",
-    ["default"],
-  ),
-  fn(
-    "LIST",
-    "${1:expression}",
-    "LIST(expression)",
-    "Aggregate values into a list",
-    ["default"],
   ),
   fn("LEN", "${1:text}", "LEN(text)", "Number of characters", ["mssql"]),
   fn("GETDATE", "", "GETDATE()", "Current date and time", ["mssql"]),
@@ -379,7 +351,7 @@ const FUNCTIONS: SqlFunction[] = [
     "${1:expression} AS ${2:type}",
     "TRY_CAST(expression AS type)",
     "Convert or NULL on failure",
-    ["mssql", "default"],
+    ["mssql"],
   ),
   fn(
     "FORMAT",
@@ -396,19 +368,16 @@ const FUNCTIONS: SqlFunction[] = [
     "Scalar from JSON",
     ["mssql"],
   ),
-  fn(
-    "JSON_EXTRACT",
-    "${1:json}, '${2:$.path}'",
-    "JSON_EXTRACT(json, path)",
-    "Value from JSON",
-    ["default"],
-  ),
 ];
 const functionCache = new Map<SqlDialect, SqlFunction[]>();
 export function sqlFunctions(dialect: SqlDialect): SqlFunction[] {
   let list = functionCache.get(dialect);
   if (!list) {
-    list = FUNCTIONS.filter((f) => !f.dialects || f.dialects.includes(dialect));
+    list = FUNCTIONS.filter(
+      (f) =>
+        !f.dialects ||
+        f.dialects.includes(dialect === "default" ? "postgres" : dialect),
+    );
     functionCache.set(dialect, list);
   }
   return list;

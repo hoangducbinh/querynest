@@ -12,7 +12,7 @@ interface State {
   redo: () => void;
 }
 export const useStore = create<State>((set) => ({
-  workspace: createWorkspace(false),
+  workspace: createWorkspace(),
   past: [],
   future: [],
   edit: (fn) =>

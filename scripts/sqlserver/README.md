@@ -79,16 +79,7 @@ JSON without credentials. Debug native timings should not be treated as release
 performance or a reproduction of hotspot network conditions.
 
 
-**Open local Stop check** opens a disposable local workspace with a long cross
-join followed by `SELECT 99 AS must_not_run`. Run it, confirm **Stop** appears,
-and stop it. The query should report cancellation, skip the second statement,
-and allow a fresh `SELECT 42 AS answer` without rebuilding DuckDB. This executes
-only in the isolated browser's worker, not in the SQL Server container. The
-native `live_sqlserver_driver` integration test also checks that cancellation
-interrupts WAITFOR within two seconds and that its request disappears from the
-server DMV; the fixture login must have visibility into that DMV. It verifies
-that the next query has the same @@SPID, retains temporary tables, and survives
-repeated cancellation of streaming results with transaction/session state intact.
+The native `live_sqlserver_driver` integration test checks that cancellation interrupts WAITFOR within two seconds, preserves the session and temporary tables, and removes the request from the server DMV. The fixture login needs DMV visibility. Desktop QA can also stop a long SELECT, confirm subsequent batches are skipped, and run a fresh query on the same connection.
 
 **Open connection UX check** uses official Tauri IPC mocks in the browser to
 exercise the central connection manager, Stop, tool switching and shared-profile

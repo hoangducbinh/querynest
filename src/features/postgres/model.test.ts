@@ -4,7 +4,8 @@ import {
   defaultPostgresConfig,
   parsePostgresConfig,
 } from "./model";
-import { createWorkspace, parseWorkspace } from "../schema/core";
+import { parseWorkspace } from "../schema/core";
+import { createWorkspace } from "../../test/fixtures";
 import { sqlCompletions } from "../sql/completions";
 describe("PostgreSQL workspace metadata", () => {
   it("whitelists connection fields and never imports passwords or remote rows", () => {

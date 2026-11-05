@@ -1,22 +1,6 @@
 import type { RemoteConfig } from "../features/connections/model";
 import type { MssqlConfig } from "../features/connections/model";
 import type { PostgresConfig } from "../features/postgres/model";
-export const dataTypes: string[] = [
-  "BIGINT",
-  "BOOLEAN",
-  "DATE",
-  "DECIMAL",
-  "DOUBLE PRECISION",
-  "INTEGER",
-  "JSON",
-  "REAL",
-  "SMALLINT",
-  "TEXT",
-  "TIME",
-  "TIMESTAMP",
-  "UUID",
-  "VARCHAR",
-];
 export type DataType = string;
 export interface ColumnDefinition {
   generated?: boolean;

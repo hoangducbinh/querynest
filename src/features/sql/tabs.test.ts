@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import "fake-indexeddb/auto";
-import { createWorkspace, parseWorkspace } from "../schema/core";
+import { parseWorkspace } from "../schema/core";
+import { createWorkspace } from "../../test/fixtures";
 import { activeSqlTab, sqlTabs, setSqlTabs, bindNewTabs } from "./tabs";
 import { restoreSqlLayout } from "./panes";
 import type { SqlLayout } from "../../types/schema";

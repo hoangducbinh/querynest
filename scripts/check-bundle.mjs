@@ -5,7 +5,7 @@ const dist = new URL("../dist/", import.meta.url);
 const manifest = JSON.parse(
   await readFile(new URL(".vite/manifest.json", dist), "utf8"),
 );
-// Manifest chunks exclude prebuilt DuckDB workers and WASM assets.
+// Check application chunks; worker assets are tracked separately in the manifest.
 const chunks = Object.entries(manifest).filter(
   ([, chunk]) => chunk.file.endsWith(".js") && (chunk.isEntry || chunk.name),
 );

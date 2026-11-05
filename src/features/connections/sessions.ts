@@ -30,19 +30,19 @@ function subscribe(listener: () => void) {
     listeners.delete(listener);
   };
 }
-export const fingerprint = (value: RemoteConfig) =>
-  JSON.stringify([
+function connectionIdentity(value: RemoteConfig, ignoreDatabase = false) {
+  const entries = Object.entries(value.config);
+  const settings = ignoreDatabase
+    ? entries.filter(([name]) => name !== "database")
+    : entries;
+  return JSON.stringify([
     value.engine,
-    Object.entries(value.config).sort(([a], [b]) => a.localeCompare(b)),
+    settings.sort(([a], [b]) => a.localeCompare(b)),
   ]);
+}
+export const fingerprint = (value: RemoteConfig) => connectionIdentity(value);
 export function sameServer(a: RemoteConfig, b: RemoteConfig) {
-  return (
-    fingerprint({
-      ...a,
-      config: { ...a.config, database: "" },
-    } as RemoteConfig) ===
-    fingerprint({ ...b, config: { ...b.config, database: "" } } as RemoteConfig)
-  );
+  return connectionIdentity(a, true) === connectionIdentity(b, true);
 }
 function lookup(key: string) {
   return (
@@ -73,15 +73,11 @@ export function useSessionRevision() {
   return useSyncExternalStore(subscribe, () => revision);
 }
 export function profileSessions(profileId?: string) {
-  return profileId
-    ? [
-        ...new Map(
-          [...sessions.values()]
-            .filter((s) => s.profileId === profileId)
-            .map((s) => [s.sessionId, s]),
-        ).values(),
-      ]
-    : [];
+  if (!profileId) return [];
+  const unique = new Map<string, RetainedSession>();
+  for (const value of sessions.values())
+    if (value.profileId === profileId) unique.set(value.sessionId, value);
+  return [...unique.values()];
 }
 export function findProfileSession(
   profileId: string | undefined,
@@ -93,11 +89,11 @@ export function findProfileSession(
   );
 }
 function closeIfUnreferenced(value: RetainedSession) {
-  if (![...sessions.values()].some((s) => s.sessionId === value.sessionId)) {
-    releaseTableSession(value.sessionId);
-    releaseGridSession(value.sessionId);
-    void value.disconnect(value.sessionId).catch(() => {});
-  }
+  for (const entry of sessions.values())
+    if (entry.sessionId === value.sessionId) return;
+  releaseTableSession(value.sessionId);
+  releaseGridSession(value.sessionId);
+  void value.disconnect(value.sessionId).catch(() => {});
 }
 export function retainSession(key: string, value: RetainedSession) {
   if (
@@ -152,9 +148,11 @@ export function disconnectProfile(
   profileId: string | undefined,
   keys: string[],
 ) {
-  const targets = new Set(
-    keys.flatMap((key) => (lookup(key) ? [lookup(key)!.sessionId] : [])),
-  );
+  const targets = new Set<string>();
+  for (const key of keys) {
+    const entry = lookup(key);
+    if (entry) targets.add(entry.sessionId);
+  }
   if (profileId)
     for (const value of profileSessions(profileId))
       targets.add(value.sessionId);

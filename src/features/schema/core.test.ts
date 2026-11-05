@@ -1,25 +1,15 @@
 import { describe, it, expect } from "vitest";
-import {
-  createWorkspace,
-  parseWorkspace,
-  validateRelationship,
-  validateSchema,
-} from "./core";
-import { generateDDL } from "../../lib/ddl/generate";
+import { parseWorkspace, validateRelationship, validateSchema } from "./core";
+import { createWorkspace } from "../../test/fixtures";
+import { quote } from "../../lib/sql/identifiers";
+import { createWorkspace as createEmptyWorkspace } from "./core";
 import { useStore } from "./store";
 import "fake-indexeddb/auto";
 import { saveWorkspace, storage } from "../../lib/storage/workspaces";
 describe("canonical schema", () => {
-  it("validates the starter schema and generates dependency-ordered DDL", () => {
+  it("validates imported legacy schema metadata", () => {
     const w = createWorkspace();
     expect(validateSchema(w.schema)).toEqual([]);
-    const ddl = generateDDL(w.schema);
-    expect(ddl.indexOf('CREATE TABLE "customers"')).toBeLessThan(
-      ddl.indexOf('CREATE TABLE "orders"'),
-    );
-    expect(ddl).toContain(
-      'FOREIGN KEY ("customer_id") REFERENCES "customers" ("id")',
-    );
   });
   it("rejects mismatched types and non-unique references", () => {
     const w = createWorkspace();
@@ -45,37 +35,17 @@ describe("canonical schema", () => {
     r.targetColumns.reverse();
     expect(validateRelationship(w.schema, r)).toBeUndefined();
   });
-  it("detects cycles without recursively failing", () => {
-    const w = createWorkspace();
-    w.schema.relationships.push({
-      ...w.schema.relationships[0],
-      id: "cycle",
-      sourceTable: w.schema.tables[0].id,
-      sourceColumns: [w.schema.tables[0].columns[0].id],
-      targetTable: w.schema.tables[1].id,
-      targetColumns: [w.schema.tables[1].columns[0].id],
-    });
-    expect(() => generateDDL(w.schema)).toThrow(/Cyclic/);
-  });
   it("quotes identifiers safely", () => {
-    const w = createWorkspace(false);
-    w.schema.tables.push({
-      id: "a",
-      name: 'a"b',
-      position: { x: 0, y: 0 },
-      columns: [
-        {
-          id: "c",
-          name: "select",
-          type: "INTEGER",
-          nullable: true,
-          unique: false,
-          defaultValue: "",
-        },
-      ],
-      primaryKey: [],
-    });
-    expect(generateDDL(w.schema)).toContain('"a""b"');
+    expect(quote('a"b')).toBe('"a""b"');
+    expect(quote("select")).toBe('"select"');
+  });
+  it("starts with an empty session requiring a real connection", () => {
+    const workspace = createEmptyWorkspace();
+    expect(workspace.sql).toBe("");
+    expect(workspace.schema).toEqual({ tables: [], relationships: [] });
+    expect(workspace.data).toEqual({});
+    expect(workspace.postgres).toBeUndefined();
+    expect(workspace.mssql).toBeUndefined();
   });
   it("undoes and redoes schema edits", () => {
     useStore.getState().load(createWorkspace(false));

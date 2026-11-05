@@ -103,8 +103,8 @@ function SqlConnectionControls({
           onSelect={(id) => onTabConnectionChange?.(activeId, id)}
         />
         <DatabasePicker
-          value={tabContext.database ?? "main"}
-          databases={tabContext.databases ?? ["main"]}
+          value={tabContext.database ?? "Select database"}
+          databases={tabContext.databases ?? []}
           disabled={busy || !tabContext.remote}
           onDiscover={() => onDiscoverTabDatabases?.(activeId)}
           onSelect={(database) => onTabDatabaseChange?.(activeId, database)}
@@ -233,7 +233,7 @@ function SqlPane({
             role="status"
             title={
               validationStatus ||
-              `${validationSource ?? "DuckDB"} checks SQL without executing it`
+              `${validationSource ?? "SQL"} checks SQL without executing it`
             }
           >
             {validationStatus}
@@ -281,9 +281,7 @@ function SqlPane({
             <Button
               title={splitOpen ? "Close SQL split" : "Split SQL editor"}
               aria-pressed={!!splitOpen}
-              className={
-                "sql-icon-button" + (splitOpen ? " is-active" : "")
-              }
+              className={"sql-icon-button" + (splitOpen ? " is-active" : "")}
               onClick={onSplit}
               disabled={busy}
             >
@@ -351,11 +349,7 @@ function SqlPane({
             readOnly={!!tabs.find((t) => t.id === activeId)?.locked}
             schema={tabContext?.schema}
             dialect={tabContext?.dialect}
-            validationEnabled={
-              !disabled &&
-              !tabContext?.remote &&
-              !(validate && validationSource !== "DuckDB")
-            }
+            validationEnabled={!disabled && !tabContext?.remote && !validate}
             validate={validate}
             validationSource={validationSource}
             onValidation={setValidationStatus}
@@ -425,7 +419,7 @@ function SqlPane({
             <QueryResults
               results={queryResults ?? []}
               tabId={activeId}
-              viewKey={`sql:${viewKey}:${tabContext?.sourceId ?? "local"}`}
+              viewKey={`sql:${viewKey}:${tabContext?.sourceId ?? "unassigned"}`}
               view={view}
               updateView={updateView}
               busy={busy}

@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import { describe, expect, it } from "vitest";
 import { storage } from "../../lib/storage/workspaces";
-import { createWorkspace } from "../schema/core";
+import { createWorkspace } from "../../test/fixtures";
 import { effectiveAbbreviations } from "./snippets";
 import {
   saveGlobalAbbreviations,

@@ -42,7 +42,7 @@ export function WorkspaceConnectionControls({
           ),
         ]),
       ].sort((a, b) => a.localeCompare(b))
-    : ["main"];
+    : [];
   async function discover() {
     if (!active.connection || root.databases || !isTauri()) return;
     try {
@@ -68,7 +68,7 @@ export function WorkspaceConnectionControls({
         onSelect={(id) => onSelect(id).catch(onError)}
       />
       <DatabasePicker
-        value={active.connection?.config.database ?? "main"}
+        value={active.connection?.config.database ?? "Select database"}
         databases={databases}
         disabled={busy || !active.connection}
         onDiscover={discover}

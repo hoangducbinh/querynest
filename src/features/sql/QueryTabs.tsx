@@ -85,23 +85,14 @@ export async function openSqlFilesIntoTabs(
     let candidate = `${rawBase}.sql`;
     let num = 2;
 
-    if (
-      i === 0 &&
-      targetTab &&
-      !targetTab.locked &&
-      !targetTab.sql.trim()
-    ) {
+    if (i === 0 && targetTab && !targetTab.locked && !targetTab.sql.trim()) {
       while (
-        currentTabs.some(
-          (t) => t.id !== targetTab.id && t.name === candidate,
-        )
+        currentTabs.some((t) => t.id !== targetTab.id && t.name === candidate)
       ) {
         candidate = `${rawBase}-${num++}.sql`;
       }
       currentTabs = currentTabs.map((t) =>
-        t.id === targetTab.id
-          ? { ...t, name: candidate, sql: text }
-          : t,
+        t.id === targetTab.id ? { ...t, name: candidate, sql: text } : t,
       );
       nextActiveId = targetTab.id;
     } else {
@@ -191,14 +182,16 @@ export function QueryTabs({
   }, [contextMenu]);
 
   const allSources = workspaceSources(workspace);
-  const rootSources = allSources.filter((s) => !s.parentSourceId);
+  const rootSources = allSources.filter(
+    (s) => s.connection && !s.parentSourceId,
+  );
 
   function getTabContextInfo(tab: SqlTab) {
     const source = tabSource(workspace, tab);
     const root = connectionRoot(workspace, source);
-    const connName = root.name || "Database";
-    const connFullName = root.name || "Database";
-    const dbName = source.connection?.config.database ?? "main";
+    const connName = source.connection ? root.name : "No connection";
+    const connFullName = connName;
+    const dbName = source.connection?.config.database ?? "";
     const databases = source.connection
       ? [
           ...new Set([
@@ -209,7 +202,7 @@ export function QueryTabs({
             ),
           ]),
         ].sort((a, b) => a.localeCompare(b))
-      : ["main"];
+      : [];
     return {
       source,
       root,
@@ -224,10 +217,7 @@ export function QueryTabs({
   function isRootConnected(root: (typeof rootSources)[number]) {
     return (
       !root.connection ||
-      !!getSession(
-        sourceSessionKey(workspace.id, root.id),
-        root.connection,
-      ) ||
+      !!getSession(sourceSessionKey(workspace.id, root.id), root.connection) ||
       profileSessions(root.connectionId).some(
         (entry) =>
           entry.connected !== false &&
@@ -717,9 +707,7 @@ export function QueryTabs({
             role="menuitem"
             disabled={!!contextTab.locked}
             title={
-              contextTab.locked
-                ? "Unlock editing before renaming"
-                : undefined
+              contextTab.locked ? "Unlock editing before renaming" : undefined
             }
             onClick={() => {
               if (contextTab.locked) return;
@@ -819,10 +807,7 @@ export function QueryTabs({
                     </span>
                     <span className="sql-tab-ctx-subname">{label}</span>
                     {src.connection && ready && (
-                      <span
-                        className="connection-menu-dot"
-                        title="Connected"
-                      />
+                      <span className="connection-menu-dot" title="Connected" />
                     )}
                   </button>
                 );
@@ -907,9 +892,7 @@ export function QueryTabs({
                       role="menuitemradio"
                       aria-checked={isSelected}
                       className={isSelected ? "is-selected" : undefined}
-                      onClick={() =>
-                        handleChangeTabDatabase(contextTab.id, db)
-                      }
+                      onClick={() => handleChangeTabDatabase(contextTab.id, db)}
                     >
                       <span className="sql-tab-ctx-check">
                         {isSelected && <Check size={11} />}

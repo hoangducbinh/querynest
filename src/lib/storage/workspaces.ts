@@ -90,7 +90,7 @@ export async function deleteWorkspace(id: string, activeId: string) {
       if (id === activeId) {
         replacement = await storage.workspaces.orderBy("updatedAt").last();
         if (!replacement) {
-          replacement = createWorkspace(false);
+          replacement = createWorkspace();
           replacement.sql = "";
         }
         replacement = { ...replacement, updatedAt: Date.now() };

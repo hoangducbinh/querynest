@@ -1,6 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
 import type { WorkspaceDefinition, WorkspaceSource } from "../../types/schema";
-import type { PgCatalog } from "../postgres/model";
 import {
   connectionRoot,
   databaseSources,
@@ -19,11 +17,6 @@ import {
 } from "./sessions";
 import { remoteClient } from "./client";
 
-export interface DatabaseConnectionResult {
-  sessionId: string;
-  serverVersion: string;
-  catalog: PgCatalog;
-}
 const opening = new Map<string, Promise<void>>();
 export async function ensureDatabaseSession(
   w: WorkspaceDefinition,
@@ -37,17 +30,12 @@ export async function ensureDatabaseSession(
   const profileId = root.connectionId;
   const shared = findProfileSession(profileId, config);
   if (!getSession(key, config) && shared) retainSession(key, shared);
-  try {
-    await withConnectionSession(key, config, async () => {});
-    return;
-  } catch (error) {
-    if (!(error instanceof NeedsConnection)) throw error;
-  }
+  if (getSession(key, config)) return;
   const pending = opening.get(key);
   if (pending) return pending;
   const promise = (async () => {
     const existing = getSession(key, config, true);
-    const candidates = [
+    const entry = [
       existing,
       ...databaseSources(w, root.id).map((sibling) =>
         sibling.connection
@@ -59,34 +47,22 @@ export async function ensureDatabaseSession(
           : undefined,
       ),
       ...profileSessions(profileId),
-    ].filter(
-      (entry): entry is NonNullable<typeof entry> =>
-        !!entry && sameServer(entry.config, config),
+    ].find((candidate) => candidate && sameServer(candidate.config, config));
+    if (!entry) throw new NeedsConnection();
+    const result = await remoteClient(config.engine).openDatabase(
+      entry.sessionId,
+      config.config.database,
     );
-    const tried = new Set<string>();
-    for (const entry of candidates) {
-      if (tried.has(entry.sessionId)) continue;
-      tried.add(entry.sessionId);
-      const result = await invoke<DatabaseConnectionResult>(
-        config.engine === "postgres" ? "pg_open_database" : "ms_open_database",
-        {
-          sessionId: entry.sessionId,
-          database: config.config.database,
-        },
-      );
-      const value = {
-        ...result,
-        config,
-        profileId,
-        connected: true,
-        disconnect: remoteClient(config.engine).disconnect,
-      };
-      if (existing?.sessionId === entry.sessionId)
-        replaceSession(entry.sessionId, value);
-      retainSession(key, value);
-      return;
-    }
-    throw new NeedsConnection();
+    const value = {
+      ...result,
+      config,
+      profileId,
+      connected: true,
+      disconnect: remoteClient(config.engine).disconnect,
+    };
+    if (existing?.sessionId === entry.sessionId)
+      replaceSession(entry.sessionId, value);
+    retainSession(key, value);
   })();
   opening.set(key, promise);
   try {
@@ -113,12 +89,7 @@ export async function listDatabases(
   source: WorkspaceSource,
 ) {
   return withDatabaseSession(w, source, (session) =>
-    invoke<string[]>(
-      source.connection?.engine === "postgres"
-        ? "pg_databases"
-        : "ms_databases",
-      { sessionId: session.sessionId },
-    ),
+    remoteClient(session.config.engine).databases(session.sessionId),
   );
 }
 
@@ -134,14 +105,9 @@ export async function reconnectDatabase(
       sameServer(entry.config, source.connection!),
     );
   if (!existing) throw new NeedsConnection();
-  const result = await invoke<DatabaseConnectionResult>(
-    source.connection.engine === "postgres"
-      ? "pg_open_database"
-      : "ms_open_database",
-    {
-      sessionId: existing.sessionId,
-      database: source.connection.config.database,
-    },
+  const result = await remoteClient(source.connection.engine).openDatabase(
+    existing.sessionId,
+    source.connection.config.database,
   );
   const value = {
     ...result,

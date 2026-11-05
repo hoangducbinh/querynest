@@ -24,7 +24,6 @@ import {
   requestConnection,
 } from "../features/connections/sessions";
 import { readDarkAppearance, saveDarkAppearance } from "./appearance";
-import * as Dialog from "@radix-ui/react-dialog";
 import {
   Braces,
   Check,
@@ -39,26 +38,18 @@ import {
   Link2,
   Moon,
   PanelLeftClose,
-  Plus,
-  Redo2,
   Search,
   Sun,
   Table2,
   Terminal,
-  Undo2,
   Upload,
   X,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { DialogHost, confirmAction } from "../lib/dialogs";
 import { useStore } from "../features/schema/store";
-import { id, parseWorkspace, validateSchema } from "../features/schema/core";
-import { TableEditor } from "../features/schema/TableEditor";
-import { newTable } from "../features/schema/table-edit";
-import { ColumnEditor } from "../features/schema/ColumnEditor";
-import { planTableEdit } from "../features/schema/table-edit";
+import { id, parseWorkspace } from "../features/schema/core";
 import { activeSqlTab, sqlTabs, setSqlTabs } from "../features/sql/tabs";
-import { generateDDL } from "../lib/ddl/generate";
 import { RemoteWorkspace } from "../features/connections/RemoteWorkspace";
 import type { ConnectionProfile } from "../features/connections/model";
 import { saveJsonFile } from "../lib/platform/save-file";
@@ -77,7 +68,7 @@ const modes = [
 export default function App() {
   useLoadSnippetPreferences();
   const [abbreviations, setAbbreviations] = useState(false);
-  const { workspace: w, edit, load, undo, redo, past, future } = useStore();
+  const { workspace: w, edit, load } = useStore();
   const [mode, setMode] = useState<Mode>("sql");
   useLayoutEffect(() => {
     if (mode !== "sql" || !w.sources) return;
@@ -94,15 +85,13 @@ export default function App() {
   useEffect(() => {
     tableList.current?.scrollTo({ top: 0 });
   }, [tablePage, search, w.id, w.activeSourceId]);
-  const filteredTables = useMemo(
-    () => {
-      const needle = search.toLowerCase();
-      return w.schema.tables.filter((table) =>
-        `${table.namespace ?? ""}.${table.name}`.toLowerCase().includes(needle),
-      );
-    },
-    [w.schema.tables, search],
-  );
+  const filteredTables = useMemo(() => {
+    if (!w.postgres && !w.mssql) return [];
+    const needle = search.toLowerCase();
+    return w.schema.tables.filter((table) =>
+      `${table.namespace ?? ""}.${table.name}`.toLowerCase().includes(needle),
+    );
+  }, [w.schema.tables, w.postgres, w.mssql, search]);
   const tablePageCount = Math.max(1, Math.ceil(filteredTables.length / 50));
   const currentTablePage = Math.min(tablePage, tablePageCount - 1);
   const [expandedTables, setExpandedTables] = useState<string[]>([]);
@@ -117,15 +106,6 @@ export default function App() {
     const available = workspaceRef.current?.clientWidth ?? 1000;
     setSidebarWidth(Math.max(160, Math.min(480, available - 420, width)));
   };
-  const [tableEditor, setTableEditor] = useState<{
-    table: TableDefinition;
-    isNew: boolean;
-  } | null>(null);
-  const [columnEditor, setColumnEditor] = useState<{
-    tableId: string;
-    columnId?: string;
-    anchor: HTMLButtonElement;
-  } | null>(null);
   const platform = desktopPlatform();
   const [dark, setDark] = useState(readDarkAppearance);
   useDesktopChrome(dark);
@@ -143,8 +123,6 @@ export default function App() {
   const remoteRun = useRef<() => void>(() => {});
 
   const remote = !!(w.postgres || w.mssql);
-  const [ddl, setDdl] = useState(false);
-  const [ddlSql, setDdlSql] = useState("");
   const searchInput = useRef<HTMLInputElement>(null);
   const file = useRef<HTMLInputElement>(null);
   const runRef = useRef<() => void>(() => {});
@@ -171,10 +149,6 @@ export default function App() {
     if (!valid.length && activeTable) return [activeTable];
     return valid;
   }, [openDataTableIds, tablesById, activeTable]);
-  const errors = useMemo(
-    () => (remote ? [] : validateSchema(w.schema)),
-    [remote, w.schema],
-  );
   useEffect(() => {
     let active = true;
     storage.workspaces
@@ -333,30 +307,6 @@ export default function App() {
       remoteRun.current();
     }
   };
-  async function addTable() {
-    if (!(await leaveDraft())) return;
-    setTableEditor({ table: newTable(w), isNew: true });
-  }
-  async function editTable(tableId: string) {
-    if (!(await leaveDraft())) return;
-    const table = w.schema.tables.find((t) => t.id === tableId);
-    if (table) setTableEditor({ table: structuredClone(table), isNew: false });
-  }
-  async function openColumn(
-    tableId: string,
-    columnId: string | undefined,
-    anchor: HTMLButtonElement,
-  ) {
-    if (!(await leaveDraft())) return;
-    setColumnEditor({ tableId, columnId, anchor });
-  }
-  async function commitColumn(plan: ReturnType<typeof planTableEdit>) {
-    if (busy) throw Error("The database is busy. Try again.");
-    if (plan.errors.length) throw Error(plan.errors.join(" "));
-    edit((workspace) => {
-      workspace.schema = plan.schema;
-    });
-  }
   async function selectConnection(sourceId: string) {
     if (sourceId === (w.activeSourceId ?? "primary")) return true;
     if (!(await leaveDraft())) return false;
@@ -519,14 +469,10 @@ export default function App() {
         <div className="header-actions" data-tauri-drag-region>
           <span
             className="save-indicator"
-            title={`${saved}${errors.length ? ` · ${errors.length} schema issues` : ""}`}
+            title={saved}
             aria-label={busy ? "Working" : saved}
           >
-            <span
-              className={
-                "status-dot " + (errors.length ? "amber" : "")
-              }
-            />
+            <span className="status-dot" />
           </span>
           <Button
             title={dark ? "Light appearance" : "Dark appearance"}
@@ -562,39 +508,9 @@ export default function App() {
                 <Upload size={15} />
                 Import session
               </Button>
-              <Button
-                disabled={remote}
-                onClick={() => {
-                  try {
-                    setDdlSql(generateDDL(w.schema));
-                    setDdl(true);
-                  } catch (error) {
-                    setMessage(String(error));
-                    setError(true);
-                  }
-                }}
-              >
-                <Code2 size={15} />
-                View schema SQL
-              </Button>
               <Button onClick={exportWorkspace}>
                 <Download size={15} />
                 Export session
-              </Button>
-              <hr />
-              <Button
-                disabled={remote || !past.length || busy || dirty}
-                onClick={undo}
-              >
-                <Undo2 size={15} />
-                Undo design change
-              </Button>
-              <Button
-                disabled={remote || !future.length || busy || dirty}
-                onClick={redo}
-              >
-                <Redo2 size={15} />
-                Redo design change
               </Button>
             </div>
           </details>
@@ -635,16 +551,7 @@ export default function App() {
             </div>
             <div className="section-heading">
               <span>TABLES</span>
-              <span>{w.schema.tables.length}</span>
-              {!remote && (
-                <Button
-                  title="Create table"
-                  disabled={busy}
-                  onClick={() => void addTable()}
-                >
-                  <Plus size={14} />
-                </Button>
-              )}
+              <span>{remote ? w.schema.tables.length : 0}</span>
             </div>
             <div className="table-list" ref={tableList}>
               {filteredTables
@@ -658,10 +565,6 @@ export default function App() {
                           (activeTable?.id === table.id ? "active" : "")
                         }
                         onClick={() => void chooseTable(table.id)}
-                        onDoubleClick={() => {
-                          if (mode === "data" && !remote)
-                            void editTable(table.id);
-                        }}
                       >
                         <span className="table-icon">
                           <Table2 size={17} />
@@ -725,15 +628,8 @@ export default function App() {
                           {table.columns.map((c) => (
                             <button
                               key={c.id}
-                              disabled={mode !== "data" || remote}
+                              disabled
                               title={`${table.name}.${c.name} · ${c.nativeType ?? c.type}${table.primaryKey.includes(c.id) ? " · Primary key" : ""}${!c.nullable ? " · Required" : ""}`}
-                              onClick={(event) =>
-                                void openColumn(
-                                  table.id,
-                                  c.id,
-                                  event.currentTarget,
-                                )
-                              }
                             >
                               {table.primaryKey.includes(c.id) ? (
                                 <KeyRound size={11} className="gold" />
@@ -873,16 +769,13 @@ export default function App() {
               <Database size={32} className="accent" />
               <h2>No database connected</h2>
               <p>
-                Connect to a PostgreSQL or SQL Server database to explore tables, view data, and run SQL queries.
+                Connect to a PostgreSQL or SQL Server database to explore
+                tables, view data, and run SQL queries.
               </p>
               <Button
                 className="primary"
                 onClick={() =>
-                  requestConnection(
-                    w.id,
-                    w.activeSourceId ?? "primary",
-                    "new",
-                  )
+                  requestConnection(w.id, w.activeSourceId ?? "primary", "new")
                 }
               >
                 Add connection
@@ -903,51 +796,6 @@ export default function App() {
           </Button>
         </div>
       )}
-      {columnEditor &&
-        w.schema.tables.some((t) => t.id === columnEditor.tableId) && (
-          <ColumnEditor
-            key={columnEditor.tableId + (columnEditor.columnId ?? "new")}
-            workspace={w}
-            table={w.schema.tables.find((t) => t.id === columnEditor.tableId)!}
-            columnId={columnEditor.columnId}
-            anchor={columnEditor.anchor}
-            dark={dark}
-            onClose={() => setColumnEditor(null)}
-            onCommit={commitColumn}
-          />
-        )}
-      {tableEditor && (
-        <TableEditor
-          key={tableEditor.table.id}
-          initial={tableEditor.table}
-          isNew={tableEditor.isNew}
-          onClose={() => setTableEditor(null)}
-          onSaved={(tableId) => {
-            setDataTable(tableId);
-            setTableEditor(null);
-          }}
-          onDeleted={() => {
-            setDataTable("");
-            setTableEditor(null);
-          }}
-        />
-      )}
-      <Dialog.Root open={ddl} onOpenChange={setDdl}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="modal-overlay" />
-          <Dialog.Content className="modal">
-            <Dialog.Title>Your schema, in SQL.</Dialog.Title>
-            <Dialog.Description>
-              DuckDB DDL generated from the current design. Logical
-              relationships are visual only.
-            </Dialog.Description>
-            <pre>{ddlSql}</pre>
-            <Dialog.Close asChild>
-              <Button>Done</Button>
-            </Dialog.Close>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
     </div>
   );
 }

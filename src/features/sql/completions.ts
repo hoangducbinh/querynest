@@ -4,7 +4,7 @@ import type {
   TableDefinition,
 } from "../../types/schema";
 import { sqlDataTypes, type SqlDialect } from "./data-types";
-import { quote } from "../../lib/ddl/generate";
+import { quote } from "../../lib/sql/identifiers";
 import { tokenize } from "./lexer";
 import {
   KEYWORDS,
@@ -141,7 +141,7 @@ export function sqlCompletions(
     description: "data type",
     detail:
       item.detail ??
-      `${dialect === "mssql" ? "SQL Server" : dialect === "postgres" ? "PostgreSQL" : "DuckDB"} data type`,
+      `${dialect === "mssql" ? "SQL Server" : dialect === "postgres" ? "PostgreSQL" : "SQL"} data type`,
     insertText: sql.slice(replaceEnd).trimStart().startsWith("(")
       ? item.label
       : (item.body ?? item.label),
