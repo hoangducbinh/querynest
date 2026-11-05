@@ -13,6 +13,8 @@
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
+    "desktop:build:win": "PATH=\"/opt/homebrew/opt/llvm/bin:$HOME/.cargo/bin:$PATH\" XWIN_CACHE_DIR=\"$PWD/src-tauri/target/xwin-cache\" tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis",
+    "desktop:build:win:fast": "PATH=\"/opt/homebrew/opt/llvm/bin:$HOME/.cargo/bin:$PATH\" XWIN_CACHE_DIR=\"$PWD/src-tauri/target/xwin-cache\" tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --no-bundle",
     "desktop:check": "cargo check --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
