@@ -1,3 +1,4 @@
+import { installRunShortcut } from "./run-shortcut";
 import { WorkspaceConnectionControls } from "../features/connections/WorkspaceConnectionControls";
 import { SnippetSettings } from "../features/sql/SnippetSettings";
 import { useLoadSnippetPreferences } from "../features/sql/snippet-preferences";
@@ -220,12 +221,14 @@ export default function App() {
           });
       }
     };
+    const removeRunShortcut = installRunShortcut(window, document);
     const blockNativeContextMenu = (e: MouseEvent) => {
       e.preventDefault();
     };
     window.addEventListener("keydown", handler);
     window.addEventListener("contextmenu", blockNativeContextMenu);
     return () => {
+      removeRunShortcut();
       window.removeEventListener("keydown", handler);
       window.removeEventListener("contextmenu", blockNativeContextMenu);
     };
@@ -292,6 +295,29 @@ export default function App() {
     if (tableId === activeTable?.id) return;
     if (!(await leaveDraft())) return;
     setDataTable(tableId);
+  }
+  function tableExpansionKey(tableId: string) {
+    return `${w.id}:${w.activeSourceId ?? "primary"}:${tableId}`;
+  }
+  function toggleTableColumns(tableId: string) {
+    const key = tableExpansionKey(tableId);
+    setExpandedTables((items) =>
+      items.includes(key)
+        ? items.filter((item) => item !== key)
+        : [...items, key],
+    );
+  }
+  async function openTableData(tableId: string) {
+    if (!(await leaveDraft())) return;
+    setOpenDataTableIds((items) =>
+      items.includes(tableId) ? items : [...items, tableId],
+    );
+    setDataTable(tableId);
+    const key = tableExpansionKey(tableId);
+    setExpandedTables((items) =>
+      items.includes(key) ? items : [...items, key],
+    );
+    setMode("data");
   }
   async function closeDataTable(tableId: string) {
     if (openDataTables.length <= 1) return;
@@ -415,6 +441,7 @@ export default function App() {
     <div
       className={
         "app " +
+        (busy ? "is-working " : "") +
         (dark ? "dark " : "") +
         (platform !== "web" ? `desktop desktop-${platform}` : "")
       }
@@ -564,7 +591,24 @@ export default function App() {
                           "tree-table " +
                           (activeTable?.id === table.id ? "active" : "")
                         }
-                        onClick={() => void chooseTable(table.id)}
+                        title={
+                          mode === "sql"
+                            ? "Click to toggle columns · Double-click to open Data"
+                            : "Select table · Double-click to open Data"
+                        }
+                        aria-expanded={
+                          mode === "sql"
+                            ? expandedTables.includes(
+                                tableExpansionKey(table.id),
+                              )
+                            : undefined
+                        }
+                        onClick={(event) => {
+                          if (event.detail > 1) return;
+                          if (mode === "sql") toggleTableColumns(table.id);
+                          else void chooseTable(table.id);
+                        }}
+                        onDoubleClick={() => void openTableData(table.id)}
                       >
                         <span className="table-icon">
                           <Table2 size={17} />
@@ -588,19 +632,11 @@ export default function App() {
                             table.id,
                         )}
                         onClick={async () => {
-                          const key =
-                            w.id +
-                            ":" +
-                            (w.activeSourceId ?? "primary") +
-                            ":" +
-                            table.id;
-                          if (!(await leaveDraft())) return;
-                          setDataTable(table.id);
-                          setExpandedTables((items) =>
-                            items.includes(key)
-                              ? items.filter((item) => item !== key)
-                              : [...items, key],
-                          );
+                          if (mode !== "sql") {
+                            if (!(await leaveDraft())) return;
+                            setDataTable(table.id);
+                          }
+                          toggleTableColumns(table.id);
                         }}
                       >
                         {expandedTables.includes(
@@ -616,38 +652,35 @@ export default function App() {
                         )}
                       </Button>
                     </div>
-                    {activeTable?.id === table.id &&
-                      expandedTables.includes(
-                        w.id +
-                          ":" +
-                          (w.activeSourceId ?? "primary") +
-                          ":" +
-                          table.id,
-                      ) && (
-                        <div className="tree-columns">
-                          {table.columns.map((c) => (
-                            <button
-                              key={c.id}
-                              disabled
-                              title={`${table.name}.${c.name} · ${c.nativeType ?? c.type}${table.primaryKey.includes(c.id) ? " · Primary key" : ""}${!c.nullable ? " · Required" : ""}`}
-                            >
-                              {table.primaryKey.includes(c.id) ? (
-                                <KeyRound size={11} className="gold" />
-                              ) : w.schema.relationships.some((r) =>
-                                  r.sourceColumns.includes(c.id),
-                                ) ? (
-                                <Link2 size={11} className="blue" />
-                              ) : (
-                                <span className="column-dot" />
-                              )}
-                              <span>{c.name}</span>
-                              <code>
-                                {c.nativeType ?? c.type.toLowerCase()}
-                              </code>
-                            </button>
-                          ))}
-                        </div>
-                      )}
+                    {expandedTables.includes(
+                      w.id +
+                        ":" +
+                        (w.activeSourceId ?? "primary") +
+                        ":" +
+                        table.id,
+                    ) && (
+                      <div className="tree-columns">
+                        {table.columns.map((c) => (
+                          <button
+                            key={c.id}
+                            disabled
+                            title={`${table.name}.${c.name} · ${c.nativeType ?? c.type}${table.primaryKey.includes(c.id) ? " · Primary key" : ""}${!c.nullable ? " · Required" : ""}`}
+                          >
+                            {table.primaryKey.includes(c.id) ? (
+                              <KeyRound size={11} className="gold" />
+                            ) : w.schema.relationships.some((r) =>
+                                r.sourceColumns.includes(c.id),
+                              ) ? (
+                              <Link2 size={11} className="blue" />
+                            ) : (
+                              <span className="column-dot" />
+                            )}
+                            <span>{c.name}</span>
+                            <code>{c.nativeType ?? c.type.toLowerCase()}</code>
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))}
               {!w.schema.tables.length && (

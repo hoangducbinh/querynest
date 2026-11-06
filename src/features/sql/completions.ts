@@ -285,7 +285,7 @@ export function sqlCompletions(
     suggestions.push(
       ...snippets.map((snippet) => ({
         label: snippet.prefix,
-        description: "abbreviation",
+        description: snippet.description || "SQL abbreviation",
         detail: snippet.description || "SQL abbreviation",
         insertText: snippet.body,
         kind: "snippet" as const,

@@ -1,3 +1,11 @@
+import { createValidationQueue } from "./validation-queue";
+import { bindEditorWheelZoom } from "./editor-wheel-zoom";
+import {
+  useEditorZoom,
+  zoomEditor,
+  setEditorFontSize,
+  DEFAULT_EDITOR_FONT_SIZE,
+} from "./editor-zoom";
 import { sqlEditorView, rememberSqlEditorView } from "./view-state";
 import type { DatabaseSchema } from "../../types/schema";
 import type { SqlDialect } from "./data-types";
@@ -56,6 +64,7 @@ export function SqlEditor({
   onValidation?: (status: string) => void;
   onChange: (sql: string) => void;
 }) {
+  const fontSize = useEditorZoom((state) => state.fontSize);
   const alive = useRef(true);
   useLayoutEffect(() => {
     alive.current = true;
@@ -95,7 +104,7 @@ export function SqlEditor({
   const provider = useRef<monaco.IDisposable | null>(null);
   const validator = useRef(validate);
   validator.current = validate;
-  const validationBusy = useRef(false);
+  const validationQueue = useRef(createValidationQueue());
   useEffect(
     () => () => {
       provider.current?.dispose();
@@ -106,110 +115,83 @@ export function SqlEditor({
   useEffect(() => {
     const model = editorInstance?.getModel();
     if (!model) return;
-    let cancelled = false;
-    const version = model.getVersionId();
-    const localDiagnostics = validationEnabled
-      ? editingDiagnostics(value, dialect)
-      : [];
-    monaco.editor.setModelMarkers(
-      model,
-      "sql-editing",
-      localDiagnostics.map((item) => {
-        const start = model.getPositionAt(item.start);
-        const end = model.getPositionAt(item.end);
+    let cancelCheck: (() => void) | undefined;
+    const markers = (items: SqlDiagnostic[], source: string) =>
+      items.map((item) => {
+        const length = model.getValueLength();
+        const offset = Math.max(0, Math.min(length, item.start));
+        const start = model.getPositionAt(offset);
+        const end = model.getPositionAt(
+          Math.max(offset, Math.min(length, item.end)),
+        );
         return {
           startLineNumber: start.lineNumber,
           startColumn: start.column,
           endLineNumber: end.lineNumber,
-          endColumn: end.column,
+          endColumn: Math.max(
+            start.lineNumber === end.lineNumber ? start.column + 1 : 1,
+            end.column,
+          ),
           message: item.message,
-          source: "SQL",
+          source,
           severity: item.warning
             ? monaco.MarkerSeverity.Warning
             : monaco.MarkerSeverity.Error,
         };
-      }),
-    );
-    monaco.editor.setModelMarkers(model, "sql-validation", []);
-    onValidation?.(
-      localDiagnostics.length
-        ? `${localDiagnostics.length} SQL issue${localDiagnostics.length === 1 ? "" : "s"}`
-        : validationEnabled && value.trim()
-          ? "Checking…"
+      });
+    const check = () => {
+      cancelCheck?.();
+      if (model.isDisposed()) return;
+      // Read text and version together from Monaco, rather than a potentially stale React value.
+      const sql = model.getValue();
+      const version = model.getVersionId();
+      const local = validationEnabled ? editingDiagnostics(sql, dialect) : [];
+      monaco.editor.setModelMarkers(
+        model,
+        "sql-editing",
+        markers(local, "SQL"),
+      );
+      monaco.editor.setModelMarkers(model, "sql-validation", []);
+      const validateSql = validator.current;
+      onValidation?.(
+        local.length
+          ? `${local.length} SQL issue${local.length === 1 ? "" : "s"}`
           : "",
-    );
-    let timer = setTimeout(
-      async function check() {
-        if (
-          !validationEnabled ||
-          !value.trim() ||
-          cancelled ||
-          localDiagnostics.length
-        )
-          return;
-        // Coalesce edits while a slow network validation is still in flight.
-        if (validationBusy.current) {
-          timer = setTimeout(check, 300);
-          return;
-        }
-        validationBusy.current = true;
-        try {
-          const diagnostics = validator.current
-            ? await validator.current(value)
-            : [];
-          if (
-            cancelled ||
-            model.isDisposed() ||
-            model.getVersionId() !== version
-          )
-            return;
+      );
+      if (!validationEnabled || !sql.trim() || local.length || !validateSql)
+        return;
+      cancelCheck = validationQueue.current(
+        () => validateSql(sql),
+        (diagnostics) => {
+          if (model.isDisposed() || model.getVersionId() !== version) return;
           monaco.editor.setModelMarkers(
             model,
             "sql-validation",
-            diagnostics.map((item) => {
-              const start = model.getPositionAt(
-                Math.min(value.length, item.start),
-              );
-              const end = model.getPositionAt(Math.min(value.length, item.end));
-              return {
-                startLineNumber: start.lineNumber,
-                startColumn: start.column,
-                endLineNumber: end.lineNumber,
-                endColumn: Math.max(
-                  start.lineNumber === end.lineNumber ? start.column + 1 : 1,
-                  end.column,
-                ),
-                message: item.message,
-                source: validationSource,
-                severity: item.warning
-                  ? monaco.MarkerSeverity.Warning
-                  : monaco.MarkerSeverity.Error,
-              };
-            }),
+            markers(diagnostics, validationSource),
           );
           onValidation?.(
             diagnostics.length
               ? `${diagnostics.length} SQL issue${diagnostics.length === 1 ? "" : "s"}`
               : "",
           );
-        } catch {
-          if (!cancelled) onValidation?.("Validation unavailable");
-        } finally {
-          validationBusy.current = false;
-        }
-      },
-      validate ? 1500 : 650,
-    );
+        },
+        () => {
+          if (!model.isDisposed() && model.getVersionId() === version)
+            onValidation?.("Validation unavailable");
+        },
+      );
+    };
+    check();
+    const changes = model.onDidChangeContent(check);
     return () => {
-      cancelled = true;
-      clearTimeout(timer);
+      changes.dispose();
+      cancelCheck?.();
       if (!model.isDisposed()) {
         monaco.editor.setModelMarkers(model, "sql-validation", []);
         monaco.editor.setModelMarkers(model, "sql-editing", []);
       }
     };
   }, [
-    value,
     schema,
     dialect,
     validationEnabled,
@@ -227,6 +209,21 @@ export function SqlEditor({
       onChange={(next) => onChange(next ?? "")}
       onMount={(editor) => {
         setEditorInstance(editor);
+        const zoomKeys = editor.onKeyDown((event) => {
+          if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+          const key = event.browserEvent.key;
+          if (!["+", "=", "-", "0"].includes(key)) return;
+          event.preventDefault();
+          event.stopPropagation();
+          if (key === "0") setEditorFontSize(DEFAULT_EDITOR_FONT_SIZE);
+          else zoomEditor(key === "-" ? -1 : 1);
+        });
+        const node = editor.getDomNode();
+        const unbindWheelZoom = node ? bindEditorWheelZoom(node) : undefined;
+        editor.onDidDispose(() => {
+          zoomKeys.dispose();
+          unbindWheelZoom?.();
+        });
         const saved = viewKey ? sqlEditorView(viewKey) : undefined;
         if (saved) editor.restoreViewState(saved);
         if (autoFocus) editor.focus();
@@ -295,7 +292,12 @@ export function SqlEditor({
                   filterText: item.label,
                   documentation:
                     item.kind === "snippet"
-                      ? { value: "```sql\n" + item.insertText + "\n```" }
+                      ? {
+                          value:
+                            "**SQL abbreviation** · Tab or Enter to insert\n\n```sql\n" +
+                            item.insertText +
+                            "\n```\n\nTab: next field · Shift+Tab: previous field",
+                        }
                       : item.detail,
                 })),
               };
@@ -310,7 +312,13 @@ export function SqlEditor({
         renderValidationDecorations: "on",
         hover: { enabled: "on" },
         minimap: { enabled: false },
-        fontSize: 14,
+        fontSize,
+        mouseWheelZoom: false,
+        scrollbar: {
+          verticalScrollbarSize: 8,
+          horizontalScrollbarSize: 8,
+          useShadows: false,
+        },
         padding: { top: 12, bottom: 12 },
         scrollBeyondLastLine: false,
         automaticLayout: true,

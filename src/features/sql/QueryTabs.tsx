@@ -421,7 +421,7 @@ export function QueryTabs({
     onTabsChange(remaining, keepTab.id);
   }
 
-  const capacity = Math.max(1, Math.floor((width - 64) / 160));
+  const capacity = Math.max(1, Math.floor((width - 64) / 150));
   const overflowing = tabs.length > capacity;
   const visible = overflowing
     ? tabs

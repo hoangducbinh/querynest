@@ -1,3 +1,4 @@
+import { useQueryTimings } from "../sql/QueryTimer";
 import { updateSqlTabView } from "../sql/view-state";
 import { editableResult } from "../sql/editable-result";
 import { saveQueryResult } from "./save-query-result";
@@ -61,6 +62,7 @@ export function MultiSqlWorkspace({
   const running = useRef(false);
   const executionId = useRef(0);
   const [queryRunning, setQueryRunning] = useState(false);
+  const queryTimings = useQueryTimings();
   const [cancelPending, setCancelPending] = useState(false);
   const cancelled = useRef(false);
   const resultContext = (source: WorkspaceSource) =>
@@ -123,6 +125,7 @@ export function MultiSqlWorkspace({
         ? selection.current.sql
         : tab.sql);
     if (!text.trim()) return;
+    queryTimings.start(tab.id);
     running.current = true;
     executionId.current++;
     cancelled.current = false;
@@ -131,7 +134,6 @@ export function MultiSqlWorkspace({
     onBusy(true);
     setError("");
     try {
-      setResults((previous) => ({ ...previous, [tab.id]: [] }));
       let output: SqlResult[];
       if (source.connection) {
         if (!isTauri())
@@ -176,6 +178,7 @@ export function MultiSqlWorkspace({
             },
             config.engine === "mssql" ? "mssql" : "default",
           );
+          queryTimings.finish(tab.id);
           setQueryRunning(false);
           if (
             !cancelled.current &&
@@ -205,6 +208,7 @@ export function MultiSqlWorkspace({
       if (e instanceof NeedsConnection) requestConnection(w.id, source.id);
       else setError(pgError(e));
     } finally {
+      queryTimings.finish(tab.id);
       activeRun.current = null;
       running.current = false;
       setQueryRunning(false);
@@ -242,6 +246,8 @@ export function MultiSqlWorkspace({
         onChange={() => {}}
         onRun={(tabId, sql) => void run(tabId, sql)}
         disabled={busy}
+        runningTabId={queryTimings.runningTabId}
+        timings={queryTimings.timings}
         busy={busy}
         dark={dark}
         onEditingResult={onBusy}
@@ -413,7 +419,7 @@ export function MultiSqlWorkspace({
           const config = source.connection;
           return withDatabaseSession(w, source, (session) =>
             remoteClient(config.engine).validate(session.sessionId, sql),
-          ).catch(() => []);
+          );
         }}
         cancelPending={cancelPending}
         onCancel={

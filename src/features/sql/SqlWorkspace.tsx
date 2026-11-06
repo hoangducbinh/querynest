@@ -1,3 +1,12 @@
+import type { QueryTiming } from "./QueryTimer";
+import {
+  useEditorZoom,
+  zoomEditor,
+  setEditorFontSize,
+  DEFAULT_EDITOR_FONT_SIZE,
+  MIN_EDITOR_FONT_SIZE,
+  MAX_EDITOR_FONT_SIZE,
+} from "./editor-zoom";
 import { QueryResults, type ResultEditing } from "./QueryResults";
 import { useSqlTabView } from "./view-state";
 import { useStore } from "../schema/store";
@@ -14,6 +23,8 @@ import {
 } from "./panes";
 import { useRef, useState } from "react";
 import {
+  ZoomIn,
+  ZoomOut,
   LoaderCircle,
   PanelBottom,
   Play,
@@ -63,6 +74,8 @@ interface Props extends ResultEditing {
   onRun: (tabId?: string, sql?: string) => void;
   disabled: boolean;
   busy: boolean;
+  timings?: Record<string, QueryTiming>;
+  runningTabId?: string;
   dark: boolean;
   queryResults?: SqlResult[];
   onSelection: (sql: string, tabId?: string) => void;
@@ -134,6 +147,8 @@ function SqlPane({
   validationSource,
   onCancel,
   cancelPending = false,
+  timings,
+  runningTabId,
   onSplit,
   connectionOptions,
   tabContext,
@@ -146,6 +161,8 @@ function SqlPane({
   onSaveResult,
   onEditingResult,
 }: Props) {
+  const isRunning = runningTabId === activeId;
+  const fontSize = useEditorZoom((state) => state.fontSize);
   const workspaceId = useStore((state) => state.workspace.id);
   const viewKey = `${workspaceId}:${activeId}`;
   const [view, updateView] = useSqlTabView(viewKey);
@@ -268,6 +285,32 @@ function SqlPane({
             role="group"
             aria-label="SQL view actions"
           >
+            <Button
+              className="sql-icon-button"
+              aria-label="Zoom out SQL code"
+              title="Zoom out code (Ctrl/⌘ −)"
+              disabled={fontSize <= MIN_EDITOR_FONT_SIZE}
+              onClick={() => zoomEditor(-1)}
+            >
+              <ZoomOut size={14} />
+            </Button>
+            <Button
+              className="sql-zoom-reset"
+              aria-label={`SQL code font size ${fontSize}px. Reset zoom`}
+              title="Reset code zoom to 14px (Ctrl/⌘ 0)"
+              onClick={() => setEditorFontSize(DEFAULT_EDITOR_FONT_SIZE)}
+            >
+              {fontSize}px
+            </Button>
+            <Button
+              className="sql-icon-button"
+              aria-label="Zoom in SQL code"
+              title="Zoom in code (Ctrl/⌘ +)"
+              disabled={fontSize >= MAX_EDITOR_FONT_SIZE}
+              onClick={() => zoomEditor(1)}
+            >
+              <ZoomIn size={14} />
+            </Button>
             {splitOpen && (
               <Button
                 className="sql-icon-button"
@@ -298,46 +341,53 @@ function SqlPane({
             </Button>
           </div>
           <span className="sql-toolbar-divider" aria-hidden="true" />
-          {busy && onCancel && (
+          <div
+            className="sql-execution-control"
+            role="group"
+            aria-label="Query execution"
+          >
             <Button
-              className="sql-stop-button"
-              aria-label="Stop query"
-              title="Stop the running query and skip remaining batches"
-              disabled={cancelPending}
-              onClick={onCancel}
+              title={
+                isRunning && onCancel
+                  ? "Stop the running query and skip remaining batches"
+                  : validationSource === "SQL Server"
+                    ? "Run selected T-SQL or the whole tab (F5 or Ctrl/⌘+Enter). Use GO on its own line to separate batches."
+                    : "Run selected SQL or the whole tab (F5 or Ctrl/⌘+Enter). Separate SELECT queries with a blank line or semicolon."
+              }
+              className={
+                "sql-run-button" +
+                (isRunning && onCancel ? " sql-stop-button" : "")
+              }
+              data-action={isRunning && onCancel ? "stop" : "run"}
+              aria-label={isRunning && onCancel ? "Stop query" : "Run SQL"}
+              disabled={isRunning ? !onCancel || cancelPending : disabled}
+              onClick={() => {
+                if (isRunning) {
+                  onCancel?.();
+                  return;
+                }
+                if (!results) setResults(true);
+                onRun(activeId, hasSelection ? selection : value);
+              }}
             >
-              {cancelPending ? (
-                <LoaderCircle className="spin" size={13} />
+              {isRunning ? (
+                cancelPending || !onCancel ? (
+                  <LoaderCircle className="spin" size={14} />
+                ) : (
+                  <Square size={12} fill="currentColor" />
+                )
               ) : (
-                <Square size={12} fill="currentColor" />
+                <Play size={12} fill="currentColor" strokeWidth={0} />
               )}
-              <span aria-live="polite">
-                {cancelPending ? "Stopping…" : "Stop"}
+              <span>
+                {isRunning && onCancel
+                  ? cancelPending
+                    ? "Stopping…"
+                    : "Stop"
+                  : "Run"}
               </span>
             </Button>
-          )}
-          <Button
-            title={
-              validationSource === "SQL Server"
-                ? "Run selected T-SQL or the whole tab. Use GO on its own line to separate batches."
-                : "Run selected SQL or the whole tab. Separate SELECT queries with a blank line or semicolon."
-            }
-            className="sql-run-button"
-            aria-label={hasSelection ? "Run selected SQL" : "Run SQL"}
-            disabled={disabled}
-            onClick={() => {
-              if (!results) setResults(true);
-              onRun(activeId, hasSelection ? selection : value);
-            }}
-          >
-            {busy ? (
-              <LoaderCircle className="spin" size={14} />
-            ) : (
-              <Play size={12} fill="currentColor" strokeWidth={0} />
-            )}
-            <span>{hasSelection ? "Run selection" : "Run"}</span>
-            <kbd>⌘ ↵</kbd>
-          </Button>
+          </div>
         </div>
       </div>
       <div className="sql-split" ref={split}>
@@ -352,7 +402,7 @@ function SqlPane({
             readOnly={!!tabs.find((t) => t.id === activeId)?.locked}
             schema={tabContext?.schema}
             dialect={tabContext?.dialect}
-            validationEnabled={!disabled && !tabContext?.remote && !validate}
+            validationEnabled={!disabled && !busy}
             validate={validate}
             validationSource={validationSource}
             onValidation={setValidationStatus}
@@ -420,6 +470,7 @@ function SqlPane({
               <span />
             </div>
             <QueryResults
+              timing={timings?.[activeId]}
               results={queryResults ?? []}
               tabId={activeId}
               viewKey={`sql:${viewKey}:${tabContext?.sourceId ?? "unassigned"}`}

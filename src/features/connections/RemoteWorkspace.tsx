@@ -1,3 +1,4 @@
+import { useQueryTimings } from "../sql/QueryTimer";
 import { updateSqlTabView } from "../sql/view-state";
 import { editableResult } from "../sql/editable-result";
 import { saveQueryResult } from "./save-query-result";
@@ -95,6 +96,7 @@ export function RemoteWorkspace({
   const [restoring, setRestoring] = useState(false);
   const [pending, setPending] = useState(false);
   const [queryRunning, setQueryRunning] = useState(false);
+  const queryTimings = useQueryTimings();
   const [cancelPending, setCancelPending] = useState(false);
   const [error, setError] = useState("");
   const [results, setResults] = useSqlResults(
@@ -408,10 +410,10 @@ export function RemoteWorkspace({
       (selection.current.id === tab.id && selection.current.sql.trim()
         ? selection.current.sql
         : tab.sql);
+    queryTimings.start(tab.id);
     updateSqlTabView(`${w.id}:${tab.id}`, { resultsVisible: true });
     try {
       await task(async () => {
-        setResults((current) => ({ ...current, [tab.id]: [] }));
         const output = await executeSqlBatch(
           sql,
           query,
@@ -421,6 +423,7 @@ export function RemoteWorkspace({
         setRefresh((n) => n + 1);
       });
     } finally {
+      queryTimings.finish(tab.id);
       sqlRunning.current = false;
       setQueryRunning(false);
       setCancelPending(false);
@@ -615,6 +618,8 @@ export function RemoteWorkspace({
           }
           onRun={(tabId, sql) => void run(tabId, sql)}
           disabled={pending}
+          runningTabId={queryTimings.runningTabId}
+          timings={queryTimings.timings}
           busy={pending}
           dark={dark}
           tabContext={{
@@ -893,8 +898,7 @@ export function RemoteWorkspace({
                   6,
                 );
                 const defaultHeight = 24 + 26 + visibleRowCount * 25 + 8;
-                const blockHeight =
-                  stackTableHeights[tbl.id] ?? defaultHeight;
+                const blockHeight = stackTableHeights[tbl.id] ?? defaultHeight;
                 return (
                   <section
                     key={tbl.id}
@@ -986,10 +990,7 @@ export function RemoteWorkspace({
                         }}
                         onPointerMove={(event) => {
                           const activeDrag = stackResizeDrag.current;
-                          if (
-                            !activeDrag ||
-                            activeDrag.tableId !== tbl.id
-                          )
+                          if (!activeDrag || activeDrag.tableId !== tbl.id)
                             return;
                           const nextHeight = Math.max(
                             84,

@@ -1,3 +1,4 @@
+import { locateSqlServerDiagnostic } from "../sql/diagnostic-location";
 import type { ColumnContext, ColumnChange } from "./columns";
 import type { GridChange } from "./grid";
 import { mssqlBatches } from "../sql/statements";
@@ -70,11 +71,14 @@ const mssqlClient = {
         sql: batch.sql,
       });
       issues.push(
-        ...found.map((issue) => ({
-          ...issue,
-          start: issue.start + batch.start,
-          end: issue.end + batch.start,
-        })),
+        ...found.map((issue) => {
+          const located = locateSqlServerDiagnostic(batch.sql, issue);
+          return {
+            ...located,
+            start: located.start + batch.start,
+            end: located.end + batch.start,
+          };
+        }),
       );
     }
     return issues;

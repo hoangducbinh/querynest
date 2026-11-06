@@ -1,13 +1,11 @@
+import { QueryTimer, type QueryTiming } from "./QueryTimer";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as Popover from "@radix-ui/react-popover";
 import {
   Rows3,
   ChevronDown,
   ChevronRight,
-  Database,
   Maximize2,
-  Table2,
-  Terminal,
   MoreHorizontal,
   Check,
 } from "lucide-react";
@@ -44,6 +42,7 @@ function computeStackBlockHeight(result: SqlResult): number {
 
 export function QueryResults({
   results,
+  timing,
   tabId,
   viewKey,
   view,
@@ -56,6 +55,7 @@ export function QueryResults({
   onEditingResult,
 }: ResultEditing & {
   results: SqlResult[];
+  timing?: QueryTiming;
   tabId: string;
   viewKey: string;
   view: SqlTabView;
@@ -183,23 +183,6 @@ export function QueryResults({
     );
   }
 
-  function editableBadge(index: number) {
-    const table = resultMeta[index]?.editableTable;
-    if (!table || !onSaveResult) return null;
-    return (
-      <span
-        className="result-editable-badge"
-        title={`Editable table: ${table.namespace ? table.namespace + "." : ""}${table.name}`}
-      >
-        <Database size={11} />
-        <span>
-          {table.namespace ? `${table.namespace}.` : ""}
-          {table.name}
-        </span>
-      </span>
-    );
-  }
-
   function selectResultTab(index: number) {
     if (mode === "all") {
       const expanded = view.expandedResults.includes(index)
@@ -279,7 +262,7 @@ export function QueryResults({
   }, [results, resultCapacity, hasResultOverflow, selected, mode]);
 
   return (
-    <div className="sql-results-pane">
+    <div className="sql-results-pane" aria-busy={busy}>
       <div className="query-output-toolbar unified-results-toolbar">
         <div ref={tablistStripRef} className="unified-results-left-strip">
           <div
@@ -300,7 +283,6 @@ export function QueryResults({
                   }
                   onClick={() => selectResultTab(index)}
                 >
-                  <Table2 size={12} />
                   <span>
                     {mode === "all"
                       ? (resultMeta[index]?.shortLabel ?? `Result ${index + 1}`)
@@ -315,7 +297,6 @@ export function QueryResults({
                 disabled={hasDirty}
                 onClick={() => updateView({ resultsMode: "tabs" })}
               >
-                <Table2 size={12} />
                 <span>Results</span>
               </button>
             )}
@@ -353,7 +334,6 @@ export function QueryResults({
                             setOverflowOpen(false);
                           }}
                         >
-                          <Table2 size={13} />
                           <span className="sql-tab-menu-item-info">
                             <span>
                               {resultMeta[index]?.label ??
@@ -383,7 +363,6 @@ export function QueryResults({
             disabled={hasDirty}
             onClick={() => updateView({ resultsMode: "messages" })}
           >
-            <Terminal size={12} />
             <span>Messages</span>
             {hasError && <span className="status-dot amber" />}
           </button>
@@ -396,7 +375,6 @@ export function QueryResults({
             </span>
           ) : mode === "tabs" && results[selected] ? (
             <>
-              {editableBadge(selected)}
               <span className="muted">{results[selected].status}</span>
             </>
           ) : mode === "all" ? (
@@ -427,6 +405,7 @@ export function QueryResults({
               <span>Stack</span>
             </Button>
           )}
+          <QueryTimer timing={timing} />
         </div>
       </div>
 
