@@ -177,7 +177,14 @@ export function parseWorkspace(text: string): WorkspaceDefinition {
           !tab.id ||
           typeof tab.name !== "string" ||
           !tab.name.trim() ||
-          typeof tab.sql !== "string",
+          typeof tab.sql !== "string" ||
+          (tab.disconnectedFrom !== undefined &&
+            (!tab.disconnectedFrom ||
+              typeof tab.disconnectedFrom.profileId !== "string" ||
+              !tab.disconnectedFrom.profileId ||
+              typeof tab.disconnectedFrom.database !== "string" ||
+              !tab.disconnectedFrom.database ||
+              tab.disconnectedFrom.database.includes("\0"))),
       ) ||
       new Set(w.sqlTabs.map((tab) => tab.id)).size !== w.sqlTabs.length
     )

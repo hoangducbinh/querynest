@@ -1,3 +1,4 @@
+import { reorderTabs, useTabReorder } from "./tab-reorder";
 import * as Popover from "@radix-ui/react-popover";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -255,7 +256,9 @@ export function QueryTabs({
         setSqlTabs(
           draft,
           currentTabs.map((t) =>
-            t.id === tabId ? { ...t, sourceId: targetRootId } : t,
+            t.id === tabId
+              ? { ...t, sourceId: targetRootId, disconnectedFrom: undefined }
+              : t,
           ),
           tabId,
         );
@@ -278,7 +281,11 @@ export function QueryTabs({
         const currentTabs = sqlTabs(draft);
         setSqlTabs(
           draft,
-          currentTabs.map((t) => (t.id === tabId ? { ...t, sourceId } : t)),
+          currentTabs.map((t) =>
+            t.id === tabId
+              ? { ...t, sourceId, disconnectedFrom: undefined }
+              : t,
+          ),
           tabId,
         );
       });
@@ -421,6 +428,45 @@ export function QueryTabs({
     onTabsChange(remaining, keepTab.id);
   }
 
+  async function closeTabsToRight(fromTab: SqlTab) {
+    setContextMenu(null);
+    const idx = tabs.findIndex((item) => item.id === fromTab.id);
+    if (idx < 0) return;
+    const toClose = tabs
+      .slice(idx + 1)
+      .filter((item) => !item.pinned && !item.locked);
+    if (!toClose.length) return;
+    if (
+      toClose.some((item) => item.sql.trim()) &&
+      !(await confirmAction(
+        `Close ${toClose.length} unlocked/unpinned tab${toClose.length === 1 ? "" : "s"} to the right? Unsaved SQL in those tabs will be removed.`,
+        {
+          title: "Close tabs to the right?",
+          confirmLabel: "Close to right",
+          destructive: true,
+        },
+      ))
+    )
+      return;
+    const remaining = tabs.filter(
+      (item, i) => i <= idx || item.pinned || item.locked,
+    );
+    const nextActive = remaining.some((t) => t.id === activeId)
+      ? activeId
+      : fromTab.id;
+    onTabsChange(remaining, nextActive);
+  }
+
+  const tabDrag = useTabReorder(
+    !busy,
+    (source, target, side) => {
+      const ordered = reorderTabs(tabs, source, target, side);
+      if (ordered !== tabs) onTabsChange(ordered, activeId);
+    },
+    (source, target) =>
+      !!tabs.find((tab) => tab.id === source)?.pinned ===
+      !!tabs.find((tab) => tab.id === target)?.pinned,
+  );
   const capacity = Math.max(1, Math.floor((width - 64) / 150));
   const overflowing = tabs.length > capacity;
   const visible = overflowing
@@ -472,7 +518,19 @@ export function QueryTabs({
             }
             key={tab.id}
             data-tab-id={tab.id}
-            onDragStart={(event) => event.preventDefault()}
+            {...tabDrag(tab.id, renaming !== tab.id)}
+            onAuxClick={(event) => {
+              if (
+                event.button === 1 &&
+                !busy &&
+                !tab.pinned &&
+                !tab.locked
+              ) {
+                event.preventDefault();
+                event.stopPropagation();
+                void closeTab(tab);
+              }
+            }}
             onContextMenu={(event) => {
               event.preventDefault();
               event.stopPropagation();
@@ -523,7 +581,6 @@ export function QueryTabs({
             ) : (
               <button
                 role="tab"
-                draggable={false}
                 disabled={busy}
                 aria-selected={tab.id === activeId}
                 tabIndex={tab.id === activeId ? 0 : -1}
@@ -966,6 +1023,25 @@ export function QueryTabs({
             <span className="sql-tab-ctx-item">
               <Trash2 size={12} />
               <span>Close other tabs</span>
+            </span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={(() => {
+              const idx = tabs.findIndex((t) => t.id === contextTab.id);
+              return (
+                idx < 0 ||
+                tabs
+                  .slice(idx + 1)
+                  .filter((t) => !t.pinned && !t.locked).length === 0
+              );
+            })()}
+            onClick={() => void closeTabsToRight(contextTab)}
+          >
+            <span className="sql-tab-ctx-item">
+              <Trash2 size={12} />
+              <span>Close tabs to the right</span>
             </span>
           </button>
           <button

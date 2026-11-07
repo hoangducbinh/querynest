@@ -1,4 +1,6 @@
+import { reorderTabs, useTabReorder } from "../sql/tab-reorder";
 import { useQueryTimings } from "../sql/QueryTimer";
+import { STACK_DEFAULT_ROWS } from "../sql/ResultSetView";
 import { updateSqlTabView } from "../sql/view-state";
 import { editableResult } from "../sql/editable-result";
 import { saveQueryResult } from "./save-query-result";
@@ -32,9 +34,12 @@ import {
   Check,
   LoaderCircle,
   MoreHorizontal,
+  Pin,
+  PinOff,
   RefreshCw,
   Rows3,
   Table2,
+  Trash2,
   X,
 } from "lucide-react";
 import { Button } from "../../components/ui/button";
@@ -63,7 +68,9 @@ interface Props {
   dataLayout?: "tabs" | "stack";
   onDataLayoutChange?: (layout: "tabs" | "stack") => void;
   onSelectTable?: (tableId: string) => void;
+  onReorderTables?: (ids: string[]) => void;
   onCloseTable?: (tableId: string) => void;
+  onCloseTables?: (remainingIds: string[], nextActiveId?: string) => void;
   runRef: MutableRefObject<() => void>;
   onBusy: (busy: boolean) => void;
   onDirty: (dirty: boolean) => void;
@@ -79,6 +86,8 @@ export function RemoteWorkspace({
   onDataLayoutChange,
   onSelectTable,
   onCloseTable,
+  onCloseTables,
+  onReorderTables,
   runRef,
   onBusy,
   onDirty,
@@ -145,14 +154,15 @@ export function RemoteWorkspace({
   const [collapsedStackTables, setCollapsedStackTables] = useState<Set<string>>(
     () => new Set(),
   );
-  const [stackTableHeights, setStackTableHeights] = useState<
+  const [stackTableRowLimits, setStackTableRowLimits] = useState<
     Record<string, number>
   >({});
   const stackResizeDrag = useRef<{
     tableId: string;
     startY: number;
-    startHeight: number;
+    startRows: number;
   } | null>(null);
+  const dataBlockRefs = useRef<Record<string, HTMLElement | null>>({});
   useEffect(() => {
     if (
       mode !== "data" ||
@@ -198,8 +208,72 @@ export function RemoteWorkspace({
   }, [dataLoading]);
 
   const dataTablistStripRef = useRef<HTMLDivElement>(null);
+  const dataTabContextMenuRef = useRef<HTMLDivElement>(null);
   const [dataStripWidth, setDataStripWidth] = useState(0);
   const [dataOverflowOpen, setDataOverflowOpen] = useState(false);
+  const [dataTabSearch, setDataTabSearch] = useState("");
+  const [pinnedTableIds, setPinnedTableIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [dataTabContextMenu, setDataTabContextMenu] = useState<{
+    tableId: string;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!dataTabContextMenu) return;
+    const handlePointerDown = (e: MouseEvent) => {
+      if (
+        dataTabContextMenuRef.current &&
+        !dataTabContextMenuRef.current.contains(e.target as Node)
+      ) {
+        setDataTabContextMenu(null);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDataTabContextMenu(null);
+    };
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [dataTabContextMenu]);
+
+  function applyCloseTables(remainingIds: string[], nextActiveId?: string) {
+    setDataTabContextMenu(null);
+    if (onCloseTables) {
+      onCloseTables(remainingIds, nextActiveId);
+      return;
+    }
+    onReorderTables?.(remainingIds);
+    if (nextActiveId && remainingIds.includes(nextActiveId)) {
+      onSelectTable?.(nextActiveId);
+    } else if (
+      activeTable &&
+      !remainingIds.includes(activeTable.id) &&
+      remainingIds.length > 0
+    ) {
+      onSelectTable?.(remainingIds[remainingIds.length - 1]);
+    }
+  }
+
+  function togglePinDataTable(tblId: string) {
+    setDataTabContextMenu(null);
+    const nextPinned = new Set(pinnedTableIds);
+    if (nextPinned.has(tblId)) nextPinned.delete(tblId);
+    else nextPinned.add(tblId);
+    setPinnedTableIds(nextPinned);
+    if (onReorderTables) {
+      const ordered = [
+        ...openTables.filter((t) => nextPinned.has(t.id)),
+        ...openTables.filter((t) => !nextPinned.has(t.id)),
+      ];
+      onReorderTables(ordered.map((t) => t.id));
+    }
+  }
 
   useEffect(() => {
     const el = dataTablistStripRef.current;
@@ -214,6 +288,15 @@ export function RemoteWorkspace({
     return () => obs.disconnect();
   }, [mode]);
 
+  const dataTabDrag = useTabReorder(
+    !pending && !!onReorderTables,
+    (source, target, side) => {
+      const ordered = reorderTabs(openTables, source, target, side);
+      if (ordered !== openTables)
+        onReorderTables?.(ordered.map((table) => table.id));
+    },
+    (source, target) => pinnedTableIds.has(source) === pinnedTableIds.has(target),
+  );
   const availableForDataTabs =
     dataStripWidth > 0 ? Math.max(120, dataStripWidth - 40) : 400;
   const dataTableCapacity = Math.max(1, Math.floor(availableForDataTabs / 150));
@@ -222,12 +305,28 @@ export function RemoteWorkspace({
   const visibleTables = useMemo(() => {
     if (!hasDataTableOverflow) return openTables;
     const count = Math.max(1, dataTableCapacity);
-    const list = openTables.slice(0, count);
+    const list = openTables
+      .filter(
+        (tbl, idx) =>
+          idx < count ||
+          tbl.id === activeTable?.id ||
+          pinnedTableIds.has(tbl.id),
+      )
+      .slice(0, count);
     if (activeTable && !list.some((tbl) => tbl.id === activeTable.id)) {
       list[list.length - 1] = activeTable;
     }
     return list;
-  }, [openTables, dataTableCapacity, hasDataTableOverflow, activeTable]);
+  }, [
+    openTables,
+    dataTableCapacity,
+    hasDataTableOverflow,
+    activeTable,
+    pinnedTableIds,
+  ]);
+  const contextDataTable = dataTabContextMenu
+    ? openTables.find((t) => t.id === dataTabContextMenu.tableId)
+    : undefined;
   const cached = tableId
     ? cachedTablePage(cacheScope, tableId, page, tableSignature)
     : undefined;
@@ -690,18 +789,53 @@ export function RemoteWorkspace({
                   {visibleTables.map((tbl) => {
                     const isCurrent =
                       dataLayout === "tabs" && tbl.id === activeTable?.id;
+                    const isPinned = pinnedTableIds.has(tbl.id);
+                    const fullTableName = tbl.namespace
+                      ? `${tbl.namespace}.${tbl.name}`
+                      : tbl.name;
                     return (
                       <div
                         key={tbl.id}
-                        className={`data-table-tab${isCurrent ? " is-active" : ""}`}
-                        onDragStart={(event) => event.preventDefault()}
+                        className={`data-table-tab${isCurrent ? " is-active" : ""}${isPinned ? " is-pinned" : ""}`}
+                        data-tab-id={tbl.id}
+                        {...dataTabDrag(tbl.id)}
+                        onAuxClick={(event) => {
+                          if (
+                            event.button === 1 &&
+                            !pending &&
+                            !isPinned &&
+                            onCloseTable
+                          ) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            onCloseTable(tbl.id);
+                          }
+                        }}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          if (pending) return;
+                          const x = Math.min(
+                            event.clientX,
+                            window.innerWidth - 235,
+                          );
+                          const y = Math.min(
+                            event.clientY,
+                            window.innerHeight - 220,
+                          );
+                          setDataTabContextMenu({
+                            tableId: tbl.id,
+                            x: Math.max(8, x),
+                            y: Math.max(8, y),
+                          });
+                        }}
                       >
                         <button
                           type="button"
                           role="tab"
-                          draggable={false}
                           aria-selected={isCurrent}
                           className="data-table-tab-btn"
+                          title={`${fullTableName}${isPinned ? " · Pinned" : ""}\nRight-click for tab options · Middle-click to close`}
                           onClick={() => {
                             onSelectTable?.(tbl.id);
                             if (dataLayout === "stack") {
@@ -711,22 +845,30 @@ export function RemoteWorkspace({
                                 next.delete(tbl.id);
                                 return next;
                               });
+                              requestAnimationFrame(() => {
+                                dataBlockRefs.current[tbl.id]?.scrollIntoView({
+                                  block: "nearest",
+                                });
+                              });
                             }
                           }}
                         >
-                          <Table2 size={12} />
+                          {isPinned ? (
+                            <Pin size={12} className="sql-tab-pin" />
+                          ) : (
+                            <Table2 size={12} />
+                          )}
                           <span className="data-table-tab-name">
-                            {tbl.namespace
-                              ? `${tbl.namespace}.${tbl.name}`
-                              : tbl.name}
+                            {fullTableName}
                           </span>
                         </button>
-                        {openTables.length > 1 && onCloseTable && (
+                        {!isPinned && onCloseTable && (
                           <button
                             type="button"
                             className="data-table-tab-close"
                             title={`Close ${tbl.name}`}
                             aria-label={`Close ${tbl.name}`}
+                            disabled={pending}
                             onClick={(e) => {
                               e.stopPropagation();
                               onCloseTable(tbl.id);
@@ -743,7 +885,10 @@ export function RemoteWorkspace({
                 {hasDataTableOverflow && (
                   <Popover.Root
                     open={dataOverflowOpen}
-                    onOpenChange={setDataOverflowOpen}
+                    onOpenChange={(value) => {
+                      setDataOverflowOpen(value);
+                      if (!value) setDataTabSearch("");
+                    }}
                   >
                     <Popover.Trigger asChild>
                       <button
@@ -762,75 +907,268 @@ export function RemoteWorkspace({
                         align="start"
                         onOpenAutoFocus={(e) => e.preventDefault()}
                       >
+                        <input
+                          aria-label="Find open table"
+                          placeholder="Find a table…"
+                          value={dataTabSearch}
+                          onChange={(e) => setDataTabSearch(e.target.value)}
+                        />
                         <div className="sql-tab-menu-list">
-                          {openTables.map((tbl) => {
-                            const isCurrent =
-                              dataLayout === "tabs" &&
-                              tbl.id === activeTable?.id;
-                            const tableName = tbl.namespace
-                              ? `${tbl.namespace}.${tbl.name}`
-                              : tbl.name;
-                            return (
-                              <div
-                                key={tbl.id}
-                                style={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  width: "100%",
-                                }}
-                              >
-                                <button
-                                  type="button"
-                                  style={{ flex: 1, minWidth: 0 }}
-                                  onClick={() => {
-                                    onSelectTable?.(tbl.id);
-                                    if (dataLayout === "stack") {
-                                      setCollapsedStackTables((prev) => {
-                                        if (!prev.has(tbl.id)) return prev;
-                                        const next = new Set(prev);
-                                        next.delete(tbl.id);
-                                        return next;
-                                      });
-                                    }
-                                    setDataOverflowOpen(false);
+                          {openTables
+                            .filter((tbl) => {
+                              const name = tbl.namespace
+                                ? `${tbl.namespace}.${tbl.name}`
+                                : tbl.name;
+                              return name
+                                .toLowerCase()
+                                .includes(dataTabSearch.toLowerCase());
+                            })
+                            .map((tbl) => {
+                              const isCurrent =
+                                dataLayout === "tabs" &&
+                                tbl.id === activeTable?.id;
+                              const isPinned = pinnedTableIds.has(tbl.id);
+                              const tableName = tbl.namespace
+                                ? `${tbl.namespace}.${tbl.name}`
+                                : tbl.name;
+                              return (
+                                <div
+                                  key={tbl.id}
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    width: "100%",
                                   }}
                                 >
-                                  <Table2 size={13} />
-                                  <span className="sql-tab-menu-item-info">
-                                    <span>{tableName}</span>
-                                    <small>
-                                      {tbl.columns?.length ?? 0} columns
-                                    </small>
-                                  </span>
-                                  {isCurrent && <Check size={14} />}
-                                </button>
-                                {openTables.length > 1 && onCloseTable && (
                                   <button
                                     type="button"
-                                    className="sql-tab-close"
-                                    title={`Close ${tbl.name}`}
-                                    aria-label={`Close ${tbl.name}`}
-                                    style={{
-                                      width: 22,
-                                      height: 22,
-                                      padding: 3,
-                                      flexShrink: 0,
-                                    }}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      onCloseTable(tbl.id);
+                                    style={{ flex: 1, minWidth: 0 }}
+                                    onClick={() => {
+                                      onSelectTable?.(tbl.id);
+                                      if (dataLayout === "stack") {
+                                        setCollapsedStackTables((prev) => {
+                                          if (!prev.has(tbl.id)) return prev;
+                                          const next = new Set(prev);
+                                          next.delete(tbl.id);
+                                          return next;
+                                        });
+                                        requestAnimationFrame(() => {
+                                          dataBlockRefs.current[
+                                            tbl.id
+                                          ]?.scrollIntoView({
+                                            block: "nearest",
+                                          });
+                                        });
+                                      }
+                                      setDataOverflowOpen(false);
+                                      setDataTabSearch("");
                                     }}
                                   >
-                                    <X size={11} />
+                                    {isPinned ? (
+                                      <Pin size={13} className="sql-tab-pin" />
+                                    ) : (
+                                      <Table2 size={13} />
+                                    )}
+                                    <span className="sql-tab-menu-item-info">
+                                      <span>{tableName}</span>
+                                      <small>
+                                        {tbl.columns?.length ?? 0} columns
+                                      </small>
+                                    </span>
+                                    {isCurrent && <Check size={14} />}
                                   </button>
-                                )}
-                              </div>
-                            );
-                          })}
+                                  {!isPinned && onCloseTable && (
+                                    <button
+                                      type="button"
+                                      className="sql-tab-close"
+                                      title={`Close ${tbl.name}`}
+                                      aria-label={`Close ${tbl.name}`}
+                                      style={{
+                                        width: 22,
+                                        height: 22,
+                                        padding: 3,
+                                        flexShrink: 0,
+                                      }}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        onCloseTable(tbl.id);
+                                      }}
+                                    >
+                                      <X size={11} />
+                                    </button>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          {!openTables.some((tbl) => {
+                            const name = tbl.namespace
+                              ? `${tbl.namespace}.${tbl.name}`
+                              : tbl.name;
+                            return name
+                              .toLowerCase()
+                              .includes(dataTabSearch.toLowerCase());
+                          }) && (
+                            <span className="snippet-status">
+                              No matching tables
+                            </span>
+                          )}
                         </div>
                       </Popover.Content>
                     </Popover.Portal>
                   </Popover.Root>
+                )}
+
+                {dataTabContextMenu && contextDataTable && (
+                  <div
+                    ref={dataTabContextMenuRef}
+                    className="result-floating-menu result-context-menu sql-tab-context-menu"
+                    role="menu"
+                    aria-label={`Options for ${contextDataTable.name}`}
+                    style={{
+                      left: dataTabContextMenu.x,
+                      top: dataTabContextMenu.y,
+                    }}
+                  >
+                    <div className="sql-tab-context-header">
+                      <div className="sql-tab-context-title-row">
+                        <strong>
+                          {contextDataTable.namespace
+                            ? `${contextDataTable.namespace}.${contextDataTable.name}`
+                            : contextDataTable.name}
+                        </strong>
+                        <span className="sql-tab-badges">
+                          {pinnedTableIds.has(contextDataTable.id) && (
+                            <span className="sql-tab-pinned-badge">Pinned</span>
+                          )}
+                        </span>
+                      </div>
+                      <small>
+                        {contextDataTable.columns?.length ?? 0} columns · {label}
+                      </small>
+                    </div>
+                    <hr />
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => togglePinDataTable(contextDataTable.id)}
+                    >
+                      <span className="sql-tab-ctx-item">
+                        {pinnedTableIds.has(contextDataTable.id) ? (
+                          <PinOff size={12} />
+                        ) : (
+                          <Pin size={12} />
+                        )}
+                        <span>
+                          {pinnedTableIds.has(contextDataTable.id)
+                            ? "Unpin tab"
+                            : "Pin to start"}
+                        </span>
+                      </span>
+                    </button>
+                    <hr />
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={
+                        openTables.filter(
+                          (t) =>
+                            t.id !== contextDataTable.id &&
+                            !pinnedTableIds.has(t.id),
+                        ).length === 0
+                      }
+                      onClick={() => {
+                        const remaining = openTables
+                          .filter(
+                            (t) =>
+                              t.id === contextDataTable.id ||
+                              pinnedTableIds.has(t.id),
+                          )
+                          .map((t) => t.id);
+                        applyCloseTables(remaining, contextDataTable.id);
+                      }}
+                    >
+                      <span className="sql-tab-ctx-item">
+                        <Trash2 size={12} />
+                        <span>Close other tabs</span>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={(() => {
+                        const idx = openTables.findIndex(
+                          (t) => t.id === contextDataTable.id,
+                        );
+                        return (
+                          idx < 0 ||
+                          openTables
+                            .slice(idx + 1)
+                            .filter((t) => !pinnedTableIds.has(t.id)).length ===
+                            0
+                        );
+                      })()}
+                      onClick={() => {
+                        const idx = openTables.findIndex(
+                          (t) => t.id === contextDataTable.id,
+                        );
+                        if (idx < 0) return;
+                        const remaining = openTables
+                          .filter(
+                            (t, i) => i <= idx || pinnedTableIds.has(t.id),
+                          )
+                          .map((t) => t.id);
+                        const nextActive =
+                          activeTable && remaining.includes(activeTable.id)
+                            ? activeTable.id
+                            : contextDataTable.id;
+                        applyCloseTables(remaining, nextActive);
+                      }}
+                    >
+                      <span className="sql-tab-ctx-item">
+                        <Trash2 size={12} />
+                        <span>Close tabs to the right</span>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={
+                        openTables.filter((t) => !pinnedTableIds.has(t.id))
+                          .length === 0
+                      }
+                      onClick={() => {
+                        const remaining = openTables
+                          .filter((t) => pinnedTableIds.has(t.id))
+                          .map((t) => t.id);
+                        applyCloseTables(remaining, remaining[0]);
+                      }}
+                    >
+                      <span className="sql-tab-ctx-item">
+                        <Trash2 size={12} />
+                        <span>Close all tabs</span>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="danger-item"
+                      disabled={pinnedTableIds.has(contextDataTable.id)}
+                      title={
+                        pinnedTableIds.has(contextDataTable.id)
+                          ? "Unpin this tab before closing"
+                          : undefined
+                      }
+                      onClick={() => {
+                        setDataTabContextMenu(null);
+                        onCloseTable?.(contextDataTable.id);
+                      }}
+                    >
+                      <span className="sql-tab-ctx-item">
+                        <X size={12} />
+                        <span>Close tab</span>
+                      </span>
+                    </button>
+                  </div>
                 )}
               </div>
             ) : (
@@ -893,18 +1231,20 @@ export function RemoteWorkspace({
                 );
                 const tblRows = tblCached?.rows ?? EMPTY_ROWS;
                 const isCollapsed = collapsedStackTables.has(tbl.id);
-                const visibleRowCount = Math.min(
+                const rowLimit =
+                  stackTableRowLimits[tbl.id] ?? STACK_DEFAULT_ROWS;
+                const displayedRows = Math.min(
                   Math.max(tblRows.length, 1),
-                  6,
+                  rowLimit,
                 );
-                const defaultHeight = 24 + 26 + visibleRowCount * 25 + 8;
-                const blockHeight = stackTableHeights[tbl.id] ?? defaultHeight;
                 return (
                   <section
                     key={tbl.id}
+                    ref={(el) => {
+                      dataBlockRefs.current[tbl.id] = el;
+                    }}
                     className="sql-result-block data-stack-block"
                     data-collapsed={isCollapsed}
-                    style={!isCollapsed ? { height: blockHeight } : undefined}
                   >
                     <Spreadsheet
                       key={`${sessionId}:${tbl.id}:${tblPage}:${tableState(cacheScope, tbl.id).generation}`}
@@ -968,15 +1308,28 @@ export function RemoteWorkspace({
                           openTables.length > 1 && onCloseTable
                             ? () => onCloseTable(tbl.id)
                             : undefined,
+                        rowLimit,
+                        onRowLimitChange: (next) =>
+                          setStackTableRowLimits((prev) => {
+                            if (next === undefined) {
+                              if (!(tbl.id in prev)) return prev;
+                              const copy = { ...prev };
+                              delete copy[tbl.id];
+                              return copy;
+                            }
+                            return prev[tbl.id] === next
+                              ? prev
+                              : { ...prev, [tbl.id]: next };
+                          }),
                       }}
                     />
-                    {!isCollapsed && (
+                    {!isCollapsed && tblRows.length > 3 && (
                       <div
                         className="stack-block-resizer"
                         role="separator"
                         aria-orientation="horizontal"
-                        aria-label={`Resize ${tbl.name} height`}
-                        title="Drag to adjust table height · Double-click to reset"
+                        aria-label={`Resize ${tbl.name} visible rows`}
+                        title="Drag to show more or fewer rows · Double-click to reset"
                         onPointerDown={(event) => {
                           event.preventDefault();
                           event.currentTarget.setPointerCapture(
@@ -985,27 +1338,27 @@ export function RemoteWorkspace({
                           stackResizeDrag.current = {
                             tableId: tbl.id,
                             startY: event.clientY,
-                            startHeight: blockHeight,
+                            startRows: displayedRows,
                           };
                         }}
                         onPointerMove={(event) => {
                           const activeDrag = stackResizeDrag.current;
                           if (!activeDrag || activeDrag.tableId !== tbl.id)
                             return;
-                          const nextHeight = Math.max(
-                            84,
+                          const deltaRows = Math.round(
+                            (event.clientY - activeDrag.startY) / 25,
+                          );
+                          const nextRows = Math.max(
+                            3,
                             Math.min(
-                              900,
-                              Math.round(
-                                activeDrag.startHeight +
-                                  (event.clientY - activeDrag.startY),
-                              ),
+                              tblRows.length,
+                              activeDrag.startRows + deltaRows,
                             ),
                           );
-                          setStackTableHeights((prev) =>
-                            prev[tbl.id] === nextHeight
+                          setStackTableRowLimits((prev) =>
+                            prev[tbl.id] === nextRows
                               ? prev
-                              : { ...prev, [tbl.id]: nextHeight },
+                              : { ...prev, [tbl.id]: nextRows },
                           );
                         }}
                         onPointerUp={(event) => {
@@ -1024,7 +1377,7 @@ export function RemoteWorkspace({
                           stackResizeDrag.current = null;
                         }}
                         onDoubleClick={() => {
-                          setStackTableHeights((prev) => {
+                          setStackTableRowLimits((prev) => {
                             if (!(tbl.id in prev)) return prev;
                             const next = { ...prev };
                             delete next[tbl.id];

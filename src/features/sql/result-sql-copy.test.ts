@@ -5,6 +5,7 @@ import {
   buildCopyAsInsert,
   buildCopyAsUpdate,
   inferResultTableTarget,
+  isJoinQuery,
 } from "./result-sql-copy";
 
 it("infers table targets from SELECT queries across dialects and resolves schema tables", () => {
@@ -145,4 +146,40 @@ it("formats CSV rows with RFC 4180 quoting for commas, quotes, and newlines", ()
     ),
   ).toBe('id,title,note\n1,"Hello, ""World""",\n2,Plain,"Line 1\nLine 2"');
 });
+
+it("blocks INSERT and UPDATE generation for JOIN query results to prevent multi-table write risks", () => {
+  const joinSql =
+    "SELECT u.id AS user_id, u.name, o.id AS order_id, o.total FROM public.users u JOIN public.orders o ON o.user_id = u.id";
+  const commaJoinSql =
+    "SELECT u.id, o.total FROM public.users u, public.orders o WHERE o.user_id = u.id";
+  const cteJoinSql =
+    "WITH joined AS (SELECT u.id, o.total FROM users u LEFT JOIN orders o ON o.user_id = u.id) SELECT * FROM joined";
+  const singleTableSql =
+    "SELECT * FROM public.users WHERE id IN (SELECT user_id FROM public.orders)";
+
+  expect(isJoinQuery(joinSql, "postgres")).toBe(true);
+  expect(isJoinQuery(commaJoinSql, "postgres")).toBe(true);
+  expect(isJoinQuery(cteJoinSql, "postgres")).toBe(true);
+  expect(isJoinQuery(singleTableSql, "postgres")).toBe(false);
+
+  const row = { user_id: 7, name: "Alice", order_id: 105, total: 250 };
+  expect(
+    buildCopyAsInsert({
+      columns: ["user_id", "name", "order_id", "total"],
+      rows: [row],
+      sql: joinSql,
+      dialect: "postgres",
+    }),
+  ).toBe("");
+
+  expect(
+    buildCopyAsUpdate({
+      columns: ["user_id", "name", "order_id", "total"],
+      rows: [{ current: row }],
+      sql: joinSql,
+      dialect: "postgres",
+    }),
+  ).toBe("");
+});
+
 

@@ -1,5 +1,3 @@
-import { DatabasePlus } from "lucide-react";
-import { Button } from "../../components/ui/button";
 import { confirmAction } from "../../lib/dialogs";
 import { useEffect, useState } from "react";
 import type { WorkspaceDefinition, WorkspaceSource } from "../../types/schema";
@@ -44,7 +42,7 @@ import { isTauri } from "../postgres/client";
 export function ConnectionController({
   workspace,
   busy,
-  onRemove,
+  onDisconnect,
   onBeforeAction,
   onError,
   onConnected,
@@ -52,10 +50,10 @@ export function ConnectionController({
 }: {
   workspace: WorkspaceDefinition;
   busy: boolean;
-  onRemove: (id: string) => void;
+  onDisconnect: (id: string) => void;
   onBeforeAction: () => Promise<boolean>;
   onError: (error: unknown) => void;
-  onConnected: () => void;
+  onConnected: (sourceId?: string) => void | Promise<void>;
   onAttach: (profile: ConnectionProfile) => Promise<unknown>;
 }) {
   useSessionRevision();
@@ -71,7 +69,7 @@ export function ConnectionController({
     action: "connect" | "refresh" | "reconnect" | "disconnect",
   ) {
     if (!source.connection || blocked || !(await onBeforeAction())) return;
-    if (!isTauri()) {
+    if (action !== "disconnect" && !isTauri()) {
       onError("Open the desktop app to connect to a database.");
       return;
     }
@@ -85,7 +83,7 @@ export function ConnectionController({
             sourceSessionKey(workspace.id, s.id),
           ),
         );
-        onConnected();
+        onDisconnect(root.id);
         return;
       }
       let catalog;
@@ -117,7 +115,8 @@ export function ConnectionController({
           ensureSources(draft);
           updateSource(draft, source.id, { schema: catalogSchema(catalog) });
         });
-      onConnected();
+      if (useStore.getState().workspace.id === workspace.id)
+        await onConnected(action === "connect" ? source.id : undefined);
     } catch (e) {
       if (e instanceof NeedsConnection) {
         setLogin(source);
@@ -160,8 +159,6 @@ export function ConnectionController({
           (s) => s.connectionId === profile.id,
         );
         if (attached) requestConnection(current.id, attached.id);
-      } else if (request.action === "remove") {
-        if (source) onRemove(source.id);
       } else if (request.action === "delete-profile") {
         if (
           await confirmAction(
@@ -179,21 +176,22 @@ export function ConnectionController({
       }
     })().catch((error) => onError(pgError(error)));
   }, [request?.id, busy, pending]);
+  const hasLiveConnection = workspaceSources(workspace).some(
+    (source) =>
+      source.connection &&
+      getSession(sourceSessionKey(workspace.id, source.id), source.connection),
+  );
+
   return (
     <>
-      <Button
-        title="New connection"
-        disabled={busy || !!pending}
-        onClick={() =>
-          requestConnection(
-            workspace.id,
-            workspace.activeSourceId ?? "primary",
-            "new",
-          )
-        }
-      >
-        <DatabasePlus size={14} />
-      </Button>
+      {hasLiveConnection && (
+        <span
+          className="status-dot"
+          role="img"
+          aria-label="Database connected"
+          title="Database connected"
+        />
+      )}
       {editing && (
         <ConnectionDialog
           initial={editing}
@@ -301,6 +299,8 @@ export function ConnectionController({
                     updatedAt: Date.now(),
                   } as typeof profile);
               }
+              if (useStore.getState().workspace.id !== workspace.id)
+                throw Error("Session changed. Try again.");
               useStore.getState().edit((draft) => {
                 ensureSources(draft);
                 updateSource(draft, login.id, {
@@ -316,7 +316,7 @@ export function ConnectionController({
                 profileId: root.connectionId,
                 disconnect: remoteClient(config.engine).disconnect,
               });
-              onConnected();
+              await onConnected(login.id);
             } catch (e) {
               await remoteClient(config.engine)
                 .disconnect(result.sessionId)

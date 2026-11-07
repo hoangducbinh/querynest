@@ -16,7 +16,11 @@ import type { DatabaseSchema, TableDefinition } from "../../types/schema";
 import type { SqlDialect } from "./data-types";
 import type { SqlResult } from "./execution";
 import { inferResultTableTarget } from "./result-sql-copy";
-import { ResultSetView, type StackBlockHeaderProps } from "./ResultSetView";
+import {
+  ResultSetView,
+  STACK_DEFAULT_ROWS,
+  type StackBlockHeaderProps,
+} from "./ResultSetView";
 import type { SqlTabView } from "./view-state";
 
 export interface ResultEditing {
@@ -31,13 +35,6 @@ export interface ResultEditing {
     index: number,
   ) => Promise<Record<string, unknown>[]>;
   onEditingResult?: (editing: boolean) => void;
-}
-
-function computeStackBlockHeight(result: SqlResult): number {
-  if (result.error || !result.columns.length) return 76;
-  const visibleRowCount = Math.min(Math.max(result.rows.length, 1), 6);
-  // 26px block header + 26px table head + rows * 25px + 6px scrollbar/border allowance
-  return 26 + 26 + visibleRowCount * 25 + 6;
 }
 
 export function QueryResults({
@@ -65,11 +62,13 @@ export function QueryResults({
   dialect?: SqlDialect;
 }) {
   const [dirtySet, setDirtySet] = useState<Set<number>>(new Set());
-  const [stackHeights, setStackHeights] = useState<Record<number, number>>({});
+  const [stackRowLimits, setStackRowLimits] = useState<Record<number, number>>(
+    {},
+  );
   const stackResizeDrag = useRef<{
     index: number;
     startY: number;
-    startHeight: number;
+    startRows: number;
   } | null>(null);
   const hasDirty = dirtySet.size > 0;
   const editingRef = useRef(false);
@@ -95,7 +94,7 @@ export function QueryResults({
 
   useEffect(() => {
     setDirtySet(new Set());
-    setStackHeights({});
+    setStackRowLimits({});
     if (results.length && results.every((result) => !result.columns.length)) {
       updateView({ resultsMode: "messages" });
     } else if (
@@ -433,8 +432,11 @@ export function QueryResults({
             const hasTabularGrid = !result.error && result.columns.length > 0;
             const blockLabel =
               resultMeta[index]?.label ?? `Result ${index + 1}`;
-            const defaultHeight = computeStackBlockHeight(result);
-            const blockHeight = stackHeights[index] ?? defaultHeight;
+            const rowLimit = stackRowLimits[index] ?? STACK_DEFAULT_ROWS;
+            const displayedRows = Math.min(
+              Math.max(result.rows.length, 1),
+              rowLimit,
+            );
 
             return (
               <section
@@ -442,7 +444,6 @@ export function QueryResults({
                   blockRefs.current[index] = el;
                 }}
                 className="sql-result-block"
-                style={isExpanded ? { height: blockHeight } : undefined}
                 key={index}
                 data-collapsed={!isExpanded}
               >
@@ -454,6 +455,19 @@ export function QueryResults({
                     onToggleCollapse: () => toggleBlockCollapse(index),
                     onExpandToTab: () =>
                       updateView({ resultsMode: "tabs", resultIndex: index }),
+                    rowLimit,
+                    onRowLimitChange: (next) =>
+                      setStackRowLimits((prev) => {
+                        if (next === undefined) {
+                          if (!(index in prev)) return prev;
+                          const copy = { ...prev };
+                          delete copy[index];
+                          return copy;
+                        }
+                        return prev[index] === next
+                          ? prev
+                          : { ...prev, [index]: next };
+                      }),
                   })
                 ) : (
                   <>
@@ -497,39 +511,39 @@ export function QueryResults({
                     {isExpanded && renderResultContent(result, index)}
                   </>
                 )}
-                {isExpanded && (
+                {isExpanded && hasTabularGrid && result.rows.length > 3 && (
                   <div
                     className="stack-block-resizer"
                     role="separator"
                     aria-orientation="horizontal"
-                    aria-label={`Resize ${blockLabel} height`}
-                    title="Drag to adjust result height · Double-click to reset"
+                    aria-label={`Resize ${blockLabel} visible rows`}
+                    title="Drag to show more or fewer rows · Double-click to reset"
                     onPointerDown={(event) => {
                       event.preventDefault();
                       event.currentTarget.setPointerCapture(event.pointerId);
                       stackResizeDrag.current = {
                         index,
                         startY: event.clientY,
-                        startHeight: blockHeight,
+                        startRows: displayedRows,
                       };
                     }}
                     onPointerMove={(event) => {
                       const activeDrag = stackResizeDrag.current;
                       if (!activeDrag || activeDrag.index !== index) return;
-                      const nextHeight = Math.max(
-                        76,
+                      const deltaRows = Math.round(
+                        (event.clientY - activeDrag.startY) / 25,
+                      );
+                      const nextRows = Math.max(
+                        3,
                         Math.min(
-                          900,
-                          Math.round(
-                            activeDrag.startHeight +
-                              (event.clientY - activeDrag.startY),
-                          ),
+                          result.rows.length,
+                          activeDrag.startRows + deltaRows,
                         ),
                       );
-                      setStackHeights((prev) =>
-                        prev[index] === nextHeight
+                      setStackRowLimits((prev) =>
+                        prev[index] === nextRows
                           ? prev
-                          : { ...prev, [index]: nextHeight },
+                          : { ...prev, [index]: nextRows },
                       );
                     }}
                     onPointerUp={(event) => {
@@ -546,7 +560,7 @@ export function QueryResults({
                       stackResizeDrag.current = null;
                     }}
                     onDoubleClick={() => {
-                      setStackHeights((prev) => {
+                      setStackRowLimits((prev) => {
                         if (!(index in prev)) return prev;
                         const next = { ...prev };
                         delete next[index];

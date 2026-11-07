@@ -97,6 +97,21 @@ export function attachSource(
     data: {},
   };
   w.sources.push(source);
+  const tabs = sqlTabs(w);
+  if (tabs.some((tab) => tab.disconnectedFrom?.profileId === profile.id)) {
+    setSqlTabs(
+      w,
+      tabs.map((tab) => {
+        if (tab.disconnectedFrom?.profileId !== profile.id) return tab;
+        const { disconnectedFrom, ...rest } = tab;
+        return {
+          ...rest,
+          sourceId: attachDatabase(w, source.id, disconnectedFrom.database),
+        };
+      }),
+      activeSqlTab(w).id,
+    );
+  }
   return source.id;
 }
 export function updateSource(
@@ -178,25 +193,50 @@ export function updateSource(
   }
 }
 export function removeSource(w: WorkspaceDefinition, sourceId: string) {
-  if (!w.sources || w.sources.length < 2)
-    throw Error("Keep at least one connection in the workspace.");
+  ensureSources(w);
+  const sources = w.sources!;
+  if (!sources.some((source) => source.id === sourceId)) return;
   const removed = new Set(
-    w.sources
+    sources
       .filter((s) => s.id === sourceId || s.parentSourceId === sourceId)
       .map((s) => s.id),
   );
-  const fallback = w.sources.find((s) => !removed.has(s.id));
-  if (!fallback) throw Error("Keep at least one connection in the workspace.");
+  let fallback = sources.find((s) => !removed.has(s.id) && !s.connection);
+  if (!fallback) {
+    fallback = {
+      id: crypto.randomUUID(),
+      name: w.name,
+      schema: { tables: [], relationships: [] },
+      data: {},
+    };
+    sources.push(fallback);
+  }
   if (removed.has(w.activeSourceId ?? "primary"))
     activateSource(w, fallback.id);
-  w.sources = w.sources.filter((s) => !removed.has(s.id));
+  const removedSources = sources.filter((s) => removed.has(s.id));
+  const root = removedSources.find((s) => s.id === sourceId);
+  w.sources = sources.filter((s) => !removed.has(s.id));
   setSqlTabs(
     w,
-    sqlTabs(w).map((tab) =>
-      removed.has(tab.sourceId ?? "primary")
-        ? { ...tab, sourceId: fallback.id }
-        : tab,
-    ),
+    sqlTabs(w).map((tab) => {
+      const source = removedSources.find(
+        (item) => item.id === (tab.sourceId ?? "primary"),
+      );
+      if (!source) return tab;
+      const profileId = root?.connectionId ?? source.connectionId;
+      return {
+        ...tab,
+        sourceId: fallback.id,
+        ...(profileId && source.connection
+          ? {
+              disconnectedFrom: {
+                profileId,
+                database: source.connection.config.database,
+              },
+            }
+          : {}),
+      };
+    }),
     w.activeSqlTabId ?? sqlTabs(w)[0].id,
   );
 }

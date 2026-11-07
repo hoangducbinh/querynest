@@ -14,8 +14,9 @@ export function cellText(value: unknown): string {
       ? JSON.stringify(value)
       : String(value);
 }
+let nextDraftSeq = 1;
 export const makeDraft = (row?: Record<string, unknown>): DraftRow => ({
-  id: crypto.randomUUID(),
+  id: `row-${nextDraftSeq++}`,
   original: row,
   cells: {},
   deleted: false,

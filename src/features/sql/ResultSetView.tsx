@@ -1,3 +1,4 @@
+import { RowFilter } from "../sample-data/RowFilter";
 import {
   memo,
   useEffect,
@@ -10,6 +11,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type RefObject,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   Check,
   ChevronDown,
@@ -25,7 +27,6 @@ import {
   Maximize2,
   Plus,
   RotateCcw,
-  Search,
   Terminal,
   Trash2,
   X,
@@ -76,16 +77,21 @@ import {
 import type { SqlDialect } from "./data-types";
 import type { SqlResult } from "./execution";
 import {
+  buildCopyAsCsv,
   buildCopyAsInsert,
   buildCopyAsTsv,
   buildCopyAsUpdate,
   inferResultTableTarget,
+  isJoinQuery,
 } from "./result-sql-copy";
 
 const ROW_HEIGHT = 29;
 const COMPACT_ROW_HEIGHT = 25;
-const ROW_OVERSCAN = 10;
-const VIRTUALIZE_THRESHOLD = 40;
+const ROW_OVERSCAN = 45;
+const ROW_CHUNK = 30;
+const VIRTUALIZE_THRESHOLD_LOCKED = 400;
+const VIRTUALIZE_THRESHOLD_EDITABLE = 120;
+export const STACK_DEFAULT_ROWS = 10;
 
 const valueAt = (row: DraftRow, name: string): CellValue =>
   Object.hasOwn(row.cells, name)
@@ -151,15 +157,22 @@ interface ResultRowHandlers {
     rowId: string,
     visiblePos: number,
   ) => void;
-  onCellClick: (
+  onCellMouseDown: (
     event: ReactMouseEvent,
     rowId: string,
     visiblePos: number,
     rowIndex: number,
     colIndex: number,
   ) => void;
+  onCellMouseEnter: (
+    event: ReactMouseEvent,
+    visiblePos: number,
+    rowIndex: number,
+    colIndex: number,
+  ) => void;
   onContextMenu: (
     event: ReactMouseEvent,
+    visiblePos: number,
     rowIndex: number,
     colIndex: number,
   ) => void;
@@ -183,9 +196,13 @@ const ResultTableRow = memo(function ResultTableRow({
   rowIndex: r,
   visiblePos,
   isRowSelected,
+  inRangeRow,
+  rangeMinCol,
+  rangeMaxCol,
+  isRangeTop,
+  isRangeBottom,
   activeCol,
   editable,
-  compact,
   disabled,
   saving,
   visibleColumns,
@@ -198,9 +215,13 @@ const ResultTableRow = memo(function ResultTableRow({
   rowIndex: number;
   visiblePos: number;
   isRowSelected: boolean;
+  inRangeRow: boolean;
+  rangeMinCol: number;
+  rangeMaxCol: number;
+  isRangeTop: boolean;
+  isRangeBottom: boolean;
   activeCol: number;
   editable: boolean;
-  compact: boolean;
   disabled: boolean;
   saving: boolean;
   visibleColumns: VisibleColumnItem[];
@@ -212,6 +233,7 @@ const ResultTableRow = memo(function ResultTableRow({
   const isRowActive = activeCol >= 0;
   const rowClass = [
     isRowSelected ? "row-selected" : "",
+    inRangeRow ? "row-in-range" : "",
     isRowActive ? "row-active" : "",
     row.deleted ? "row-deleted" : "",
     !row.original ? "row-new" : "",
@@ -220,55 +242,49 @@ const ResultTableRow = memo(function ResultTableRow({
     .join(" ");
 
   return (
-    <tr
-      className={rowClass || undefined}
-      onContextMenu={(e) =>
-        handlers.current.onContextMenu(e, r, Math.max(0, activeCol))
-      }
-    >
+    <tr className={rowClass || undefined}>
       <td
         className="result-row-gutter muted"
+        onContextMenu={(e) =>
+          handlers.current.onContextMenu(e, visiblePos, r, -1)
+        }
         onClick={(e) => {
           if ((e.target as HTMLElement).tagName === "INPUT") return;
-          if (e.shiftKey || e.metaKey || e.ctrlKey || compact) {
+          if (e.shiftKey || e.metaKey || e.ctrlKey) {
             e.preventDefault();
             handlers.current.onGutterClick(e, row.id, visiblePos, r);
           }
         }}
       >
-        {compact ? (
-          <span>{r + 1}</span>
-        ) : (
-          <label>
-            <input
-              type="checkbox"
-              aria-label={`Select row ${r + 1}`}
-              checked={isRowSelected}
-              onChange={(e) => {
-                const nativeEvt = e.nativeEvent as MouseEvent;
-                if (nativeEvt.shiftKey) {
-                  handlers.current.onGutterClick(
-                    {
-                      shiftKey: true,
-                      metaKey: nativeEvt.metaKey,
-                      ctrlKey: nativeEvt.ctrlKey,
-                    } as ReactMouseEvent,
-                    row.id,
-                    visiblePos,
-                    r,
-                  );
-                  return;
-                }
-                handlers.current.onCheckboxChange(
-                  e.target.checked,
+        <label>
+          <input
+            type="checkbox"
+            aria-label={`Select row ${r + 1}`}
+            checked={isRowSelected}
+            onChange={(e) => {
+              const nativeEvt = e.nativeEvent as MouseEvent;
+              if (nativeEvt.shiftKey) {
+                handlers.current.onGutterClick(
+                  {
+                    shiftKey: true,
+                    metaKey: nativeEvt.metaKey,
+                    ctrlKey: nativeEvt.ctrlKey,
+                  } as ReactMouseEvent,
                   row.id,
                   visiblePos,
+                  r,
                 );
-              }}
-            />
-            <span>{r + 1}</span>
-          </label>
-        )}
+                return;
+              }
+              handlers.current.onCheckboxChange(
+                e.target.checked,
+                row.id,
+                visiblePos,
+              );
+            }}
+          />
+          <span>{r + 1}</span>
+        </label>
       </td>
       {colStart > 0 && (
         <td
@@ -284,6 +300,8 @@ const ResultTableRow = memo(function ResultTableRow({
         const isNull = val === null;
         const cellEditable =
           editable && handlers.current.canEditCell(r, colIdx);
+        const inCellRange =
+          inRangeRow && colIdx >= rangeMinCol && colIdx <= rangeMaxCol;
 
         return (
           <td
@@ -292,15 +310,23 @@ const ResultTableRow = memo(function ResultTableRow({
               edited ? "cell-changed" : "",
               isNull ? "cell-null" : "",
               activeCol === colIdx ? "cell-active" : "",
+              inCellRange ? "cell-in-range" : "",
+              inCellRange && isRangeTop ? "range-top" : "",
+              inCellRange && isRangeBottom ? "range-bottom" : "",
+              inCellRange && colIdx === rangeMinCol ? "range-left" : "",
+              inCellRange && colIdx === rangeMaxCol ? "range-right" : "",
             ]
               .filter(Boolean)
               .join(" ")}
             title={isNull ? "NULL" : (val ?? "")}
-            onClick={(e) =>
-              handlers.current.onCellClick(e, row.id, visiblePos, r, colIdx)
+            onMouseDown={(e) =>
+              handlers.current.onCellMouseDown(e, row.id, visiblePos, r, colIdx)
+            }
+            onMouseEnter={(e) =>
+              handlers.current.onCellMouseEnter(e, visiblePos, r, colIdx)
             }
             onContextMenu={(e) =>
-              handlers.current.onContextMenu(e, r, colIdx)
+              handlers.current.onContextMenu(e, visiblePos, r, colIdx)
             }
           >
             {editable ? (
@@ -350,6 +376,8 @@ export interface StackBlockHeaderProps {
   sql: string;
   onToggleCollapse: () => void;
   onExpandToTab: () => void;
+  rowLimit?: number;
+  onRowLimitChange?: (limit: number | undefined) => void;
 }
 
 export interface ResultSetViewProps {
@@ -364,7 +392,7 @@ export interface ResultSetViewProps {
   stackHeader?: StackBlockHeaderProps;
 }
 
-export function ResultSetView({
+export const ResultSetView = memo(function ResultSetView({
   viewKey,
   result,
   table,
@@ -385,7 +413,11 @@ export function ResultSetView({
     () => inferResultTableTarget(result.sql, schema, dialect),
     [result.sql, schema, dialect],
   );
-  const metadataTable = table ?? inferredTarget.table;
+  const isJoin = useMemo(
+    () => isJoinQuery(result.sql, dialect),
+    [result.sql, dialect],
+  );
+  const metadataTable = table ?? (isJoin ? undefined : inferredTarget.table);
   const columnMap = useMemo(
     () =>
       new Map<string, ColumnDefinition>(
@@ -408,6 +440,14 @@ export function ResultSetView({
   );
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const lastClickedRowRef = useRef<number | null>(null);
+  const rangeAnchorRef = useRef<{ rowPos: number; col: number } | null>(null);
+  const isDraggingRangeRef = useRef(false);
+  const [cellRange, setCellRange] = useState<{
+    startRowPos: number;
+    endRowPos: number;
+    startCol: number;
+    endCol: number;
+  } | null>(null);
   const [active, setActive] = useState({ row: 0, col: 0 });
   const [focusCell, setFocusCell] = useState<{
     row: number;
@@ -431,14 +471,22 @@ export function ResultSetView({
   const rootRef = useRef<HTMLDivElement>(null);
   const previousRowsRef = useRef(result.rows);
 
-  const dirty = drafts.some(isChanged);
+  const changes = useMemo(() => drafts.filter(isChanged), [drafts]);
+  const dirty = changes.length > 0;
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
 
-  const changes = useMemo(() => drafts.filter(isChanged), [drafts]);
-  const addedCount = changes.filter((r) => !r.original && !r.deleted).length;
-  const editedCount = changes.filter((r) => r.original && !r.deleted).length;
-  const deletedCount = changes.filter((r) => r.original && r.deleted).length;
+  const { addedCount, editedCount, deletedCount } = useMemo(() => {
+    let added = 0;
+    let edited = 0;
+    let deleted = 0;
+    for (const r of changes) {
+      if (!r.original && !r.deleted) added++;
+      else if (r.original && !r.deleted) edited++;
+      else if (r.original && r.deleted) deleted++;
+    }
+    return { addedCount: added, editedCount: edited, deletedCount: deleted };
+  }, [changes]);
 
   useEffect(() => {
     onDirty?.(dirty);
@@ -455,10 +503,19 @@ export function ResultSetView({
     if (!dirtyRef.current) {
       setDrafts(result.rows.map((row) => makeDraft(row)));
       setSelected(new Set());
+      setCellRange(null);
       setRequiresRefresh(false);
       setIsUnlocked(false);
     }
   }, [result.rows]);
+
+  useEffect(() => {
+    const stopDrag = () => {
+      isDraggingRangeRef.current = false;
+    };
+    window.addEventListener("mouseup", stopDrag);
+    return () => window.removeEventListener("mouseup", stopDrag);
+  }, []);
 
   useEffect(() => {
     if (!notice) return;
@@ -484,11 +541,16 @@ export function ResultSetView({
         setCopyMenuOpen(false);
       }
     };
+    const handleAnyScroll = () => {
+      setContextMenu(null);
+    };
     window.addEventListener("mousedown", handlePointerDown);
     window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("scroll", handleAnyScroll, true);
     return () => {
       window.removeEventListener("mousedown", handlePointerDown);
       window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("scroll", handleAnyScroll, true);
     };
   }, [contextMenu, copyMenuOpen]);
 
@@ -514,39 +576,6 @@ export function ResultSetView({
   const gutterWidth = compact ? 34 : 38;
   const initialPos = viewKey ? gridPosition(viewKey) : undefined;
   const viewport = useColumnWindow(widths, gutterWidth, initialPos);
-
-  const [rowViewport, setRowViewport] = useState({
-    top: initialPos?.top ?? 0,
-    height: 360,
-  });
-
-  useLayoutEffect(() => {
-    const element = viewport.ref.current;
-    if (!element) return;
-    let frame = 0;
-    const measure = () => {
-      frame = 0;
-      const top = element.scrollTop;
-      const height = element.clientHeight || 360;
-      setRowViewport((old) =>
-        Math.abs(old.top - top) < 12 && Math.abs(old.height - height) < 8
-          ? old
-          : { top, height },
-      );
-    };
-    const schedule = () => {
-      if (!frame) frame = requestAnimationFrame(measure);
-    };
-    const observer = new ResizeObserver(schedule);
-    observer.observe(element);
-    element.addEventListener("scroll", schedule, { passive: true });
-    measure();
-    return () => {
-      cancelAnimationFrame(frame);
-      observer.disconnect();
-      element.removeEventListener("scroll", schedule);
-    };
-  }, [ columns.length ]);
 
   const visibleColumns = useMemo<VisibleColumnItem[]>(
     () =>
@@ -585,24 +614,124 @@ export function ResultSetView({
     [drafts, compact, filter, columns],
   );
 
-  const shouldVirtualizeRows = visibleRows.length > VIRTUALIZE_THRESHOLD;
+  const effectiveStackLimit = stackHeader?.rowLimit ?? STACK_DEFAULT_ROWS;
+  const selectableRowCount = compact
+    ? Math.min(visibleRows.length, Math.max(1, effectiveStackLimit))
+    : visibleRows.length;
+
+  const normalizedRange = useMemo(() => {
+    if (
+      selected.size > 0 ||
+      !cellRange ||
+      !selectableRowCount ||
+      !columns.length
+    ) {
+      return null;
+    }
+    const maxRowIdx = selectableRowCount - 1;
+    const maxColIdx = columns.length - 1;
+    const minRowPos = Math.max(
+      0,
+      Math.min(maxRowIdx, Math.min(cellRange.startRowPos, cellRange.endRowPos)),
+    );
+    const maxRowPos = Math.max(
+      0,
+      Math.min(maxRowIdx, Math.max(cellRange.startRowPos, cellRange.endRowPos)),
+    );
+    const minCol = Math.max(
+      0,
+      Math.min(maxColIdx, Math.min(cellRange.startCol, cellRange.endCol)),
+    );
+    const maxCol = Math.max(
+      0,
+      Math.min(maxColIdx, Math.max(cellRange.startCol, cellRange.endCol)),
+    );
+    const rowCount = maxRowPos - minRowPos + 1;
+    const colCount = maxCol - minCol + 1;
+    return {
+      minRowPos,
+      maxRowPos,
+      minCol,
+      maxCol,
+      rowCount,
+      colCount,
+      cellCount: rowCount * colCount,
+    };
+  }, [selected.size, cellRange, selectableRowCount, columns.length]);
+
+  const hasActiveRange = Boolean(
+    normalizedRange && normalizedRange.cellCount > 1,
+  );
+
+  const virtualizeThreshold = editable
+    ? VIRTUALIZE_THRESHOLD_EDITABLE
+    : VIRTUALIZE_THRESHOLD_LOCKED;
+  const shouldVirtualizeRows =
+    !compact && visibleRows.length > virtualizeThreshold;
+
+  const [rowRange, setRowRange] = useState(() => {
+    const initialTop = initialPos?.top ?? 0;
+    const rawStart = Math.max(
+      0,
+      Math.floor(initialTop / rowHeight) - ROW_OVERSCAN,
+    );
+    const start = Math.floor(rawStart / ROW_CHUNK) * ROW_CHUNK;
+    const end = start + ROW_OVERSCAN * 2 + ROW_CHUNK * 2;
+    return { start, end };
+  });
+
+  useLayoutEffect(() => {
+    if (!shouldVirtualizeRows) return;
+    const element = viewport.ref.current;
+    if (!element) return;
+    let frame = 0;
+    const measure = () => {
+      frame = 0;
+      const top = element.scrollTop;
+      const height = Math.max(element.clientHeight || 360, 220);
+      const rawStart = Math.max(0, Math.floor(top / rowHeight) - ROW_OVERSCAN);
+      const start = Math.floor(rawStart / ROW_CHUNK) * ROW_CHUNK;
+      const rawEnd = Math.ceil((top + height) / rowHeight) + ROW_OVERSCAN;
+      const end = Math.ceil(rawEnd / ROW_CHUNK) * ROW_CHUNK;
+      setRowRange((old) =>
+        old.start === start && old.end === end ? old : { start, end },
+      );
+    };
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(measure);
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(element);
+    element.addEventListener("scroll", schedule, { passive: true });
+    measure();
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      element.removeEventListener("scroll", schedule);
+    };
+  }, [shouldVirtualizeRows, rowHeight]);
+
   const rowStart = shouldVirtualizeRows
-    ? Math.max(0, Math.floor(rowViewport.top / rowHeight) - ROW_OVERSCAN)
+    ? Math.min(rowRange.start, Math.max(0, visibleRows.length - 1))
     : 0;
   const rowEnd = shouldVirtualizeRows
-    ? Math.min(
-        visibleRows.length,
-        Math.ceil(
-          (rowViewport.top + Math.max(rowViewport.height, 220)) / rowHeight,
-        ) + ROW_OVERSCAN,
-      )
+    ? Math.min(visibleRows.length, Math.max(rowStart + 1, rowRange.end))
     : visibleRows.length;
   const windowedRows = useMemo(
     () =>
-      shouldVirtualizeRows
-        ? visibleRows.slice(rowStart, rowEnd)
-        : visibleRows,
-    [shouldVirtualizeRows, visibleRows, rowStart, rowEnd],
+      compact
+        ? visibleRows.slice(0, Math.max(1, effectiveStackLimit))
+        : shouldVirtualizeRows
+          ? visibleRows.slice(rowStart, rowEnd)
+          : visibleRows,
+    [
+      compact,
+      effectiveStackLimit,
+      shouldVirtualizeRows,
+      visibleRows,
+      rowStart,
+      rowEnd,
+    ],
   );
 
   function scrollVisiblePosIntoView(visiblePos: number) {
@@ -701,11 +830,17 @@ export function ResultSetView({
   function deleteTargetRows() {
     if (!editable || disabled || saving || requiresRefresh) return;
     const targetIds =
-      selected.size > 0
-        ? selected
-        : activeDraft
-          ? new Set([activeDraft.id])
-          : new Set<string>();
+      hasActiveRange && normalizedRange
+        ? new Set(
+            visibleRows
+              .slice(normalizedRange.minRowPos, normalizedRange.maxRowPos + 1)
+              .map(({ row }) => row.id),
+          )
+        : selected.size > 0
+          ? selected
+          : activeDraft
+            ? new Set([activeDraft.id])
+            : new Set<string>();
     if (!targetIds.size) return;
     setDrafts((current) =>
       current.flatMap((row) =>
@@ -717,7 +852,41 @@ export function ResultSetView({
       ),
     );
     setSelected(new Set());
+    setCellRange(null);
     setError("");
+  }
+
+  function setNullTargetCells(fallbackRow = clampedActiveRow, fallbackCol = active.col) {
+    if (!editable || disabled || saving || requiresRefresh) return;
+    if (hasActiveRange && normalizedRange) {
+      const targetRowIndices = new Set(
+        visibleRows
+          .slice(normalizedRange.minRowPos, normalizedRange.maxRowPos + 1)
+          .map(({ index }) => index),
+      );
+      const targetColNames = columns
+        .slice(normalizedRange.minCol, normalizedRange.maxCol + 1)
+        .filter((colName) => {
+          const colDef = columnMap.get(colName);
+          return !colDef?.generated && !colDef?.readOnly && colDef?.nullable !== false;
+        });
+      if (!targetRowIndices.size || !targetColNames.length) return;
+      setError("");
+      setNotice("");
+      setDrafts((current) =>
+        current.map((row, idx) => {
+          if (!targetRowIndices.has(idx) || row.deleted) return row;
+          if (row.original && !table?.primaryKey.length) return row;
+          const nextCells = { ...row.cells };
+          for (const colName of targetColNames) {
+            nextCells[colName] = null;
+          }
+          return { ...row, cells: nextCells };
+        }),
+      );
+      return;
+    }
+    updateCell(fallbackRow, fallbackCol, null);
   }
 
   async function saveChanges() {
@@ -852,85 +1021,164 @@ export function ResultSetView({
     }
   }
 
-  function resolveCopyRows(allRows = false): DraftRow[] {
+  function resolveCopyScope(allRows = false): {
+    rows: DraftRow[];
+    cols: string[];
+    isRange: boolean;
+  } {
     if (allRows) {
-      return visibleRows.map(({ row }) => row).filter((r) => !r.deleted);
+      return {
+        rows: visibleRows.map(({ row }) => row).filter((r) => !r.deleted),
+        cols: columns,
+        isRange: false,
+      };
+    }
+    if (hasActiveRange && normalizedRange) {
+      return {
+        rows: visibleRows
+          .slice(normalizedRange.minRowPos, normalizedRange.maxRowPos + 1)
+          .map(({ row }) => row)
+          .filter((r) => !r.deleted),
+        cols: columns.slice(normalizedRange.minCol, normalizedRange.maxCol + 1),
+        isRange: true,
+      };
     }
     if (selected.size > 0) {
       const chosen = drafts.filter((r) => selected.has(r.id) && !r.deleted);
-      if (chosen.length > 0) return chosen;
+      if (chosen.length > 0) {
+        return { rows: chosen, cols: columns, isRange: false };
+      }
     }
-    if (activeDraft && !activeDraft.deleted) {
-      return [activeDraft];
+    const targetRowIdx = contextMenu ? contextMenu.rowIndex : clampedActiveRow;
+    const targetColIdx = Math.max(
+      0,
+      Math.min(
+        columns.length - 1,
+        contextMenu ? contextMenu.colIndex : active.col,
+      ),
+    );
+    const targetDraft = drafts[targetRowIdx] ?? activeDraft;
+    const targetCol = columns[targetColIdx];
+    if (targetDraft && !targetDraft.deleted && targetCol) {
+      return { rows: [targetDraft], cols: [targetCol], isRange: true };
     }
-    return [];
+    return { rows: [], cols: columns, isRange: false };
   }
 
   async function handleCopyAsInsert(allRows = false) {
-    const targetDrafts = resolveCopyRows(allRows);
-    if (!targetDrafts.length) return;
-    const rows = targetDrafts.map((d) => effectiveRowValues(d, columns));
+    if (isJoin) return;
+    const { rows: targetDrafts, cols: targetCols, isRange } =
+      resolveCopyScope(allRows);
+    if (!targetDrafts.length || !targetCols.length) return;
+    const rows = targetDrafts.map((d) => effectiveRowValues(d, targetCols));
     const sqlText = buildCopyAsInsert({
-      columns,
+      columns: targetCols,
       rows,
       sql: result.sql,
       schema,
       table: metadataTable,
       dialect,
     });
+    if (!sqlText) return;
     await copyTextToClipboard(sqlText);
     setCopyMenuOpen(false);
     setContextMenu(null);
     setNotice(
-      `Copied ${rows.length} row${rows.length === 1 ? "" : "s"} as INSERT`,
+      isRange
+        ? `Copied ${rows.length}×${targetCols.length} as INSERT`
+        : `Copied ${rows.length} row${rows.length === 1 ? "" : "s"} as INSERT`,
     );
   }
 
   async function handleCopyAsUpdate(allRows = false) {
-    const targetDrafts = resolveCopyRows(allRows);
-    if (!targetDrafts.length) return;
+    if (isJoin) return;
+    const { rows: targetDrafts, cols: targetCols, isRange } =
+      resolveCopyScope(allRows);
+    if (!targetDrafts.length || !targetCols.length) return;
     const rows = targetDrafts.map((d) => ({
       current: effectiveRowValues(d, columns),
       original: d.original,
     }));
     const sqlText = buildCopyAsUpdate({
       columns,
+      setColumns: isRange ? targetCols : undefined,
       rows,
       sql: result.sql,
       schema,
       table: metadataTable,
       dialect,
     });
+    if (!sqlText) return;
     await copyTextToClipboard(sqlText);
     setCopyMenuOpen(false);
     setContextMenu(null);
     setNotice(
-      `Copied ${rows.length} row${rows.length === 1 ? "" : "s"} as UPDATE`,
+      isRange
+        ? `Copied ${rows.length}×${targetCols.length} as UPDATE`
+        : `Copied ${rows.length} row${rows.length === 1 ? "" : "s"} as UPDATE`,
     );
   }
 
-  async function handleCopyAsTsv(allRows = false) {
-    const targetDrafts = resolveCopyRows(allRows);
-    if (!targetDrafts.length) return;
-    const rows = targetDrafts.map((d) => effectiveRowValues(d, columns));
-    const tsv = buildCopyAsTsv(columns, rows, true);
+  async function handleCopyWithHeader(allRows = false) {
+    const { rows: targetDrafts, cols: targetCols, isRange } =
+      resolveCopyScope(allRows);
+    if (!targetDrafts.length || !targetCols.length) return;
+    const rows = targetDrafts.map((d) => effectiveRowValues(d, targetCols));
+    const tsv = buildCopyAsTsv(targetCols, rows, true);
     await copyTextToClipboard(tsv);
     setCopyMenuOpen(false);
     setContextMenu(null);
     setNotice(
-      `Copied ${rows.length} row${rows.length === 1 ? "" : "s"} as TSV`,
+      isRange
+        ? `Copied ${rows.length}×${targetCols.length} with header`
+        : `Copied ${rows.length} row${rows.length === 1 ? "" : "s"} with header`,
+    );
+  }
+
+  async function handleCopyAsTsv(allRows = false, includeHeader = false) {
+    const { rows: targetDrafts, cols: targetCols, isRange } =
+      resolveCopyScope(allRows);
+    if (!targetDrafts.length || !targetCols.length) return;
+    const rows = targetDrafts.map((d) => effectiveRowValues(d, targetCols));
+    const tsv = buildCopyAsTsv(targetCols, rows, includeHeader);
+    await copyTextToClipboard(tsv);
+    setCopyMenuOpen(false);
+    setContextMenu(null);
+    setNotice(
+      isRange
+        ? `Copied ${rows.length}×${targetCols.length} as TSV`
+        : `Copied ${rows.length} row${rows.length === 1 ? "" : "s"} as TSV`,
+    );
+  }
+
+  async function handleCopyAsCsv(allRows = false, includeHeader = true) {
+    const { rows: targetDrafts, cols: targetCols, isRange } =
+      resolveCopyScope(allRows);
+    if (!targetDrafts.length || !targetCols.length) return;
+    const rows = targetDrafts.map((d) => effectiveRowValues(d, targetCols));
+    const csv = buildCopyAsCsv(targetCols, rows, includeHeader);
+    await copyTextToClipboard(csv);
+    setCopyMenuOpen(false);
+    setContextMenu(null);
+    setNotice(
+      isRange
+        ? `Copied ${rows.length}×${targetCols.length} as CSV`
+        : `Copied ${rows.length} row${rows.length === 1 ? "" : "s"} as CSV`,
     );
   }
 
   async function handleCopyAsJson(allRows = false) {
-    const targetDrafts = resolveCopyRows(allRows);
-    if (!targetDrafts.length) return;
-    const rows = targetDrafts.map((d) => effectiveRowValues(d, columns));
+    const { rows: targetDrafts, cols: targetCols, isRange } =
+      resolveCopyScope(allRows);
+    if (!targetDrafts.length || !targetCols.length) return;
+    const rows = targetDrafts.map((d) => effectiveRowValues(d, targetCols));
     await copyTextToClipboard(JSON.stringify(rows, null, 2));
     setCopyMenuOpen(false);
     setContextMenu(null);
     setNotice(
-      `Copied ${rows.length} row${rows.length === 1 ? "" : "s"} as JSON`,
+      isRange
+        ? `Copied ${rows.length}×${targetCols.length} as JSON`
+        : `Copied ${rows.length} row${rows.length === 1 ? "" : "s"} as JSON`,
     );
   }
 
@@ -951,12 +1199,19 @@ export function ResultSetView({
     visiblePos: number,
     rowIndex: number,
   ) {
+    setCellRange(null);
+    const fallbackAnchor = visibleRows.findIndex(
+      ({ index }) => index === clampedActiveRow,
+    );
+    const anchorPos =
+      lastClickedRowRef.current ??
+      (fallbackAnchor >= 0 ? fallbackAnchor : null);
     setActive((prev) =>
       prev.row === rowIndex ? prev : { row: rowIndex, col: prev.col },
     );
-    if (event.shiftKey && lastClickedRowRef.current !== null) {
-      const start = Math.min(lastClickedRowRef.current, visiblePos);
-      const end = Math.max(lastClickedRowRef.current, visiblePos);
+    if (event.shiftKey && anchorPos !== null) {
+      const start = Math.min(anchorPos, visiblePos);
+      const end = Math.max(anchorPos, visiblePos);
       const rangeIds = visibleRows
         .slice(start, end + 1)
         .map(({ row }) => row.id);
@@ -980,20 +1235,147 @@ export function ResultSetView({
     }
   }
 
+  function handleCellMouseDown(
+    event: ReactMouseEvent,
+    rowId: string,
+    visiblePos: number,
+    rowIndex: number,
+    colIndex: number,
+  ) {
+    if (event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey) {
+      event.preventDefault();
+      setCellRange(null);
+      handleRowSelectClick(event, rowId, visiblePos, rowIndex);
+      setActive((old) =>
+        old.row === rowIndex && old.col === colIndex
+          ? old
+          : { row: rowIndex, col: colIndex },
+      );
+      return;
+    }
+    if (selected.size > 0) {
+      event.preventDefault();
+      isDraggingRangeRef.current = false;
+      setCellRange(null);
+      return;
+    }
+    if (event.shiftKey) {
+      event.preventDefault();
+      const fallbackPos = visibleRows.findIndex(
+        ({ index }) => index === clampedActiveRow,
+      );
+      const anchor = rangeAnchorRef.current ?? {
+        rowPos: fallbackPos >= 0 ? fallbackPos : visiblePos,
+        col: active.col,
+      };
+      rangeAnchorRef.current = anchor;
+      isDraggingRangeRef.current = true;
+      setCellRange({
+        startRowPos: anchor.rowPos,
+        endRowPos: visiblePos,
+        startCol: anchor.col,
+        endCol: colIndex,
+      });
+      setActive((old) =>
+        old.row === rowIndex && old.col === colIndex
+          ? old
+          : { row: rowIndex, col: colIndex },
+      );
+      return;
+    }
+    rangeAnchorRef.current = { rowPos: visiblePos, col: colIndex };
+    lastClickedRowRef.current = visiblePos;
+    isDraggingRangeRef.current = true;
+    setCellRange(null);
+    setActive((old) =>
+      old.row === rowIndex && old.col === colIndex
+        ? old
+        : { row: rowIndex, col: colIndex },
+    );
+  }
+
+  function handleCellMouseEnter(
+    event: ReactMouseEvent,
+    visiblePos: number,
+    rowIndex: number,
+    colIndex: number,
+  ) {
+    if (
+      selected.size > 0 ||
+      !isDraggingRangeRef.current ||
+      (event.buttons & 1) !== 1
+    ) {
+      return;
+    }
+    const anchor = rangeAnchorRef.current;
+    if (!anchor) return;
+    if (anchor.rowPos === visiblePos && anchor.col === colIndex) {
+      setCellRange(null);
+      return;
+    }
+    window.getSelection()?.removeAllRanges();
+    if (
+      document.activeElement instanceof HTMLInputElement &&
+      rootRef.current?.contains(document.activeElement)
+    ) {
+      document.activeElement.blur();
+    }
+    setCellRange((prev) =>
+      prev &&
+      prev.startRowPos === anchor.rowPos &&
+      prev.endRowPos === visiblePos &&
+      prev.startCol === anchor.col &&
+      prev.endCol === colIndex
+        ? prev
+        : {
+            startRowPos: anchor.rowPos,
+            endRowPos: visiblePos,
+            startCol: anchor.col,
+            endCol: colIndex,
+          },
+    );
+    setActive((old) =>
+      old.row === rowIndex && old.col === colIndex
+        ? old
+        : { row: rowIndex, col: colIndex },
+    );
+  }
+
   function openRowContextMenu(
     event: ReactMouseEvent,
+    visiblePos: number,
     rowIndex: number,
     colIndex: number,
   ) {
     event.preventDefault();
     const row = drafts[rowIndex];
     if (!row) return;
-    setActive({ row: rowIndex, col: Math.max(0, colIndex) });
-    if (!selected.has(row.id)) {
+    const isGutter = colIndex < 0;
+    const safeCol = isGutter ? Math.max(0, active.col) : Math.max(0, colIndex);
+    const insideRange =
+      !isGutter &&
+      hasActiveRange &&
+      normalizedRange !== null &&
+      visiblePos >= normalizedRange.minRowPos &&
+      visiblePos <= normalizedRange.maxRowPos &&
+      safeCol >= normalizedRange.minCol &&
+      safeCol <= normalizedRange.maxCol;
+
+    if (selected.size > 0) {
+      setCellRange(null);
+    } else if (isGutter) {
+      setCellRange(null);
+      rangeAnchorRef.current = { rowPos: visiblePos, col: safeCol };
+      setActive({ row: rowIndex, col: safeCol });
       setSelected(new Set([row.id]));
+    } else if (!insideRange) {
+      setCellRange(null);
+      rangeAnchorRef.current = { rowPos: visiblePos, col: safeCol };
+      setActive({ row: rowIndex, col: safeCol });
     }
-    const menuWidth = 220;
-    const menuHeight = editable ? 260 : 195;
+    const menuWidth = 235;
+    const menuHeight = editable ? 330 : 265;
     const x = Math.min(
       event.clientX,
       Math.max(8, window.innerWidth - menuWidth - 8),
@@ -1002,15 +1384,16 @@ export function ResultSetView({
       event.clientY,
       Math.max(8, window.innerHeight - menuHeight - 8),
     );
-    setContextMenu({ x, y, rowIndex, colIndex: Math.max(0, colIndex) });
+    setContextMenu({ x, y, rowIndex, colIndex: safeCol });
   }
 
   const rowHandlersRef = useRef<ResultRowHandlers>({
     onGutterClick: handleRowSelectClick,
-    onCheckboxChange: () => {},
-    onCellClick: () => {},
+    onCheckboxChange: () => { },
+    onCellMouseDown: handleCellMouseDown,
+    onCellMouseEnter: handleCellMouseEnter,
     onContextMenu: openRowContextMenu,
-    onCellFocus: () => {},
+    onCellFocus: () => { },
     onCellChange: updateCell,
     onCellKeyDown: handleCellKey,
     onCellPaste: handlePaste,
@@ -1020,6 +1403,7 @@ export function ResultSetView({
   rowHandlersRef.current = {
     onGutterClick: handleRowSelectClick,
     onCheckboxChange: (checked, rowId, visiblePos) => {
+      setCellRange(null);
       lastClickedRowRef.current = visiblePos;
       setSelected((prev) => {
         const next = new Set(prev);
@@ -1028,23 +1412,17 @@ export function ResultSetView({
         return next;
       });
     },
-    onCellClick: (event, rowId, visiblePos, rowIndex, colIndex) => {
+    onCellMouseDown: handleCellMouseDown,
+    onCellMouseEnter: handleCellMouseEnter,
+    onContextMenu: openRowContextMenu,
+    onCellFocus: (rowIndex, colIndex) => {
+      if (selected.size > 0) return;
       setActive((old) =>
         old.row === rowIndex && old.col === colIndex
           ? old
           : { row: rowIndex, col: colIndex },
       );
-      if (event.shiftKey || event.metaKey || event.ctrlKey) {
-        handleRowSelectClick(event, rowId, visiblePos, rowIndex);
-      }
     },
-    onContextMenu: openRowContextMenu,
-    onCellFocus: (rowIndex, colIndex) =>
-      setActive((old) =>
-        old.row === rowIndex && old.col === colIndex
-          ? old
-          : { row: rowIndex, col: colIndex },
-      ),
     onCellChange: updateCell,
     onCellKeyDown: handleCellKey,
     onCellPaste: handlePaste,
@@ -1052,8 +1430,9 @@ export function ResultSetView({
   };
 
   // Record navigation in visible rows
-  const activeVisiblePos = visibleRows.findIndex(
-    ({ index }) => index === clampedActiveRow,
+  const activeVisiblePos = useMemo(
+    () => visibleRows.findIndex(({ index }) => index === clampedActiveRow),
+    [visibleRows, clampedActiveRow],
   );
   function goToVisibleRow(targetVisiblePos: number) {
     if (!visibleRows.length) return;
@@ -1082,7 +1461,27 @@ export function ResultSetView({
   }
 
   const targetCopyCount =
-    selected.size > 0 ? selected.size : drafts.length > 0 ? 1 : 0;
+    hasActiveRange && normalizedRange
+      ? normalizedRange.rowCount
+      : selected.size > 0
+        ? selected.size
+        : drafts.length > 0
+          ? 1
+          : 0;
+  const scopeBadge =
+    hasActiveRange && normalizedRange
+      ? `${normalizedRange.rowCount}×${normalizedRange.colCount}`
+      : selected.size > 1
+        ? `${selected.size}`
+        : "";
+  const scopeDescription =
+    hasActiveRange && normalizedRange
+      ? `${normalizedRange.rowCount} row${normalizedRange.rowCount === 1 ? "" : "s"} × ${normalizedRange.colCount} col${normalizedRange.colCount === 1 ? "" : "s"} selected`
+      : selected.size > 0
+        ? `${selected.size} selected row${selected.size === 1 ? "" : "s"}`
+        : contextMenu
+          ? `Row #${contextMenu.rowIndex + 1} · ${columns[contextMenu.colIndex] ?? ""}`
+          : `Row #${clampedActiveRow + 1}`;
 
   return (
     <div
@@ -1101,11 +1500,34 @@ export function ResultSetView({
             <ChevronDown size={12} />
             <strong>{stackHeader.label}</strong>
             <span className="stack-row-badge">
-              {drafts.length} row{drafts.length === 1 ? "" : "s"}
+              {windowedRows.length < visibleRows.length
+                ? `${windowedRows.length} / ${visibleRows.length} rows`
+                : `${visibleRows.length} row${visibleRows.length === 1 ? "" : "s"}`}
             </span>
           </button>
 
           <div className="stack-header-spacer" />
+
+          {(selected.size > 0 || hasActiveRange) && (
+            <span className="stack-selection-pill">
+              <span>
+                {hasActiveRange && normalizedRange
+                  ? `${normalizedRange.rowCount}×${normalizedRange.colCount} selected`
+                  : `${selected.size} row${selected.size === 1 ? "" : "s"} selected`}
+              </span>
+              <button
+                type="button"
+                aria-label="Clear selection"
+                title="Clear selection"
+                onClick={() => {
+                  setSelected(new Set());
+                  setCellRange(null);
+                }}
+              >
+                <X size={10} />
+              </button>
+            </span>
+          )}
 
           {notice && (
             <span className="result-status-summary is-notice" role="status">
@@ -1144,6 +1566,32 @@ export function ResultSetView({
         ref={viewport.ref}
         tabIndex={0}
         aria-label="Query result data"
+        onKeyDown={(event) => {
+          if (
+            (event.metaKey || event.ctrlKey) &&
+            event.key.toLowerCase() === "c"
+          ) {
+            if (
+              document.activeElement instanceof HTMLInputElement &&
+              document.activeElement.selectionStart !==
+                document.activeElement.selectionEnd
+            ) {
+              return;
+            }
+            if (hasActiveRange || selected.size > 0 || !editable) {
+              event.preventDefault();
+              if (event.shiftKey) {
+                void handleCopyWithHeader(false);
+              } else if (hasActiveRange || selected.size > 0) {
+                void handleCopyAsTsv(false, false);
+              } else {
+                void handleCopyCellValue(clampedActiveRow, active.col);
+              }
+            }
+          } else if (event.key === "Escape" && cellRange) {
+            setCellRange(null);
+          }
+        }}
         onScroll={(event) => {
           if (contextMenu) setContextMenu(null);
           if (viewKey)
@@ -1158,7 +1606,9 @@ export function ResultSetView({
           className={
             "resizable-results navicat-result-table" +
             (editable ? " is-editable" : "") +
-            (compact ? " is-compact" : "")
+            (compact ? " is-compact" : "") +
+            (selected.size > 0 ? " has-row-selection" : "") +
+            (hasActiveRange ? " has-range-selection" : "")
           }
           style={{
             width: gutterWidth + widths.reduce((sum, w) => sum + w, 0),
@@ -1175,40 +1625,31 @@ export function ResultSetView({
               <th
                 className="result-row-gutter"
                 title="Select all rows"
-                onClick={
-                  compact
-                    ? () =>
-                        setSelected((prev) =>
-                          prev.size === visibleRows.length
-                            ? new Set()
-                            : new Set(visibleRows.map(({ row }) => row.id)),
-                        )
-                    : undefined
-                }
               >
-                {compact ? (
+                <label>
+                  <input
+                    type="checkbox"
+                    aria-label="Select all rows"
+                    title="Select all rows"
+                    checked={
+                      selected.size > 0 &&
+                      (compact ? windowedRows : visibleRows).length > 0 &&
+                      (compact ? windowedRows : visibleRows).every(({ row }) =>
+                        selected.has(row.id),
+                      )
+                    }
+                    onChange={(e) => {
+                      setCellRange(null);
+                      const targetList = compact ? windowedRows : visibleRows;
+                      setSelected(
+                        e.target.checked
+                          ? new Set(targetList.map(({ row }) => row.id))
+                          : new Set(),
+                      );
+                    }}
+                  />
                   <span>#</span>
-                ) : (
-                  <label>
-                    <input
-                      type="checkbox"
-                      aria-label="Select all rows"
-                      title="Select all rows"
-                      checked={
-                        visibleRows.length > 0 &&
-                        visibleRows.every(({ row }) => selected.has(row.id))
-                      }
-                      onChange={(e) =>
-                        setSelected(
-                          e.target.checked
-                            ? new Set(visibleRows.map(({ row }) => row.id))
-                            : new Set(),
-                        )
-                      }
-                    />
-                    <span>#</span>
-                  </label>
-                )}
+                </label>
               </th>
               {viewport.start > 0 && (
                 <th
@@ -1217,42 +1658,88 @@ export function ResultSetView({
                   aria-hidden="true"
                 />
               )}
-              {visibleColumns.map(({ name, index, column }) => (
-                <th
-                  key={name}
-                  title={
-                    column
-                      ? `${name} · ${column.nativeType ?? column.type}`
-                      : name
-                  }
-                  className={active.col === index ? "column-active" : ""}
-                >
-                  <span className="result-column-name">
-                    {pkColumnNames.has(name) && (
-                      <KeyRound size={11} className="gold" />
-                    )}
-                    <span>{name}</span>
-                  </span>
-                  <ColumnResizeHandle
-                    name={name}
-                    width={widths[index]}
-                    onResize={(width, persist) =>
-                      sizing.resize(name, width, persist)
+              {visibleColumns.map(({ name, index, column }) => {
+                const colInRange =
+                  hasActiveRange &&
+                  normalizedRange !== null &&
+                  index >= normalizedRange.minCol &&
+                  index <= normalizedRange.maxCol;
+                return (
+                  <th
+                    key={name}
+                    title={
+                      column
+                        ? `${name} · ${column.nativeType ?? column.type} (Click to select column)`
+                        : `${name} (Click to select column)`
                     }
-                    onAutoFit={() =>
-                      sizing.resize(
-                        name,
-                        fitColumnWidth(
+                    className={[
+                      selected.size === 0 &&
+                      !hasActiveRange &&
+                      active.col === index
+                        ? "column-active"
+                        : "",
+                      colInRange ? "column-in-range" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    onClick={(e) => {
+                      if (
+                        (e.target as HTMLElement).closest(
+                          ".column-resize-handle",
+                        ) ||
+                        !visibleRows.length
+                      ) {
+                        return;
+                      }
+                      if (selected.size > 0) {
+                        setActive((old) => ({ ...old, col: index }));
+                        return;
+                      }
+                      const startCol =
+                        e.shiftKey && rangeAnchorRef.current
+                          ? rangeAnchorRef.current.col
+                          : index;
+                      if (!e.shiftKey || !rangeAnchorRef.current) {
+                        rangeAnchorRef.current = { rowPos: 0, col: index };
+                      }
+                      setCellRange({
+                        startRowPos: 0,
+                        endRowPos: selectableRowCount - 1,
+                        startCol,
+                        endCol: index,
+                      });
+                      setActive((old) => ({ ...old, col: index }));
+                    }}
+                  >
+                    <span className="result-column-name">
+                      {pkColumnNames.has(name) && (
+                        <KeyRound size={11} className="gold" />
+                      )}
+                      <span>{name}</span>
+                    </span>
+                    <ColumnResizeHandle
+                      name={name}
+                      width={widths[index]}
+                      onResize={(width, persist) =>
+                        sizing.resize(name, width, persist)
+                      }
+                      onAutoFit={() =>
+                        sizing.resize(
                           name,
-                          drafts
-                            .slice(0, 100)
-                            .map((row) => effectiveRowValues(row, columns)[name]),
-                        ),
-                      )
-                    }
-                  />
-                </th>
-              ))}
+                          fitColumnWidth(
+                            name,
+                            drafts
+                              .slice(0, 100)
+                              .map(
+                                (row) => effectiveRowValues(row, columns)[name],
+                              ),
+                          ),
+                        )
+                      }
+                    />
+                  </th>
+                );
+              })}
               {viewport.end < columns.length && (
                 <th
                   className="column-spacer"
@@ -1263,7 +1750,7 @@ export function ResultSetView({
             </tr>
           </thead>
           <tbody>
-            {rowStart > 0 && (
+            {!compact && rowStart > 0 && (
               <tr
                 className="result-row-spacer"
                 style={{ height: rowStart * rowHeight }}
@@ -1274,6 +1761,11 @@ export function ResultSetView({
             )}
             {windowedRows.map(({ row, index: r }, offset) => {
               const visiblePos = rowStart + offset;
+              const rowInRange =
+                hasActiveRange &&
+                normalizedRange !== null &&
+                visiblePos >= normalizedRange.minRowPos &&
+                visiblePos <= normalizedRange.maxRowPos;
               return (
                 <ResultTableRow
                   key={row.id}
@@ -1281,9 +1773,27 @@ export function ResultSetView({
                   rowIndex={r}
                   visiblePos={visiblePos}
                   isRowSelected={selected.has(row.id)}
-                  activeCol={clampedActiveRow === r ? active.col : -1}
+                  inRangeRow={rowInRange}
+                  rangeMinCol={rowInRange && normalizedRange ? normalizedRange.minCol : -1}
+                  rangeMaxCol={rowInRange && normalizedRange ? normalizedRange.maxCol : -1}
+                  isRangeTop={
+                    rowInRange &&
+                    normalizedRange !== null &&
+                    visiblePos === normalizedRange.minRowPos
+                  }
+                  isRangeBottom={
+                    rowInRange &&
+                    normalizedRange !== null &&
+                    visiblePos === normalizedRange.maxRowPos
+                  }
+                  activeCol={
+                    selected.size > 0 || hasActiveRange
+                      ? -1
+                      : clampedActiveRow === r
+                        ? active.col
+                        : -1
+                  }
                   editable={editable}
-                  compact={compact}
                   disabled={disabled}
                   saving={saving}
                   visibleColumns={visibleColumns}
@@ -1294,7 +1804,7 @@ export function ResultSetView({
                 />
               );
             })}
-            {rowEnd < visibleRows.length && (
+            {!compact && rowEnd < visibleRows.length && (
               <tr
                 className="result-row-spacer"
                 style={{ height: (visibleRows.length - rowEnd) * rowHeight }}
@@ -1307,364 +1817,499 @@ export function ResultSetView({
         </table>
       </div>
 
-      {!compact && (
-      <div
-        className="result-navicat-bar"
-        role="toolbar"
-        aria-label="Result tools"
-      >
-        <div className="row result-nav-group">
-          <Button
-            title="First record"
-            aria-label="First record"
-            disabled={!visibleRows.length || activeVisiblePos <= 0}
-            onClick={() => goToVisibleRow(0)}
-          >
-            <ChevronsLeft size={13} />
-          </Button>
-          <Button
-            title="Previous record"
-            aria-label="Previous record"
-            disabled={!visibleRows.length || activeVisiblePos <= 0}
-            onClick={() => goToVisibleRow(activeVisiblePos - 1)}
-          >
-            <ChevronLeft size={13} />
-          </Button>
-          <span className="result-record-indicator" aria-live="polite">
-            {visibleRows.length
-              ? `${activeVisiblePos >= 0 ? activeVisiblePos + 1 : 1} / ${visibleRows.length}`
-              : "0 / 0"}
-            {selected.size > 1 ? ` · ${selected.size} selected` : ""}
+      {compact && stackHeader && visibleRows.length > STACK_DEFAULT_ROWS && (
+        <footer className="stack-block-footer">
+          <span className="stack-footer-summary">
+            Showing {windowedRows.length} of {visibleRows.length} rows
           </span>
-          <Button
-            title="Next record"
-            aria-label="Next record"
-            disabled={
-              !visibleRows.length || activeVisiblePos + 1 >= visibleRows.length
-            }
-            onClick={() => goToVisibleRow(activeVisiblePos + 1)}
-          >
-            <ChevronRight size={13} />
-          </Button>
-          <Button
-            title="Last record"
-            aria-label="Last record"
-            disabled={
-              !visibleRows.length || activeVisiblePos + 1 >= visibleRows.length
-            }
-            onClick={() => goToVisibleRow(visibleRows.length - 1)}
-          >
-            <ChevronsRight size={13} />
-          </Button>
-        </div>
+          <div className="stack-footer-actions">
+            {windowedRows.length < visibleRows.length && (
+              <>
+                <button
+                  type="button"
+                  className="stack-footer-btn"
+                  onClick={() =>
+                    stackHeader.onRowLimitChange?.(
+                      Math.min(visibleRows.length, windowedRows.length + 20),
+                    )
+                  }
+                >
+                  Show more (+
+                  {Math.min(20, visibleRows.length - windowedRows.length)})
+                </button>
+                {visibleRows.length - windowedRows.length > 20 && (
+                  <button
+                    type="button"
+                    className="stack-footer-btn"
+                    onClick={() =>
+                      stackHeader.onRowLimitChange?.(visibleRows.length)
+                    }
+                  >
+                    Show all ({visibleRows.length})
+                  </button>
+                )}
+              </>
+            )}
+            {windowedRows.length > STACK_DEFAULT_ROWS && (
+              <button
+                type="button"
+                className="stack-footer-btn"
+                onClick={() => stackHeader.onRowLimitChange?.(undefined)}
+              >
+                Show less
+              </button>
+            )}
+          </div>
+        </footer>
+      )}
 
-        <div className="divider" />
-
-        {editable ? (
-          <div className="row result-edit-group">
+      {!compact && (
+        <div
+          className="result-navicat-bar"
+          role="toolbar"
+          aria-label="Result tools"
+        >
+          <div className="row result-nav-group">
             <Button
-              data-icon-only="true"
-              className="is-active"
-              title={
-                dirty
-                  ? "Apply or discard changes before locking"
-                  : `Editing unlocked (${table?.name}) · Click to lock`
-              }
-              aria-label="Lock editing"
-              disabled={dirty || saving}
-              onClick={() => setIsUnlocked(false)}
+              title="First record"
+              aria-label="First record"
+              disabled={!visibleRows.length || activeVisiblePos <= 0}
+              onClick={() => goToVisibleRow(0)}
             >
-              <LockOpen size={12} />
+              <ChevronsLeft size={13} />
             </Button>
             <Button
-              title="Add record"
-              aria-label="Add record"
-              disabled={disabled || saving || requiresRefresh}
-              onClick={addRow}
+              title="Previous record"
+              aria-label="Previous record"
+              disabled={!visibleRows.length || activeVisiblePos <= 0}
+              onClick={() => goToVisibleRow(activeVisiblePos - 1)}
             >
-              <Plus size={13} />
+              <ChevronLeft size={13} />
             </Button>
+            <span className="result-record-indicator" aria-live="polite">
+              {visibleRows.length
+                ? `${activeVisiblePos >= 0 ? activeVisiblePos + 1 : 1} / ${visibleRows.length}`
+                : "0 / 0"}
+              {hasActiveRange && normalizedRange
+                ? ` · ${normalizedRange.rowCount}×${normalizedRange.colCount} selected`
+                : selected.size > 1
+                  ? ` · ${selected.size} selected`
+                  : ""}
+            </span>
             <Button
-              title="Delete selected record(s)"
-              aria-label="Delete record"
+              title="Next record"
+              aria-label="Next record"
               disabled={
-                disabled ||
-                saving ||
-                requiresRefresh ||
-                (!selected.size && !activeDraft)
+                !visibleRows.length || activeVisiblePos + 1 >= visibleRows.length
               }
-              onClick={deleteTargetRows}
+              onClick={() => goToVisibleRow(activeVisiblePos + 1)}
             >
-              <Trash2 size={13} />
+              <ChevronRight size={13} />
             </Button>
             <Button
-              title="Set active cell to NULL (Alt+Backspace)"
+              title="Last record"
+              aria-label="Last record"
               disabled={
-                !canEditCell(clampedActiveRow, active.col) ||
-                (activeColDef ? !activeColDef.nullable : false)
+                !visibleRows.length || activeVisiblePos + 1 >= visibleRows.length
               }
-              onClick={() => updateCell(clampedActiveRow, active.col, null)}
+              onClick={() => goToVisibleRow(visibleRows.length - 1)}
             >
-              NULL
-            </Button>
-            <Button
-              className={dirty ? "primary" : undefined}
-              title="Apply changes (⌘S)"
-              aria-label="Apply changes"
-              disabled={disabled || saving || !dirty || requiresRefresh}
-              onClick={() => void saveChanges()}
-            >
-              {saving ? <span className="spinner" /> : <Check size={13} />}
-              <span>Apply</span>
-              {dirty && <span className="button-count">{changes.length}</span>}
-            </Button>
-            <Button
-              title="Discard changes"
-              aria-label="Discard changes"
-              disabled={!dirty || saving}
-              onClick={() => void discardChanges()}
-            >
-              <RotateCcw size={13} />
+              <ChevronsRight size={13} />
             </Button>
           </div>
-        ) : canUnlock ? (
-          <Button
-            data-icon-only="true"
-            title={`Locked (${table?.name}) · Click to unlock inline editing`}
-            aria-label="Unlock editing"
-            disabled={disabled || saving}
-            onClick={() => setIsUnlocked(true)}
-          >
-            <Lock size={12} />
-          </Button>
-        ) : (
-          <span
-            className="result-readonly-pill"
-            aria-label="Read-only result"
-            title="Read-only · Run SELECT * FROM <table> on a single table with a primary key to edit rows inline"
-          >
-            <Lock size={12} />
-          </span>
-        )}
 
-        <div className="divider" />
+          <div className="divider" />
 
-        <div className="row result-copy-group">
-          <Button
-            title={`Copy ${selected.size > 0 ? `${selected.size} selected row(s)` : "current row"} as INSERT statement`}
-            disabled={!targetCopyCount}
-            onClick={() => void handleCopyAsInsert(false)}
-          >
-            <FileCode2 size={13} />
-            <span>
-              Copy as INSERT
-              {selected.size > 1 ? ` (${selected.size})` : ""}
-            </span>
-          </Button>
-          <Button
-            title={`Copy ${selected.size > 0 ? `${selected.size} selected row(s)` : "current row"} as UPDATE statement`}
-            disabled={!targetCopyCount}
-            onClick={() => void handleCopyAsUpdate(false)}
-          >
-            <Copy size={13} />
-            <span>
-              Copy as UPDATE
-              {selected.size > 1 ? ` (${selected.size})` : ""}
-            </span>
-          </Button>
-          <div className="result-copy-dropdown">
+          {editable ? (
+            <div className="row result-edit-group">
+              <Button
+                data-icon-only="true"
+                className="is-active"
+                title={
+                  dirty
+                    ? "Apply or discard changes before locking"
+                    : `Editing unlocked (${table?.name}) · Click to lock`
+                }
+                aria-label="Lock editing"
+                disabled={dirty || saving}
+                onClick={() => setIsUnlocked(false)}
+              >
+                <LockOpen size={12} />
+              </Button>
+              <Button
+                title="Add record"
+                aria-label="Add record"
+                disabled={disabled || saving || requiresRefresh}
+                onClick={addRow}
+              >
+                <Plus size={13} />
+              </Button>
+              <Button
+                title="Delete selected record(s)"
+                aria-label="Delete record"
+                disabled={
+                  disabled ||
+                  saving ||
+                  requiresRefresh ||
+                  (!selected.size && !activeDraft)
+                }
+                onClick={deleteTargetRows}
+              >
+                <Trash2 size={13} />
+              </Button>
+              <Button
+                title="Set active cell or selected range to NULL (Alt+Backspace)"
+                disabled={
+                  !hasActiveRange &&
+                  (!canEditCell(clampedActiveRow, active.col) ||
+                    (activeColDef ? !activeColDef.nullable : false))
+                }
+                onClick={() => setNullTargetCells(clampedActiveRow, active.col)}
+              >
+                NULL
+              </Button>
+              <Button
+                className={dirty ? "primary" : undefined}
+                title="Apply changes (⌘S)"
+                aria-label="Apply changes"
+                disabled={disabled || saving || !dirty || requiresRefresh}
+                onClick={() => void saveChanges()}
+              >
+                {saving ? <span className="spinner" /> : <Check size={13} />}
+                <span>Apply</span>
+                {dirty && <span className="button-count">{changes.length}</span>}
+              </Button>
+              <Button
+                title="Discard changes"
+                aria-label="Discard changes"
+                disabled={!dirty || saving}
+                onClick={() => void discardChanges()}
+              >
+                <RotateCcw size={13} />
+              </Button>
+            </div>
+          ) : canUnlock ? (
             <Button
-              title="More copy formats"
-              aria-label="More copy formats"
-              aria-expanded={copyMenuOpen}
-              disabled={!drafts.length}
-              onClick={() => setCopyMenuOpen((open) => !open)}
+              data-icon-only="true"
+              title={`Locked (${table?.name}) · Click to unlock inline editing`}
+              aria-label="Unlock editing"
+              disabled={disabled || saving}
+              onClick={() => setIsUnlocked(true)}
             >
-              <ChevronDown size={12} />
+              <Lock size={12} />
             </Button>
-            {copyMenuOpen && (
-              <div className="result-floating-menu" role="menu">
-                <div className="result-menu-label">
-                  {selected.size > 0
-                    ? `${selected.size} selected row${selected.size === 1 ? "" : "s"}`
-                    : `Row #${clampedActiveRow + 1}`}
+          ) : (
+            <span
+              className="result-readonly-pill"
+              aria-label="Read-only result"
+              title="Read-only · Run SELECT * FROM <table> on a single table with a primary key to edit rows inline"
+            >
+              <Lock size={12} />
+            </span>
+          )}
+
+          <div className="divider" />
+
+          <div className="row result-copy-group">
+            <Button
+              title={
+                isJoin
+                  ? "Copy as INSERT is disabled for JOIN query results"
+                  : `Copy ${scopeDescription} as INSERT statement`
+              }
+              disabled={!targetCopyCount || isJoin}
+              onClick={() => void handleCopyAsInsert(false)}
+            >
+              <FileCode2 size={13} />
+              <span>
+                Copy as INSERT
+                {scopeBadge && !isJoin ? ` (${scopeBadge})` : ""}
+              </span>
+            </Button>
+            <Button
+              title={
+                isJoin
+                  ? "Copy as UPDATE is disabled for JOIN query results"
+                  : `Copy ${scopeDescription} as UPDATE statement`
+              }
+              disabled={!targetCopyCount || isJoin}
+              onClick={() => void handleCopyAsUpdate(false)}
+            >
+              <Copy size={13} />
+              <span>
+                Copy as UPDATE
+                {scopeBadge && !isJoin ? ` (${scopeBadge})` : ""}
+              </span>
+            </Button>
+            <div className="result-copy-dropdown">
+              <Button
+                title="More copy formats"
+                aria-label="More copy formats"
+                aria-expanded={copyMenuOpen}
+                disabled={!drafts.length}
+                onClick={() => setCopyMenuOpen((open) => !open)}
+              >
+                <ChevronDown size={12} />
+              </Button>
+              {copyMenuOpen && (
+                <div className="result-floating-menu" role="menu">
+                  <div className="result-menu-label">{scopeDescription}</div>
+                  {hasActiveRange && (
+                    <button
+                      role="menuitem"
+                      onClick={() => void handleCopyAsTsv(false, false)}
+                    >
+                      Copy Selected Cells ({scopeBadge})
+                    </button>
+                  )}
+                  <button
+                    role="menuitem"
+                    onClick={() => void handleCopyWithHeader(false)}
+                  >
+                    Copy with Header{scopeBadge ? ` (${scopeBadge})` : ""}
+                  </button>
+                  {!isJoin && (
+                    <>
+                      <button
+                        role="menuitem"
+                        onClick={() => void handleCopyAsInsert(false)}
+                      >
+                        Copy as INSERT{scopeBadge ? ` (${scopeBadge})` : ""}
+                      </button>
+                      <button
+                        role="menuitem"
+                        onClick={() => void handleCopyAsUpdate(false)}
+                      >
+                        Copy as UPDATE{scopeBadge ? ` (${scopeBadge})` : ""}
+                      </button>
+                    </>
+                  )}
+                  <button
+                    role="menuitem"
+                    onClick={() => void handleCopyAsCsv(false, true)}
+                  >
+                    Copy as CSV{scopeBadge ? ` (${scopeBadge})` : ""}
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={() => void handleCopyAsTsv(false, false)}
+                  >
+                    Copy as TSV (Tab-separated)
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={() => void handleCopyAsJson(false)}
+                  >
+                    Copy as JSON{scopeBadge ? ` (${scopeBadge})` : ""}
+                  </button>
+                  {visibleRows.length > 1 && (
+                    <>
+                      <hr />
+                      <div className="result-menu-label">
+                        All {visibleRows.length} rows
+                      </div>
+                      <button
+                        role="menuitem"
+                        onClick={() => void handleCopyWithHeader(true)}
+                      >
+                        Copy All with Header ({visibleRows.length})
+                      </button>
+                      {!isJoin && (
+                        <>
+                          <button
+                            role="menuitem"
+                            onClick={() => void handleCopyAsInsert(true)}
+                          >
+                            Copy All as INSERT ({visibleRows.length})
+                          </button>
+                          <button
+                            role="menuitem"
+                            onClick={() => void handleCopyAsUpdate(true)}
+                          >
+                            Copy All as UPDATE ({visibleRows.length})
+                          </button>
+                        </>
+                      )}
+                    </>
+                  )}
                 </div>
+              )}
+            </div>
+          </div>
+
+          <div className="result-bar-spacer" />
+
+          {dirty ? (
+            <span className="result-status-summary">
+              <span className="status-dot amber" />
+              {[
+                addedCount ? `${addedCount} new` : null,
+                editedCount ? `${editedCount} edited` : null,
+                deletedCount ? `${deletedCount} deleted` : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </span>
+          ) : notice ? (
+            <span className="result-status-summary is-notice" role="status">
+              <Check size={12} />
+              {notice}
+            </span>
+          ) : null}
+
+          <RowFilter active={!!filter}>
+            <input
+              aria-label="Filter result rows"
+              placeholder="Filter rows…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+            {filter && (
+              <button
+                className="filter-clear"
+                aria-label="Clear row filter"
+                onClick={() => setFilter("")}
+              >
+                <X size={11} />
+              </button>
+            )}
+          </RowFilter>
+        </div>
+      )}
+
+      {contextMenu &&
+        createPortal(
+          <div
+            className="result-context-menu result-floating-menu"
+            role="menu"
+            aria-label="Row actions"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            <div className="result-menu-label">{scopeDescription}</div>
+            {hasActiveRange ? (
+              <button
+                role="menuitem"
+                onClick={() => void handleCopyAsTsv(false, false)}
+              >
+                Copy Selected Cells ({scopeBadge})
+              </button>
+            ) : (
+              <button
+                role="menuitem"
+                onClick={() =>
+                  void handleCopyCellValue(
+                    contextMenu.rowIndex,
+                    contextMenu.colIndex,
+                  )
+                }
+              >
+                Copy Cell Value
+              </button>
+            )}
+            <button
+              role="menuitem"
+              onClick={() => void handleCopyWithHeader(false)}
+            >
+              Copy with Header{scopeBadge ? ` (${scopeBadge})` : ""}
+            </button>
+            {visibleRows.length > 1 && (
+              <button
+                role="menuitem"
+                onClick={() => void handleCopyWithHeader(true)}
+              >
+                Copy All with Header ({visibleRows.length})
+              </button>
+            )}
+            {!isJoin && (
+              <>
+                <hr />
                 <button
                   role="menuitem"
                   onClick={() => void handleCopyAsInsert(false)}
                 >
-                  Copy as INSERT
+                  Copy as INSERT{scopeBadge ? ` (${scopeBadge})` : ""}
                 </button>
                 <button
                   role="menuitem"
                   onClick={() => void handleCopyAsUpdate(false)}
                 >
-                  Copy as UPDATE
+                  Copy as UPDATE{scopeBadge ? ` (${scopeBadge})` : ""}
                 </button>
-                <button
-                  role="menuitem"
-                  onClick={() => void handleCopyAsTsv(false)}
-                >
-                  Copy as TSV (Tab-separated)
-                </button>
-                <button
-                  role="menuitem"
-                  onClick={() => void handleCopyAsJson(false)}
-                >
-                  Copy as JSON
-                </button>
-                {visibleRows.length > 1 && (
-                  <>
-                    <hr />
-                    <div className="result-menu-label">
-                      All {visibleRows.length} rows
-                    </div>
-                    <button
-                      role="menuitem"
-                      onClick={() => void handleCopyAsInsert(true)}
-                    >
-                      Copy All as INSERT ({visibleRows.length})
-                    </button>
-                    <button
-                      role="menuitem"
-                      onClick={() => void handleCopyAsUpdate(true)}
-                    >
-                      Copy All as UPDATE ({visibleRows.length})
-                    </button>
-                  </>
-                )}
-              </div>
+              </>
             )}
-          </div>
-        </div>
-
-        <div className="result-bar-spacer" />
-
-        {dirty ? (
-          <span className="result-status-summary">
-            <span className="status-dot amber" />
-            {[
-              addedCount ? `${addedCount} new` : null,
-              editedCount ? `${editedCount} edited` : null,
-              deletedCount ? `${deletedCount} deleted` : null,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </span>
-        ) : notice ? (
-          <span className="result-status-summary is-notice" role="status">
-            <Check size={12} />
-            {notice}
-          </span>
-        ) : null}
-
-        <div className="sheet-search result-row-filter">
-          <Search size={12} />
-          <input
-            aria-label="Filter result rows"
-            placeholder="Filter rows…"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-          />
-          {filter && (
+            <hr />
             <button
-              className="filter-clear"
-              aria-label="Clear row filter"
-              onClick={() => setFilter("")}
+              role="menuitem"
+              onClick={() => void handleCopyAsCsv(false, true)}
             >
-              <X size={11} />
+              Copy {hasActiveRange ? `Selection (${scopeBadge})` : `Row${selected.size > 1 ? "s" : ""}`} as CSV
             </button>
-          )}
-        </div>
-      </div>
-      )}
-
-      {contextMenu && (
-        <div
-          className="result-context-menu result-floating-menu"
-          role="menu"
-          aria-label="Row actions"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-        >
-          <div className="result-menu-label">
-            {selected.size > 1
-              ? `${selected.size} selected rows`
-              : `Row #${contextMenu.rowIndex + 1} · ${columns[contextMenu.colIndex] ?? ""}`}
-          </div>
-          <button
-            role="menuitem"
-            onClick={() => void handleCopyAsInsert(false)}
-          >
-            Copy as INSERT
-            {selected.size > 1 ? ` (${selected.size} rows)` : ""}
-          </button>
-          <button
-            role="menuitem"
-            onClick={() => void handleCopyAsUpdate(false)}
-          >
-            Copy as UPDATE
-            {selected.size > 1 ? ` (${selected.size} rows)` : ""}
-          </button>
-          <hr />
-          <button
-            role="menuitem"
-            onClick={() =>
-              void handleCopyCellValue(
-                contextMenu.rowIndex,
-                contextMenu.colIndex,
-              )
-            }
-          >
-            Copy Cell Value
-          </button>
-          <button role="menuitem" onClick={() => void handleCopyAsTsv(false)}>
-            Copy Row{selected.size > 1 ? "s" : ""} as TSV
-          </button>
-          <button role="menuitem" onClick={() => void handleCopyAsJson(false)}>
-            Copy Row{selected.size > 1 ? "s" : ""} as JSON
-          </button>
-          {editable && (
-            <>
-              <hr />
-              <button
-                role="menuitem"
-                disabled={
-                  !canEditCell(contextMenu.rowIndex, contextMenu.colIndex) ||
-                  columnMap.get(columns[contextMenu.colIndex])?.nullable ===
-                    false
-                }
-                onClick={() => {
-                  updateCell(contextMenu.rowIndex, contextMenu.colIndex, null);
-                  setContextMenu(null);
-                }}
-              >
-                Set NULL
-              </button>
-              <button
-                role="menuitem"
-                disabled={disabled || saving || requiresRefresh}
-                onClick={() => {
-                  addRow();
-                  setContextMenu(null);
-                }}
-              >
-                Add Record
-              </button>
-              <button
-                role="menuitem"
-                className="danger-item"
-                disabled={disabled || saving || requiresRefresh}
-                onClick={() => {
-                  deleteTargetRows();
-                  setContextMenu(null);
-                }}
-              >
-                Delete Record{selected.size > 1 ? "s" : ""}
-              </button>
-            </>
-          )}
-        </div>
-      )}
+            <button
+              role="menuitem"
+              onClick={() => void handleCopyAsTsv(false, false)}
+            >
+              Copy {hasActiveRange ? `Selection (${scopeBadge})` : `Row${selected.size > 1 ? "s" : ""}`} as TSV
+            </button>
+            <button
+              role="menuitem"
+              onClick={() => void handleCopyAsJson(false)}
+            >
+              Copy {hasActiveRange ? `Selection (${scopeBadge})` : `Row${selected.size > 1 ? "s" : ""}`} as JSON
+            </button>
+            {editable && (
+              <>
+                <hr />
+                <button
+                  role="menuitem"
+                  disabled={
+                    !hasActiveRange &&
+                    (!canEditCell(contextMenu.rowIndex, contextMenu.colIndex) ||
+                      columnMap.get(columns[contextMenu.colIndex])?.nullable ===
+                        false)
+                  }
+                  onClick={() => {
+                    setNullTargetCells(
+                      contextMenu.rowIndex,
+                      contextMenu.colIndex,
+                    );
+                    setContextMenu(null);
+                  }}
+                >
+                  Set NULL{scopeBadge ? ` (${scopeBadge})` : ""}
+                </button>
+                <button
+                  role="menuitem"
+                  disabled={disabled || saving || requiresRefresh}
+                  onClick={() => {
+                    addRow();
+                    setContextMenu(null);
+                  }}
+                >
+                  Add Record
+                </button>
+                <button
+                  role="menuitem"
+                  className="danger-item"
+                  disabled={disabled || saving || requiresRefresh}
+                  onClick={() => {
+                    deleteTargetRows();
+                    setContextMenu(null);
+                  }}
+                >
+                  Delete Record
+                  {hasActiveRange && normalizedRange
+                    ? normalizedRange.rowCount > 1
+                      ? `s (${normalizedRange.rowCount})`
+                      : ""
+                    : selected.size > 1
+                      ? `s (${selected.size})`
+                      : ""}
+                </button>
+              </>
+            )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
-}
+});

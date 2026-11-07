@@ -17,7 +17,7 @@ export function nativeAppearanceSync(window: NativeAppearance) {
       .catch(() => {})
       .then(async () => {
         await window.setTheme(dark ? "dark" : "light");
-        await window.setBackgroundColor(dark ? "#232428" : "#fbfbfc");
+        await window.setBackgroundColor(dark ? "#2a2e36" : "#f2f3f6");
       });
     return queue;
   };

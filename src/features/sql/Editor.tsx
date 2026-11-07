@@ -27,6 +27,28 @@ import { useSnippetPreferences } from "./snippet-preferences";
 const NO_SNIPPETS: import("../../types/schema").SqlSnippet[] = [];
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() };
 loader.config({ monaco });
+monaco.editor.defineTheme("workspace-light", {
+  base: "vs",
+  inherit: true,
+  rules: [{ token: "comment", foreground: "626A74" }],
+  colors: {
+    "editor.background": "#F2F3F6",
+    "editor.lineHighlightBackground": "#E8EBF0",
+    "editorLineNumber.foreground": "#686D78",
+  },
+});
+monaco.editor.defineTheme("workspace-dark", {
+  base: "vs-dark",
+  inherit: true,
+  rules: [{ token: "comment", foreground: "A4B69B" }],
+  colors: {
+    "editor.background": "#2A2E36",
+    "editor.foreground": "#EEF0F5",
+    "editor.lineHighlightBackground": "#343A45",
+    "editorLineNumber.foreground": "#A7AFBE",
+    "editorLineNumber.activeForeground": "#EEF0F5",
+  },
+});
 const kinds = {
   table: monaco.languages.CompletionItemKind.Class,
   column: monaco.languages.CompletionItemKind.Field,
@@ -177,7 +199,7 @@ export function SqlEditor({
         },
         () => {
           if (!model.isDisposed() && model.getVersionId() === version)
-            onValidation?.("Validation unavailable");
+            onValidation?.("");
         },
       );
     };
@@ -204,7 +226,7 @@ export function SqlEditor({
     <Editor
       height="100%"
       language="sql"
-      theme={dark ? "vs-dark" : "light"}
+      theme={dark ? "workspace-dark" : "workspace-light"}
       value={value}
       onChange={(next) => onChange(next ?? "")}
       onMount={(editor) => {
@@ -220,7 +242,9 @@ export function SqlEditor({
         });
         const node = editor.getDomNode();
         const unbindWheelZoom = node ? bindEditorWheelZoom(node) : undefined;
+        let scrollSaveTimer = 0;
         editor.onDidDispose(() => {
+          if (scrollSaveTimer) window.clearTimeout(scrollSaveTimer);
           zoomKeys.dispose();
           unbindWheelZoom?.();
         });
@@ -230,6 +254,13 @@ export function SqlEditor({
         const saveView = () => {
           if (alive.current && viewKey && !editor.getModel()?.isDisposed())
             rememberSqlEditorView(viewKey, editor.saveViewState());
+        };
+        const scheduleSaveView = () => {
+          if (scrollSaveTimer) window.clearTimeout(scrollSaveTimer);
+          scrollSaveTimer = window.setTimeout(() => {
+            scrollSaveTimer = 0;
+            saveView();
+          }, 180);
         };
         const publishSelection = () => {
           if (!alive.current) return;
@@ -243,7 +274,7 @@ export function SqlEditor({
         };
         publishSelection();
         editor.onDidChangeCursorSelection(publishSelection);
-        editor.onDidScrollChange(saveView);
+        editor.onDidScrollChange(scheduleSaveView);
         editor.onDidBlurEditorWidget(saveView);
         editor.addCommand(
           monaco.KeyMod.CtrlCmd | monaco.KeyCode.Slash,
@@ -285,7 +316,7 @@ export function SqlEditor({
                   insertText: item.insertText,
                   insertTextRules: item.snippet
                     ? monaco.languages.CompletionItemInsertTextRule
-                        .InsertAsSnippet
+                      .InsertAsSnippet
                     : monaco.languages.CompletionItemInsertTextRule.None,
                   range,
                   sortText: item.sortText,
@@ -293,11 +324,11 @@ export function SqlEditor({
                   documentation:
                     item.kind === "snippet"
                       ? {
-                          value:
-                            "**SQL abbreviation** · Tab or Enter to insert\n\n```sql\n" +
-                            item.insertText +
-                            "\n```\n\nTab: next field · Shift+Tab: previous field",
-                        }
+                        value:
+                          "**SQL abbreviation** · Tab or Enter to insert\n\n```sql\n" +
+                          item.insertText +
+                          "\n```\n\nTab: next field · Shift+Tab: previous field",
+                      }
                       : item.detail,
                 })),
               };
@@ -321,6 +352,7 @@ export function SqlEditor({
         },
         padding: { top: 12, bottom: 12 },
         scrollBeyondLastLine: false,
+        scrollBeyondLastColumn: 0,
         automaticLayout: true,
         wordWrap: "off",
         editContext: false,

@@ -202,7 +202,6 @@ export interface ConnectionRequest {
     | "connect"
     | "new"
     | "edit"
-    | "remove"
     | "attach"
     | "delete-profile"
     | "disconnect"

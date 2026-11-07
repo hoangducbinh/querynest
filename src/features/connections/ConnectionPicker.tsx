@@ -191,21 +191,21 @@ export function ConnectionPicker({
                           </Menu.Label>
                           {source.connection && (
                             <>
+                              {!ready && (
+                                <Menu.Item
+                                  className="connection-menu-item"
+                                  onSelect={() => action(target.id, "connect")}
+                                >
+                                  <Plug size={13} />
+                                  Connect
+                                </Menu.Item>
+                              )}
                               <Menu.Item
                                 className="connection-menu-item"
-                                onSelect={() =>
-                                  action(
-                                    target.id,
-                                    ready ? "disconnect" : "connect",
-                                  )
-                                }
+                                onSelect={() => action(target.id, "disconnect")}
                               >
-                                {ready ? (
-                                  <Unplug size={13} />
-                                ) : (
-                                  <Plug size={13} />
-                                )}
-                                {ready ? "Disconnect" : "Connect"}
+                                <Unplug size={13} />
+                                Disconnect
                               </Menu.Item>
                               {ready && (
                                 <>
@@ -235,18 +235,6 @@ export function ConnectionPicker({
                               >
                                 <Pencil size={13} />
                                 Connection settings…
-                              </Menu.Item>
-                            </>
-                          )}
-                          {sources.length > 1 && (
-                            <>
-                              <Menu.Separator className="connection-menu-separator" />
-                              <Menu.Item
-                                className="connection-menu-item"
-                                onSelect={() => action(source.id, "remove")}
-                              >
-                                <Trash2 size={13} />
-                                Remove from session
                               </Menu.Item>
                             </>
                           )}

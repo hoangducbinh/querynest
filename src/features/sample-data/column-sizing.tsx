@@ -75,6 +75,7 @@ export function ColumnResizeHandle({
   function clearPreview() {
     const current = drag.current;
     drag.current = null;
+    document.body.classList.remove("is-resizing-column");
     if (!current) return;
     cancelAnimationFrame(current.frame);
     current.preview.remove();
@@ -135,6 +136,7 @@ export function ColumnResizeHandle({
         const label = document.createElement("span");
         label.textContent = `${Math.round(rect.width)} px`;
         preview.append(label);
+        document.body.classList.add("is-resizing-column");
         document.body.append(preview);
         drag.current = {
           x: event.clientX,
@@ -212,16 +214,24 @@ export function columnWindow(
   end = Math.min(widths.length, Math.max(start + 1, end + overscan));
   return { start, end };
 }
+const COLUMN_VIRTUALIZE_THRESHOLD = 24;
+
 export function useColumnWindow(
   widths: number[],
   gutter = 40,
   initialPosition?: { top: number; left: number },
 ) {
   const ref = useRef<HTMLDivElement>(null);
-  const [viewport, setViewport] = useState({
-    left: initialPosition?.left ?? 0,
-    width: 1000,
-  });
+  const widthsRef = useRef(widths);
+  widthsRef.current = widths;
+  const shouldVirtualize = widths.length > COLUMN_VIRTUALIZE_THRESHOLD;
+
+  const [range, setRange] = useState(() =>
+    shouldVirtualize
+      ? columnWindow(widths, initialPosition?.left ?? 0, 1200, gutter, 4)
+      : { start: 0, end: widths.length },
+  );
+
   useLayoutEffect(() => {
     const element = ref.current;
     if (!element) return;
@@ -229,13 +239,24 @@ export function useColumnWindow(
       element.scrollTop = initialPosition.top;
       element.scrollLeft = initialPosition.left;
     }
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!shouldVirtualize) return;
+    const element = ref.current;
+    if (!element) return;
     let frame = 0;
     const measure = () => {
       frame = 0;
-      const left = element.scrollLeft,
-        width = element.clientWidth;
-      setViewport((old) =>
-        old.left === left && old.width === width ? old : { left, width },
+      const next = columnWindow(
+        widthsRef.current,
+        element.scrollLeft,
+        element.clientWidth || 1200,
+        gutter,
+        4,
+      );
+      setRange((old) =>
+        old.start === next.start && old.end === next.end ? old : next,
       );
     };
     const schedule = () => {
@@ -250,9 +271,12 @@ export function useColumnWindow(
       observer.disconnect();
       element.removeEventListener("scroll", schedule);
     };
-  }, []);
-  return {
-    ref,
-    ...columnWindow(widths, viewport.left, viewport.width, gutter),
-  };
+  }, [shouldVirtualize, widths.length, gutter]);
+
+  if (!shouldVirtualize) {
+    return { ref, start: 0, end: widths.length };
+  }
+  const start = Math.min(range.start, Math.max(0, widths.length - 1));
+  const end = Math.min(widths.length, Math.max(start + 1, range.end));
+  return { ref, start, end };
 }

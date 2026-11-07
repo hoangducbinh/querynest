@@ -63,7 +63,7 @@ function readTableParts(
 function readOptionalAlias(
   tokens: NonCommentToken[],
   cursor: number,
-): string | undefined {
+): { alias?: string; nextCursor: number } {
   let idx = cursor;
   if (
     tokens[idx]?.kind === "word" &&
@@ -73,17 +73,17 @@ function readOptionalAlias(
   }
   const candidate = tokens[idx];
   if (!candidate || !["word", "identifier"].includes(candidate.kind)) {
-    return undefined;
+    return { nextCursor: cursor };
   }
   if (
     candidate.kind === "word" &&
-    /^(WHERE|JOIN|INNER|LEFT|RIGHT|FULL|CROSS|ON|USING|GROUP|ORDER|LIMIT|OFFSET|HAVING|UNION|INTERSECT|EXCEPT|WINDOW|FOR|OPTION|WITH|SET|VALUES|OUTPUT|RETURNING)$/i.test(
+    /^(WHERE|JOIN|INNER|LEFT|RIGHT|FULL|CROSS|NATURAL|OUTER|APPLY|ON|USING|GROUP|ORDER|LIMIT|OFFSET|HAVING|UNION|INTERSECT|EXCEPT|WINDOW|FOR|OPTION|WITH|SET|VALUES|OUTPUT|RETURNING)$/i.test(
       candidate.text,
     )
   ) {
-    return undefined;
+    return { nextCursor: cursor };
   }
-  return candidate.text;
+  return { alias: candidate.text, nextCursor: idx + 1 };
 }
 
 function findMatchingCloseParen(
@@ -101,13 +101,25 @@ function findMatchingCloseParen(
   return -1;
 }
 
-function inferFromTokens(
+export interface ResolvedJoinTable {
+  target: ResultTableTarget;
+  alias?: string;
+  qualifiers: Set<string>;
+}
+
+interface ParsedQueryTables {
+  primary?: ResultTableTarget;
+  tables: ResolvedJoinTable[];
+  isJoin: boolean;
+}
+
+function parseQueryTablesFromTokens(
   tokens: NonCommentToken[],
   schema: DatabaseSchema | undefined,
   cteMap: Map<string, NonCommentToken[]>,
   visitedCtes: Set<string>,
-): ResultTableTarget | undefined {
-  if (!tokens.length) return undefined;
+): ParsedQueryTables {
+  if (!tokens.length) return { tables: [], isJoin: false };
 
   let cursor = 0;
   // Parse leading WITH CTE definitions at depth 0
@@ -158,7 +170,7 @@ function inferFromTokens(
   }
 
   const bodyTokens = tokens.slice(cursor);
-  if (!bodyTokens.length) return undefined;
+  if (!bodyTokens.length) return { tables: [], isJoin: false };
 
   // Handle INSERT INTO <table> or UPDATE <table>
   const firstWord =
@@ -171,12 +183,32 @@ function inferFromTokens(
         : 1;
     const { parts } = readTableParts(bodyTokens, startIdx);
     if (parts.length >= 1 && parts.length <= 4) {
-      return resolvePartsToTarget(parts, schema);
+      const target = resolvePartsToTarget(parts, schema);
+      return {
+        primary: target,
+        tables: [
+          {
+            target,
+            qualifiers: new Set([target.tableName.toLowerCase()]),
+          },
+        ],
+        isJoin: false,
+      };
     }
   } else if (firstWord === "UPDATE") {
     const { parts } = readTableParts(bodyTokens, 1);
     if (parts.length >= 1 && parts.length <= 4) {
-      return resolvePartsToTarget(parts, schema);
+      const target = resolvePartsToTarget(parts, schema);
+      return {
+        primary: target,
+        tables: [
+          {
+            target,
+            qualifiers: new Set([target.tableName.toLowerCase()]),
+          },
+        ],
+        isJoin: false,
+      };
     }
   }
 
@@ -217,6 +249,7 @@ function inferFromTokens(
     alias?: string;
     subqueryTokens?: NonCommentToken[];
   }[] = [];
+  let hasJoinSyntax = false;
 
   let depth = 0;
   for (let i = 0; i < bodyTokens.length; i++) {
@@ -238,88 +271,149 @@ function inferFromTokens(
         : "";
 
     if (upper === "FROM" && prevWord !== "DISTINCT") {
-      if (bodyTokens[i + 1]?.text === "(") {
-        const closeSub = findMatchingCloseParen(bodyTokens, i + 1);
-        if (closeSub > i + 1) {
-          const alias = readOptionalAlias(bodyTokens, closeSub + 1);
-          tableCandidates.push({
-            parts: [],
-            alias,
-            subqueryTokens: bodyTokens.slice(i + 2, closeSub),
-          });
+      let fromCursor = i + 1;
+      while (fromCursor < bodyTokens.length) {
+        if (bodyTokens[fromCursor]?.text === "(") {
+          const closeSub = findMatchingCloseParen(bodyTokens, fromCursor);
+          if (closeSub > fromCursor) {
+            const { alias, nextCursor } = readOptionalAlias(
+              bodyTokens,
+              closeSub + 1,
+            );
+            tableCandidates.push({
+              parts: [],
+              alias,
+              subqueryTokens: bodyTokens.slice(fromCursor + 1, closeSub),
+            });
+            fromCursor = nextCursor;
+          } else {
+            break;
+          }
+        } else {
+          const { parts, nextCursor } = readTableParts(bodyTokens, fromCursor);
+          if (parts.length >= 1 && parts.length <= 4) {
+            const { alias, nextCursor: afterAlias } = readOptionalAlias(
+              bodyTokens,
+              nextCursor,
+            );
+            tableCandidates.push({ parts, alias });
+            fromCursor = afterAlias;
+          } else {
+            break;
+          }
         }
-        continue;
+        if (bodyTokens[fromCursor]?.text === ",") {
+          hasJoinSyntax = true;
+          fromCursor++;
+          continue;
+        }
+        break;
       }
+    } else if (upper === "JOIN" || upper === "APPLY") {
+      hasJoinSyntax = true;
       const { parts, nextCursor } = readTableParts(bodyTokens, i + 1);
       if (parts.length >= 1 && parts.length <= 4) {
-        const alias = readOptionalAlias(bodyTokens, nextCursor);
-        tableCandidates.push({ parts, alias });
-      }
-    } else if (upper === "JOIN") {
-      const { parts, nextCursor } = readTableParts(bodyTokens, i + 1);
-      if (parts.length >= 1 && parts.length <= 4) {
-        const alias = readOptionalAlias(bodyTokens, nextCursor);
+        const { alias } = readOptionalAlias(bodyTokens, nextCursor);
         tableCandidates.push({ parts, alias });
       }
     }
   }
 
-  if (starPrefix && tableCandidates.length > 1) {
-    const matchedByAlias = tableCandidates.find(
-      (c) =>
-        c.alias?.toLowerCase() === starPrefix ||
-        c.parts.at(-1)?.toLowerCase() === starPrefix,
-    );
-    if (matchedByAlias && matchedByAlias.parts.length >= 1) {
-      return resolveCandidate(
-        matchedByAlias.parts,
-        schema,
-        cteMap,
-        visitedCtes,
-      );
-    }
-  }
-
+  const resolvedTables: ResolvedJoinTable[] = [];
   for (const candidate of tableCandidates) {
+    let target: ResultTableTarget | undefined;
     if (candidate.subqueryTokens) {
-      const subTarget = inferFromTokens(
+      const subParsed = parseQueryTablesFromTokens(
         candidate.subqueryTokens,
         schema,
         cteMap,
         visitedCtes,
       );
-      if (subTarget?.tableName) return subTarget;
-      continue;
-    }
-    if (candidate.parts.length >= 1) {
-      const resolved = resolveCandidate(
+      if (subParsed.isJoin) hasJoinSyntax = true;
+      target = subParsed.primary;
+    } else if (candidate.parts.length >= 1) {
+      const resolved = resolveCandidateWithJoin(
         candidate.parts,
         schema,
         cteMap,
-        visitedCtes,
+        new Set(visitedCtes),
       );
-      if (resolved) return resolved;
+      if (resolved.isJoin) hasJoinSyntax = true;
+      target = resolved.target;
+    }
+    if (target?.tableName) {
+      const qualifiers = new Set<string>([target.tableName.toLowerCase()]);
+      if (candidate.parts.at(-1)) {
+        qualifiers.add(candidate.parts.at(-1)!.toLowerCase());
+      }
+      if (candidate.alias) {
+        qualifiers.add(candidate.alias.toLowerCase());
+      }
+      resolvedTables.push({
+        target,
+        alias: candidate.alias,
+        qualifiers,
+      });
     }
   }
 
-  return undefined;
+  const isJoin =
+    hasJoinSyntax || tableCandidates.length > 1 || resolvedTables.length > 1;
+
+  if (starPrefix && resolvedTables.length > 1) {
+    const matchedByAlias = resolvedTables.find((t) =>
+      t.qualifiers.has(starPrefix),
+    );
+    if (matchedByAlias) {
+      return {
+        primary: matchedByAlias.target,
+        tables: resolvedTables,
+        isJoin,
+      };
+    }
+  }
+
+  return {
+    primary: resolvedTables[0]?.target,
+    tables: resolvedTables,
+    isJoin,
+  };
 }
 
-function resolveCandidate(
+function resolveCandidateWithJoin(
   parts: string[],
   schema: DatabaseSchema | undefined,
   cteMap: Map<string, NonCommentToken[]>,
   visitedCtes: Set<string>,
-): ResultTableTarget | undefined {
+): { target?: ResultTableTarget; isJoin: boolean } {
   if (parts.length === 1) {
     const lower = parts[0].toLowerCase();
     if (cteMap.has(lower)) {
-      if (visitedCtes.has(lower)) return undefined;
+      if (visitedCtes.has(lower)) return { isJoin: false };
       visitedCtes.add(lower);
-      return inferFromTokens(cteMap.get(lower)!, schema, cteMap, visitedCtes);
+      const parsed = parseQueryTablesFromTokens(
+        cteMap.get(lower)!,
+        schema,
+        cteMap,
+        visitedCtes,
+      );
+      return { target: parsed.primary, isJoin: parsed.isJoin };
     }
   }
-  return resolvePartsToTarget(parts, schema);
+  return { target: resolvePartsToTarget(parts, schema), isJoin: false };
+}
+
+export function isJoinQuery(
+  sql: string,
+  dialect: SqlDialect = "default",
+): boolean {
+  if (!sql) return false;
+  const tokens = tokenize(
+    sql,
+    dialect === "mssql" ? "mssql" : "default",
+  ).filter((t) => t.kind !== "comment");
+  return parseQueryTablesFromTokens(tokens, undefined, new Map(), new Set())
+    .isJoin;
 }
 
 function resolvePartsToTarget(
@@ -350,13 +444,14 @@ export function inferResultTableTarget(
     dialect === "mssql" ? "mssql" : "default",
   ).filter((t) => t.kind !== "comment");
 
-  const resolved = inferFromTokens(
+  const parsed = parseQueryTablesFromTokens(
     tokens,
     schema,
     new Map(),
     new Set(),
   );
-  return resolved ?? { tableName: fallbackTable };
+
+  return parsed.primary ?? { tableName: fallbackTable };
 }
 
 function findMatchingTable(
@@ -469,6 +564,8 @@ export function buildCopyAsInsert(options: {
     dialect = "default",
   } = options;
   if (!columns.length || !rows.length) return "";
+  if (sql && isJoinQuery(sql, dialect)) return "";
+
   const inferred = inferResultTableTarget(sql, schema, dialect);
   const resolvedTable = table ?? inferred.table;
   const tableRef = formatSqlTableRef(
@@ -496,6 +593,7 @@ export function buildCopyAsInsert(options: {
 
 export function buildCopyAsUpdate(options: {
   columns: string[];
+  setColumns?: string[];
   rows: {
     current: Record<string, unknown>;
     original?: Record<string, unknown>;
@@ -507,6 +605,7 @@ export function buildCopyAsUpdate(options: {
 }): string {
   const {
     columns,
+    setColumns: explicitSetColumns,
     rows,
     sql = "",
     schema,
@@ -514,6 +613,12 @@ export function buildCopyAsUpdate(options: {
     dialect = "default",
   } = options;
   if (!columns.length || !rows.length) return "";
+  if (sql && isJoinQuery(sql, dialect)) return "";
+  const candidateColumns =
+    explicitSetColumns && explicitSetColumns.length > 0
+      ? explicitSetColumns
+      : columns;
+
   const inferred = inferResultTableTarget(sql, schema, dialect);
   const resolvedTable = table ?? inferred.table;
   const tableRef = formatSqlTableRef(
@@ -524,17 +629,27 @@ export function buildCopyAsUpdate(options: {
   );
   const whereColumns = resolveWhereColumns(columns, resolvedTable);
   const whereSet = new Set(whereColumns);
-  const nonKeyColumns = columns.filter((col) => !whereSet.has(col));
-  const defaultSetColumns = nonKeyColumns.length > 0 ? nonKeyColumns : columns;
+  const nonKeyColumns = candidateColumns.filter((col) => !whereSet.has(col));
+  const defaultSetColumns =
+    explicitSetColumns && explicitSetColumns.length > 0
+      ? explicitSetColumns
+      : nonKeyColumns.length > 0
+        ? nonKeyColumns
+        : candidateColumns;
   const colDefs = new Map(
     (resolvedTable?.columns ?? []).map((col) => [col.name, col]),
   );
 
   return rows
     .map(({ current, original }) => {
-      const changedColumns = original
-        ? columns.filter((col) => !Object.is(current[col], original[col]))
-        : [];
+      const changedColumns =
+        explicitSetColumns && explicitSetColumns.length > 0
+          ? explicitSetColumns
+          : original
+            ? candidateColumns.filter(
+                (col) => !Object.is(current[col], original[col]),
+              )
+            : [];
       const setColumns =
         changedColumns.length > 0 ? changedColumns : defaultSetColumns;
       const setClause = setColumns

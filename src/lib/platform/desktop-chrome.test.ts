@@ -23,7 +23,7 @@ it("serializes rapid appearance changes so the newest theme and background win",
   expect(calls).toEqual(["light"]);
   release();
   await Promise.all([light, dark]);
-  expect(calls).toEqual(["light", "#fbfbfc", "dark", "#232428"]);
+  expect(calls).toEqual(["light", "#f2f3f6", "dark", "#2a2e36"]);
 });
 it("recovers from an IPC failure on a later appearance update", async () => {
   const window = {
@@ -37,7 +37,7 @@ it("recovers from an IPC failure on a later appearance update", async () => {
   await expect(sync(false)).rejects.toThrow("window unavailable");
   await expect(sync(true)).resolves.toBeUndefined();
   expect(window.setTheme).toHaveBeenLastCalledWith("dark");
-  expect(window.setBackgroundColor).toHaveBeenLastCalledWith("#232428");
+  expect(window.setBackgroundColor).toHaveBeenLastCalledWith("#2a2e36");
 });
 
 it("selects compact native chrome for macOS and Windows without affecting browser/Linux", () => {

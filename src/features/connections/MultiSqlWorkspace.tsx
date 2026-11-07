@@ -366,7 +366,9 @@ export function MultiSqlWorkspace({
             setSqlTabs(
               draft,
               sqlTabs(draft).map((tab) =>
-                tab.id === tabId ? { ...tab, sourceId } : tab,
+                tab.id === tabId
+                  ? { ...tab, sourceId, disconnectedFrom: undefined }
+                  : tab,
               ),
               tabId,
             );
@@ -405,7 +407,9 @@ export function MultiSqlWorkspace({
             setSqlTabs(
               draft,
               sqlTabs(draft).map((tab) =>
-                tab.id === tabId ? { ...tab, sourceId } : tab,
+                tab.id === tabId
+                  ? { ...tab, sourceId, disconnectedFrom: undefined }
+                  : tab,
               ),
               tabId,
             );

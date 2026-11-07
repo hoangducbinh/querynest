@@ -67,15 +67,17 @@ export function WorkspaceConnectionControls({
         disabled={busy}
         onSelect={(id) => onSelect(id).catch(onError)}
       />
-      <DatabasePicker
-        value={active.connection?.config.database ?? "Select database"}
-        databases={databases}
-        disabled={busy || !active.connection}
-        onDiscover={discover}
-        onSelect={(database) =>
-          onDatabaseChange(root.id, database).catch(onError)
-        }
-      />
+      {active.connection && (
+        <DatabasePicker
+          value={active.connection.config.database}
+          databases={databases}
+          disabled={busy}
+          onDiscover={discover}
+          onSelect={(database) =>
+            onDatabaseChange(root.id, database).catch(onError)
+          }
+        />
+      )}
     </div>
   );
 }

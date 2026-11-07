@@ -13,6 +13,7 @@ import {
   activateSource,
   attachDatabase,
   attachSource,
+  connectionRoot,
   removeSource,
   workspaceSources,
   sourceSessionKey,
@@ -29,42 +30,37 @@ import {
   Braces,
   Check,
   ChevronDown,
-  ChevronLeft,
   ChevronRight,
-  Code2,
+  SquareTerminal,
   Database,
-  Download,
   Ellipsis,
+  Folder,
+  FolderOpen,
   KeyRound,
   Link2,
   Moon,
   PanelLeftClose,
+  PanelLeftOpen,
   Search,
   Sun,
   Table2,
   Terminal,
-  Upload,
   X,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { DialogHost, confirmAction } from "../lib/dialogs";
 import { useStore } from "../features/schema/store";
-import { id, parseWorkspace } from "../features/schema/core";
+import { id } from "../features/schema/core";
 import { activeSqlTab, sqlTabs, setSqlTabs } from "../features/sql/tabs";
 import { RemoteWorkspace } from "../features/connections/RemoteWorkspace";
 import type { ConnectionProfile } from "../features/connections/model";
-import { saveJsonFile } from "../lib/platform/save-file";
 import { useDesktopClose } from "../lib/platform/use-desktop-close";
-import {
-  saveWorkspace,
-  workspaceSnapshot,
-  storage,
-} from "../lib/storage/workspaces";
+import { saveWorkspace, storage } from "../lib/storage/workspaces";
 import type { TableDefinition } from "../types/schema";
 type Mode = "data" | "sql";
 const modes = [
-  { id: "data", label: "Data", icon: Table2 },
-  { id: "sql", label: "SQL", icon: Code2 },
+  { id: "data", label: "Data", icon: Database },
+  { id: "sql", label: "SQL", icon: SquareTerminal },
 ] as const;
 export default function App() {
   useLoadSnippetPreferences();
@@ -80,21 +76,61 @@ export default function App() {
 
   const [dataTable, setDataTable] = useState("");
   const [search, setSearch] = useState("");
-  const [tablePage, setTablePage] = useState(0);
+  const [collapsedSchemas, setCollapsedSchemas] = useState<string[]>([]);
   const tableList = useRef<HTMLDivElement>(null);
-  useEffect(() => setTablePage(0), [search, w.id, w.activeSourceId]);
   useEffect(() => {
     tableList.current?.scrollTo({ top: 0 });
-  }, [tablePage, search, w.id, w.activeSourceId]);
+  }, [search, w.id, w.activeSourceId]);
+
   const filteredTables = useMemo(() => {
     if (!w.postgres && !w.mssql) return [];
-    const needle = search.toLowerCase();
-    return w.schema.tables.filter((table) =>
-      `${table.namespace ?? ""}.${table.name}`.toLowerCase().includes(needle),
-    );
+    const needle = search.trim().toLowerCase();
+    const defaultSchema = w.mssql ? "dbo" : "public";
+    return w.schema.tables.filter((table) => {
+      const schemaName = table.namespace || defaultSchema;
+      const full = `${schemaName}.${table.name}`.toLowerCase();
+      return (
+        !needle ||
+        full.includes(needle) ||
+        table.name.toLowerCase().includes(needle)
+      );
+    });
   }, [w.schema.tables, w.postgres, w.mssql, search]);
-  const tablePageCount = Math.max(1, Math.ceil(filteredTables.length / 50));
-  const currentTablePage = Math.min(tablePage, tablePageCount - 1);
+
+  const schemaGroups = useMemo(() => {
+    if (!filteredTables.length) return [];
+    const defaultSchema = w.mssql ? "dbo" : "public";
+    const map = new Map<string, TableDefinition[]>();
+    for (const table of filteredTables) {
+      const schemaName = table.namespace || defaultSchema;
+      const list = map.get(schemaName) ?? [];
+      list.push(table);
+      map.set(schemaName, list);
+    }
+    const sortedSchemas = Array.from(map.keys()).sort((a, b) => {
+      const aLower = a.toLowerCase();
+      const bLower = b.toLowerCase();
+      const isDefaultA = aLower === "public" || aLower === "dbo";
+      const isDefaultB = bLower === "public" || bLower === "dbo";
+      if (isDefaultA && !isDefaultB) return -1;
+      if (!isDefaultA && isDefaultB) return 1;
+      return a.localeCompare(b);
+    });
+    return sortedSchemas.map((name) => ({
+      name,
+      tables: (map.get(name) ?? []).sort((a, b) =>
+        a.name.localeCompare(b.name),
+      ),
+    }));
+  }, [filteredTables, w.mssql]);
+
+  function toggleSchema(schemaKey: string) {
+    setCollapsedSchemas((prev) =>
+      prev.includes(schemaKey)
+        ? prev.filter((k) => k !== schemaKey)
+        : [...prev, schemaKey],
+    );
+  }
   const [expandedTables, setExpandedTables] = useState<string[]>([]);
   const [left, setLeft] = useState(true);
   const [connectionRevision, setConnectionRevision] = useState(0);
@@ -124,18 +160,22 @@ export default function App() {
   const remoteRun = useRef<() => void>(() => {});
 
   const remote = !!(w.postgres || w.mssql);
+  const hasConnection = workspaceSources(w).some((source) => source.connection);
   const searchInput = useRef<HTMLInputElement>(null);
-  const file = useRef<HTMLInputElement>(null);
   const runRef = useRef<() => void>(() => {});
   const tablesById = useMemo(
     () => new Map(w.schema.tables.map((table) => [table.id, table])),
     [w.schema.tables],
   );
-  const activeTable = tablesById.get(dataTable) ?? w.schema.tables[0];
+  const [closedAllDataTables, setClosedAllDataTables] = useState(false);
+  const activeTable = closedAllDataTables
+    ? undefined
+    : (tablesById.get(dataTable) ?? w.schema.tables[0]);
   const [openDataTableIds, setOpenDataTableIds] = useState<string[]>([]);
   const [dataLayout, setDataLayout] = useState<"tabs" | "stack">("tabs");
   useEffect(() => {
     setOpenDataTableIds([]);
+    setClosedAllDataTables(false);
   }, [w.id, w.activeSourceId]);
   useEffect(() => {
     if (!activeTable) return;
@@ -147,9 +187,10 @@ export default function App() {
     const valid = openDataTableIds
       .map((tid) => tablesById.get(tid))
       .filter((t): t is TableDefinition => Boolean(t));
-    if (!valid.length && activeTable) return [activeTable];
+    if (!valid.length && activeTable && !closedAllDataTables)
+      return [activeTable];
     return valid;
-  }, [openDataTableIds, tablesById, activeTable]);
+  }, [openDataTableIds, tablesById, activeTable, closedAllDataTables]);
   useEffect(() => {
     let active = true;
     storage.workspaces
@@ -175,13 +216,12 @@ export default function App() {
   }, [load]);
   useEffect(() => {
     if (!ready) return;
-    setSaved("Saving…");
     let active = true;
     const timer = setTimeout(() => {
       saveWorkspace(w)
-        .then((saved) => {
+        .then((ok) => {
           if (active)
-            setSaved(saved ? "Saved on this device" : "Workspace deleted");
+            setSaved(ok ? "Saved on this device" : "Workspace deleted");
         })
         .catch((e) => {
           if (!active) return;
@@ -195,6 +235,391 @@ export default function App() {
       clearTimeout(timer);
     };
   }, [w, ready]);
+
+  useEffect(() => {
+    const SCROLLABLE_SELECTOR =
+      ".sheet-grid-scroll, .grid-scroll, .sql-all-results, .data-stack-container, .query-messages, .table-list, .tree-columns, .sql-tab-menu-list, .sql-tab-ctx-sublist, .connection-menu-list, .snippet-list, .snippet-settings-body, .connection-fields, .modal, .sql-editor-pane";
+
+    const vTrack = document.createElement("div");
+    vTrack.className = "vscode-scrollbar vscode-scrollbar-v";
+    vTrack.setAttribute("aria-hidden", "true");
+    const vSlider = document.createElement("div");
+    vSlider.className = "vscode-scrollbar-slider";
+    vTrack.appendChild(vSlider);
+
+    const hTrack = document.createElement("div");
+    hTrack.className = "vscode-scrollbar vscode-scrollbar-h";
+    hTrack.setAttribute("aria-hidden", "true");
+    const hSlider = document.createElement("div");
+    hSlider.className = "vscode-scrollbar-slider";
+    hTrack.appendChild(hSlider);
+
+    document.body.appendChild(vTrack);
+    document.body.appendChild(hTrack);
+
+    let lastPointerTarget: EventTarget | null = null;
+    let lastWheelTarget: EventTarget | null = null;
+    let pendingTarget: EventTarget | null = null;
+    let pointerRaf = 0;
+    let syncRaf = 0;
+    let vHost: HTMLElement | null = null;
+    let hHost: HTMLElement | null = null;
+    let monacoPane: HTMLElement | null = null;
+
+    let vMetrics = { trackSize: 0, thumbSize: 0, maxScroll: 0 };
+    let hMetrics = { trackSize: 0, thumbSize: 0, maxScroll: 0 };
+
+    let dragState: {
+      axis: "v" | "h";
+      host: HTMLElement;
+      startPointer: number;
+      startScroll: number;
+      maxScroll: number;
+      maxThumbOffset: number;
+    } | null = null;
+
+    const hasVerticalOverflow = (
+      host: HTMLElement | null,
+    ): host is HTMLElement => {
+      if (!host || !host.isConnected) return false;
+      if (host.scrollHeight <= host.clientHeight + 2) return false;
+      const overflowY = window.getComputedStyle(host).overflowY;
+      return (
+        overflowY === "auto" ||
+        overflowY === "scroll" ||
+        overflowY === "overlay"
+      );
+    };
+
+    const hasHorizontalOverflow = (
+      host: HTMLElement | null,
+    ): host is HTMLElement => {
+      if (!host || !host.isConnected) return false;
+      if (host.scrollWidth <= host.clientWidth + 4) return false;
+      const overflowX = window.getComputedStyle(host).overflowX;
+      if (
+        overflowX !== "auto" &&
+        overflowX !== "scroll" &&
+        overflowX !== "overlay"
+      ) {
+        return false;
+      }
+      if (
+        host.classList.contains("grid-scroll") ||
+        host.classList.contains("sheet-grid-scroll")
+      ) {
+        const table = host.firstElementChild as HTMLElement | null;
+        const explicitWidth = table?.style.width
+          ? Number.parseFloat(table.style.width)
+          : 0;
+        if (explicitWidth > 0 && explicitWidth <= host.clientWidth + 4) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    const syncScrollbars = () => {
+      syncRaf = 0;
+
+      const vActive = hasVerticalOverflow(vHost);
+      const hActive = hasHorizontalOverflow(hHost);
+
+      if (vActive && vHost) {
+        const rect = vHost.getBoundingClientRect();
+        if (rect.height > 20 && rect.width > 20) {
+          const cornerGap = hActive && hHost === vHost ? 8 : 0;
+          const trackHeight = Math.max(20, Math.round(rect.height - cornerGap));
+          const scrollHeight = vHost.scrollHeight;
+          const clientHeight = vHost.clientHeight;
+          const maxScroll = Math.max(1, scrollHeight - clientHeight);
+          const thumbHeight = Math.max(
+            24,
+            Math.min(
+              trackHeight,
+              Math.round((clientHeight / scrollHeight) * trackHeight),
+            ),
+          );
+          const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
+          const thumbTop = Math.min(
+            maxThumbTop,
+            Math.max(0, Math.round((vHost.scrollTop / maxScroll) * maxThumbTop)),
+          );
+          vMetrics = {
+            trackSize: trackHeight,
+            thumbSize: thumbHeight,
+            maxScroll,
+          };
+          vTrack.style.transform = `translate3d(${Math.round(rect.right - 8)}px, ${Math.round(rect.top)}px, 0)`;
+          vTrack.style.height = `${trackHeight}px`;
+          vSlider.style.height = `${thumbHeight}px`;
+          vSlider.style.transform = `translate3d(0, ${thumbTop}px, 0)`;
+          vTrack.classList.add("is-visible");
+        } else {
+          vTrack.classList.remove("is-visible");
+        }
+      } else {
+        vTrack.classList.remove("is-visible");
+      }
+
+      if (hActive && hHost) {
+        const rect = hHost.getBoundingClientRect();
+        if (rect.width > 20 && rect.height > 20) {
+          const cornerGap = vActive && vHost === hHost ? 8 : 0;
+          const trackWidth = Math.max(20, Math.round(rect.width - cornerGap));
+          const scrollWidth = hHost.scrollWidth;
+          const clientWidth = hHost.clientWidth;
+          const maxScroll = Math.max(1, scrollWidth - clientWidth);
+          const thumbWidth = Math.max(
+            24,
+            Math.min(
+              trackWidth,
+              Math.round((clientWidth / scrollWidth) * trackWidth),
+            ),
+          );
+          const maxThumbLeft = Math.max(0, trackWidth - thumbWidth);
+          const thumbLeft = Math.min(
+            maxThumbLeft,
+            Math.max(
+              0,
+              Math.round((hHost.scrollLeft / maxScroll) * maxThumbLeft),
+            ),
+          );
+          hMetrics = {
+            trackSize: trackWidth,
+            thumbSize: thumbWidth,
+            maxScroll,
+          };
+          hTrack.style.transform = `translate3d(${Math.round(rect.left)}px, ${Math.round(rect.bottom - 8)}px, 0)`;
+          hTrack.style.width = `${trackWidth}px`;
+          hSlider.style.width = `${thumbWidth}px`;
+          hSlider.style.transform = `translate3d(${thumbLeft}px, 0, 0)`;
+          hTrack.classList.add("is-visible");
+        } else {
+          hTrack.classList.remove("is-visible");
+        }
+      } else {
+        hTrack.classList.remove("is-visible");
+      }
+    };
+
+    const scheduleSync = () => {
+      if (!syncRaf) {
+        syncRaf = requestAnimationFrame(syncScrollbars);
+      }
+    };
+
+    const resizeObserver = new ResizeObserver(scheduleSync);
+
+    const setHosts = (
+      nextV: HTMLElement | null,
+      nextH: HTMLElement | null,
+      nextMonaco: HTMLElement | null,
+    ) => {
+      if (monacoPane !== nextMonaco) {
+        monacoPane?.classList.remove("is-scroll-visible");
+        monacoPane = nextMonaco;
+        monacoPane?.classList.add("is-scroll-visible");
+      }
+      if (vHost === nextV && hHost === nextH) return;
+      resizeObserver.disconnect();
+      vHost = nextV;
+      hHost = nextH;
+      if (vHost) resizeObserver.observe(vHost);
+      if (hHost && hHost !== vHost) resizeObserver.observe(hHost);
+      syncScrollbars();
+    };
+
+    const applyRegion = (rawTarget: EventTarget | null) => {
+      if (dragState) return;
+      const el = rawTarget instanceof Element ? rawTarget : null;
+      if (!el) {
+        setHosts(null, null, null);
+        return;
+      }
+      if (el.closest(".vscode-scrollbar")) {
+        return;
+      }
+      const matched = el.closest(SCROLLABLE_SELECTOR) as HTMLElement | null;
+      if (!matched) {
+        setHosts(null, null, null);
+        return;
+      }
+      if (matched.classList.contains("sql-editor-pane")) {
+        setHosts(null, null, matched);
+        return;
+      }
+      const outerStack = matched.parentElement?.closest(
+        ".sql-all-results, .data-stack-container",
+      ) as HTMLElement | null;
+      if (outerStack) {
+        setHosts(outerStack, matched, null);
+        return;
+      }
+      if (matched.matches(".sql-all-results, .data-stack-container")) {
+        const block = el.closest(".sql-result-block, .data-stack-block");
+        const innerGrid =
+          (block?.querySelector(
+            ".grid-scroll, .sheet-grid-scroll",
+          ) as HTMLElement | null) ?? null;
+        setHosts(matched, innerGrid, null);
+        return;
+      }
+      setHosts(matched, matched, null);
+    };
+
+    const clearAll = () => {
+      if (dragState) return;
+      if (pointerRaf) {
+        cancelAnimationFrame(pointerRaf);
+        pointerRaf = 0;
+      }
+      if (syncRaf) {
+        cancelAnimationFrame(syncRaf);
+        syncRaf = 0;
+      }
+      lastPointerTarget = null;
+      lastWheelTarget = null;
+      pendingTarget = null;
+      setHosts(null, null, null);
+    };
+
+    const handlePointerMove = (e: PointerEvent) => {
+      if (dragState) {
+        const delta =
+          (dragState.axis === "v" ? e.clientY : e.clientX) -
+          dragState.startPointer;
+        const nextScroll =
+          dragState.startScroll +
+          (delta / Math.max(1, dragState.maxThumbOffset)) *
+            dragState.maxScroll;
+        if (dragState.axis === "v") {
+          dragState.host.scrollTop = nextScroll;
+        } else {
+          dragState.host.scrollLeft = nextScroll;
+        }
+        scheduleSync();
+        return;
+      }
+      if (e.target === lastPointerTarget) return;
+      lastPointerTarget = e.target;
+      pendingTarget = e.target;
+      if (!pointerRaf) {
+        pointerRaf = requestAnimationFrame(() => {
+          pointerRaf = 0;
+          applyRegion(pendingTarget);
+        });
+      }
+    };
+
+    const stopDrag = (e: PointerEvent) => {
+      if (!dragState) return;
+      dragState = null;
+      vTrack.classList.remove("is-dragging");
+      hTrack.classList.remove("is-dragging");
+      document.body.classList.remove("is-resizing-column");
+      const hovered = document.elementFromPoint(e.clientX, e.clientY);
+      applyRegion(hovered);
+    };
+
+    const handleVPointerDown = (e: PointerEvent) => {
+      if (!vHost || e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.target === vSlider) {
+        dragState = {
+          axis: "v",
+          host: vHost,
+          startPointer: e.clientY,
+          startScroll: vHost.scrollTop,
+          maxScroll: vMetrics.maxScroll,
+          maxThumbOffset: Math.max(1, vMetrics.trackSize - vMetrics.thumbSize),
+        };
+        vTrack.classList.add("is-dragging");
+      } else {
+        const sliderRect = vSlider.getBoundingClientRect();
+        const dir = e.clientY < sliderRect.top ? -1 : 1;
+        vHost.scrollTop += dir * Math.max(60, vHost.clientHeight * 0.85);
+        scheduleSync();
+      }
+    };
+
+    const handleHPointerDown = (e: PointerEvent) => {
+      if (!hHost || e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.target === hSlider) {
+        dragState = {
+          axis: "h",
+          host: hHost,
+          startPointer: e.clientX,
+          startScroll: hHost.scrollLeft,
+          maxScroll: hMetrics.maxScroll,
+          maxThumbOffset: Math.max(1, hMetrics.trackSize - hMetrics.thumbSize),
+        };
+        hTrack.classList.add("is-dragging");
+      } else {
+        const sliderRect = hSlider.getBoundingClientRect();
+        const dir = e.clientX < sliderRect.left ? -1 : 1;
+        hHost.scrollLeft += dir * Math.max(60, hHost.clientWidth * 0.85);
+        scheduleSync();
+      }
+    };
+
+    const handleWheel = (e: WheelEvent) => {
+      if (e.target !== lastWheelTarget || (!vHost && !hHost && !monacoPane)) {
+        lastWheelTarget = e.target;
+        applyRegion(e.target);
+      } else {
+        scheduleSync();
+      }
+    };
+
+    const handleScroll = (e: Event) => {
+      if (e.target !== vHost && e.target !== hHost) {
+        const target = e.target instanceof Element ? e.target : null;
+        if (target && !target.closest(".sql-editor-pane")) {
+          applyRegion(target);
+          return;
+        }
+      }
+      scheduleSync();
+    };
+
+    vTrack.addEventListener("pointerdown", handleVPointerDown);
+    hTrack.addEventListener("pointerdown", handleHPointerDown);
+    window.addEventListener("pointermove", handlePointerMove, {
+      passive: true,
+    });
+    window.addEventListener("pointerup", stopDrag, { passive: true });
+    window.addEventListener("pointercancel", stopDrag, { passive: true });
+    window.addEventListener("wheel", handleWheel, { passive: true });
+    window.addEventListener("scroll", handleScroll, {
+      capture: true,
+      passive: true,
+    });
+    window.addEventListener("resize", scheduleSync, { passive: true });
+    document.documentElement.addEventListener("mouseleave", clearAll, {
+      passive: true,
+    });
+    window.addEventListener("blur", clearAll);
+    return () => {
+      vTrack.removeEventListener("pointerdown", handleVPointerDown);
+      hTrack.removeEventListener("pointerdown", handleHPointerDown);
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopDrag);
+      window.removeEventListener("pointercancel", stopDrag);
+      window.removeEventListener("wheel", handleWheel);
+      window.removeEventListener("scroll", handleScroll, true);
+      window.removeEventListener("resize", scheduleSync);
+      document.documentElement.removeEventListener("mouseleave", clearAll);
+      window.removeEventListener("blur", clearAll);
+      resizeObserver.disconnect();
+      clearAll();
+      vTrack.remove();
+      hTrack.remove();
+    };
+  }, []);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -247,19 +672,6 @@ export default function App() {
     const timer = setTimeout(() => setMessage(""), 3000);
     return () => clearTimeout(timer);
   }, [message, error]);
-  async function task(fn: () => Promise<void>) {
-    setBusy(true);
-    setMessage("");
-    setError(false);
-    try {
-      await fn();
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : String(e));
-      setError(true);
-    } finally {
-      setBusy(false);
-    }
-  }
   async function leaveDraft() {
     if (busy) return false;
     if (
@@ -289,6 +701,7 @@ export default function App() {
     setMode(next);
   }
   async function chooseTable(tableId: string) {
+    setClosedAllDataTables(false);
     setOpenDataTableIds((prev) =>
       prev.includes(tableId) ? prev : [...prev, tableId],
     );
@@ -309,6 +722,7 @@ export default function App() {
   }
   async function openTableData(tableId: string) {
     if (!(await leaveDraft())) return;
+    setClosedAllDataTables(false);
     setOpenDataTableIds((items) =>
       items.includes(tableId) ? items : [...items, tableId],
     );
@@ -320,12 +734,39 @@ export default function App() {
     setMode("data");
   }
   async function closeDataTable(tableId: string) {
-    if (openDataTables.length <= 1) return;
     if (tableId === activeTable?.id && !(await leaveDraft())) return;
+    const idx = openDataTables.findIndex((t) => t.id === tableId);
     const remaining = openDataTables.filter((t) => t.id !== tableId);
     setOpenDataTableIds(remaining.map((t) => t.id));
-    if (tableId === activeTable?.id && remaining.length > 0) {
-      setDataTable(remaining[remaining.length - 1].id);
+    if (!remaining.length) {
+      setDataTable("");
+      setClosedAllDataTables(true);
+    } else if (tableId === activeTable?.id) {
+      setDataTable(remaining[Math.max(0, idx - 1)].id);
+    }
+  }
+  async function closeDataTablesBatch(
+    remainingIds: string[],
+    nextActiveId?: string,
+  ) {
+    const activeRemoved =
+      activeTable &&
+      (!remainingIds.includes(activeTable.id) ||
+        (nextActiveId && nextActiveId !== activeTable.id));
+    if (activeRemoved && !(await leaveDraft())) return;
+    setOpenDataTableIds(remainingIds);
+    if (!remainingIds.length) {
+      setDataTable("");
+      setClosedAllDataTables(true);
+    } else {
+      setClosedAllDataTables(false);
+      const targetId =
+        nextActiveId && remainingIds.includes(nextActiveId)
+          ? nextActiveId
+          : activeTable && remainingIds.includes(activeTable.id)
+            ? activeTable.id
+            : remainingIds[remainingIds.length - 1];
+      setDataTable(targetId);
     }
   }
   runRef.current = () => {
@@ -343,7 +784,9 @@ export default function App() {
         setSqlTabs(
           draft,
           sqlTabs(draft).map((tab) =>
-            tab.id === active ? { ...tab, sourceId } : tab,
+            tab.id === active
+              ? { ...tab, sourceId, disconnectedFrom: undefined }
+              : tab,
           ),
           active,
         );
@@ -362,7 +805,9 @@ export default function App() {
         setSqlTabs(
           draft,
           sqlTabs(draft).map((tab) =>
-            tab.id === active ? { ...tab, sourceId } : tab,
+            tab.id === active
+              ? { ...tab, sourceId, disconnectedFrom: undefined }
+              : tab,
           ),
           active,
         );
@@ -378,8 +823,13 @@ export default function App() {
       activateSource(draft, sourceId);
       const tabs = sqlTabs(draft);
       const active = activeSqlTab(draft).id;
-      const existing = tabs.find((tab) => tab.sourceId === sourceId);
+      const belongsToConnection = (tab: (typeof tabs)[number]) =>
+        connectionRoot(draft, tabSource(draft, tab)).id === sourceId;
+      const existing =
+        tabs.find((tab) => tab.id === active && belongsToConnection(tab)) ??
+        tabs.find(belongsToConnection);
       if (existing) {
+        activateSource(draft, tabSource(draft, existing).id);
         setSqlTabs(draft, tabs, existing.id);
         return;
       }
@@ -405,25 +855,7 @@ export default function App() {
     setDataTable("");
     setSearch("");
   }
-  async function removeWorkspaceConnection(sourceId: string) {
-    if (!(await leaveDraft())) return;
-    const source = workspaceSources(w).find((source) => source.id === sourceId);
-    const fallback = workspaceSources(w).find(
-      (source) => source.id !== sourceId && source.parentSourceId !== sourceId,
-    );
-    if (
-      !source ||
-      !fallback ||
-      !(await confirmAction(
-        `SQL tabs keep their text and switch to “${fallback.name}”. Server data and saved connection settings stay available.`,
-        {
-          title: `Remove “${source.name}”?`,
-          confirmLabel: "Remove",
-          destructive: true,
-        },
-      ))
-    )
-      return;
+  function detachWorkspaceConnection(sourceId: string) {
     for (const item of workspaceSources(w).filter(
       (s) => s.id === sourceId || s.parentSourceId === sourceId,
     ))
@@ -431,11 +863,6 @@ export default function App() {
     edit((draft) => removeSource(draft, sourceId));
     setDataTable("");
     setSearch("");
-  }
-  async function exportWorkspace() {
-    await task(() =>
-      saveJsonFile(w.name, JSON.stringify(workspaceSnapshot(w), null, 2)),
-    );
   }
   return (
     <div
@@ -453,7 +880,7 @@ export default function App() {
       <header className="app-header" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region>
           <div className="titlebar-connection-host" ref={setConnectionHost}>
-            {!(mode === "sql" && w.sources) && (
+            {!(mode === "sql" && hasConnection && w.sources) && (
               <WorkspaceConnectionControls
                 workspace={w}
                 busy={busy}
@@ -470,11 +897,20 @@ export default function App() {
             onAttach={addWorkspaceConnection}
             workspace={w}
             busy={busy}
-            onRemove={(sourceId) => void removeWorkspaceConnection(sourceId)}
+            onDisconnect={detachWorkspaceConnection}
             onBeforeAction={leaveDraft}
-            onConnected={() =>
-              setConnectionRevision((revision) => revision + 1)
-            }
+            onConnected={async (sourceId) => {
+              const current = useStore.getState().workspace;
+              const active = workspaceSources(current).find(
+                (source) => source.id === current.activeSourceId,
+              );
+              if (
+                sourceId &&
+                (!active || connectionRoot(current, active).id !== sourceId)
+              )
+                await selectConnection(sourceId);
+              setConnectionRevision((revision) => revision + 1);
+            }}
             onError={(error) => {
               setMessage(String(error));
               setError(true);
@@ -488,7 +924,7 @@ export default function App() {
               aria-current={mode === item.id ? "page" : undefined}
               onClick={() => void changeMode(item.id)}
             >
-              <item.icon size={15} />
+              <item.icon size={13} aria-hidden="true" />
               {item.label}
             </button>
           ))}
@@ -501,6 +937,20 @@ export default function App() {
           >
             <span className="status-dot" />
           </span>
+          {hasConnection && (
+            <Button
+              title={left ? "Hide sidebar" : "Show sidebar"}
+              aria-expanded={left}
+              aria-controls="table-explorer"
+              onClick={() => setLeft((visible) => !visible)}
+            >
+              {left ? (
+                <PanelLeftClose size={15} />
+              ) : (
+                <PanelLeftOpen size={15} />
+              )}
+            </Button>
+          )}
           <Button
             title={dark ? "Light appearance" : "Dark appearance"}
             onClick={() => setDark(!dark)}
@@ -518,53 +968,22 @@ export default function App() {
               <Ellipsis size={17} />
             </summary>
             <div>
-              <Button onClick={() => setLeft(!left)} aria-pressed={!left}>
-                <PanelLeftClose size={15} />
-                {left ? "Hide sidebar" : "Show sidebar"}
-              </Button>
               <Button onClick={() => setAbbreviations(true)}>
                 <Braces size={15} />
                 SQL abbreviations
-              </Button>
-              <Button
-                disabled={busy}
-                onClick={async () => {
-                  if (await leaveDraft()) file.current?.click();
-                }}
-              >
-                <Upload size={15} />
-                Import session
-              </Button>
-              <Button onClick={exportWorkspace}>
-                <Download size={15} />
-                Export session
               </Button>
             </div>
           </details>
         </div>
       </header>
       {platform === "windows" && <WindowControls />}
-      <input
-        ref={file}
-        type="file"
-        accept=".json"
-        hidden
-        onChange={async (e) => {
-          const selectedFile = e.target.files?.[0];
-          e.target.value = "";
-          if (!selectedFile) return;
-          await task(async () => {
-            const imported = parseWorkspace(await selectedFile.text());
-            imported.id = id();
-            await saveWorkspace(w);
-            load(imported);
-            setDataTable("");
-          });
-        }}
-      />
       <div className="workspace" ref={workspaceRef}>
-        {left && (
-          <aside className="explorer" style={{ width: sidebarWidth }}>
+        {left && hasConnection && (
+          <aside
+            id="table-explorer"
+            className="explorer"
+            style={{ width: sidebarWidth }}
+          >
             <div className="search">
               <Search size={15} />
               <input
@@ -577,112 +996,152 @@ export default function App() {
               <kbd>⌘ K</kbd>
             </div>
             <div className="section-heading">
-              <span>TABLES</span>
-              <span>{remote ? w.schema.tables.length : 0}</span>
+              <span>SCHEMAS</span>
+              <span
+                title={
+                  remote
+                    ? `${schemaGroups.length} schema${schemaGroups.length === 1 ? "" : "s"} · ${filteredTables.length} table${filteredTables.length === 1 ? "" : "s"}`
+                    : undefined
+                }
+              >
+                {remote
+                  ? `${schemaGroups.length} · ${filteredTables.length}`
+                  : 0}
+              </span>
             </div>
             <div className="table-list" ref={tableList}>
-              {filteredTables
-                .slice(currentTablePage * 50, (currentTablePage + 1) * 50)
-                .map((table) => (
-                  <div key={table.id}>
-                    <div className="tree-table-row">
-                      <button
-                        className={
-                          "tree-table " +
-                          (activeTable?.id === table.id ? "active" : "")
-                        }
-                        title={
-                          mode === "sql"
-                            ? "Click to toggle columns · Double-click to open Data"
-                            : "Select table · Double-click to open Data"
-                        }
-                        aria-expanded={
-                          mode === "sql"
-                            ? expandedTables.includes(
-                                tableExpansionKey(table.id),
-                              )
-                            : undefined
-                        }
-                        onClick={(event) => {
-                          if (event.detail > 1) return;
-                          if (mode === "sql") toggleTableColumns(table.id);
-                          else void chooseTable(table.id);
-                        }}
-                        onDoubleClick={() => void openTableData(table.id)}
-                      >
-                        <span className="table-icon">
-                          <Table2 size={17} />
-                        </span>
-                        <span className="table-label">
-                          <strong>
-                            {table.namespace ? table.namespace + "." : ""}
-                            {table.name}
-                          </strong>
-                        </span>
-                      </button>
-                      <Button
-                        className="table-columns-toggle"
-                        title={`Toggle columns · ${table.name}`}
-                        aria-label={`Toggle columns · ${table.name}`}
-                        aria-expanded={expandedTables.includes(
-                          w.id +
-                            ":" +
-                            (w.activeSourceId ?? "primary") +
-                            ":" +
-                            table.id,
-                        )}
-                        onClick={async () => {
-                          if (mode !== "sql") {
-                            if (!(await leaveDraft())) return;
-                            setDataTable(table.id);
-                          }
-                          toggleTableColumns(table.id);
-                        }}
-                      >
-                        {expandedTables.includes(
-                          w.id +
-                            ":" +
-                            (w.activeSourceId ?? "primary") +
-                            ":" +
-                            table.id,
-                        ) ? (
-                          <ChevronDown size={12} />
-                        ) : (
+              {schemaGroups.map((group) => {
+                const schemaKey = `${w.id}:${w.activeSourceId ?? "primary"}:${group.name}`;
+                const isCollapsed =
+                  !search.trim() && collapsedSchemas.includes(schemaKey);
+                return (
+                  <div key={group.name} className="tree-schema-group">
+                    <button
+                      type="button"
+                      className="tree-schema-header"
+                      onClick={() => toggleSchema(schemaKey)}
+                      title={`Schema ${group.name} (${group.tables.length} table${group.tables.length === 1 ? "" : "s"})`}
+                      aria-expanded={!isCollapsed}
+                    >
+                      <span className="tree-schema-arrow">
+                        {isCollapsed ? (
                           <ChevronRight size={12} />
+                        ) : (
+                          <ChevronDown size={12} />
                         )}
-                      </Button>
-                    </div>
-                    {expandedTables.includes(
-                      w.id +
-                        ":" +
-                        (w.activeSourceId ?? "primary") +
-                        ":" +
-                        table.id,
-                    ) && (
-                      <div className="tree-columns">
-                        {table.columns.map((c) => (
-                          <button
-                            key={c.id}
-                            disabled
-                            title={`${table.name}.${c.name} · ${c.nativeType ?? c.type}${table.primaryKey.includes(c.id) ? " · Primary key" : ""}${!c.nullable ? " · Required" : ""}`}
-                          >
-                            {table.primaryKey.includes(c.id) ? (
-                              <KeyRound size={11} className="gold" />
-                            ) : w.schema.relationships.some((r) =>
-                                r.sourceColumns.includes(c.id),
-                              ) ? (
-                              <Link2 size={11} className="blue" />
-                            ) : (
-                              <span className="column-dot" />
+                      </span>
+                      <span className="tree-schema-icon">
+                        {isCollapsed ? (
+                          <Folder size={14} />
+                        ) : (
+                          <FolderOpen size={14} />
+                        )}
+                      </span>
+                      <span className="tree-schema-label">
+                        <strong>{group.name}</strong>
+                      </span>
+                      <span className="tree-schema-count">
+                        {group.tables.length}
+                      </span>
+                    </button>
+
+                    {!isCollapsed && (
+                      <div className="tree-schema-tables">
+                        {group.tables.map((table) => (
+                          <div key={table.id}>
+                            <div className="tree-table-row">
+                              <button
+                                className={
+                                  "tree-table " +
+                                  (activeTable?.id === table.id ? "active" : "")
+                                }
+                                title={
+                                  mode === "sql"
+                                    ? `Click to toggle columns · Double-click to open Data (${table.namespace ? table.namespace + "." : ""}${table.name})`
+                                    : `Select table · Double-click to open Data (${table.namespace ? table.namespace + "." : ""}${table.name})`
+                                }
+                                aria-expanded={
+                                  mode === "sql"
+                                    ? expandedTables.includes(
+                                        tableExpansionKey(table.id),
+                                      )
+                                    : undefined
+                                }
+                                onClick={(event) => {
+                                  if (event.detail > 1) return;
+                                  if (mode === "sql")
+                                    toggleTableColumns(table.id);
+                                  else void chooseTable(table.id);
+                                }}
+                                onDoubleClick={() =>
+                                  void openTableData(table.id)
+                                }
+                              >
+                                <span className="table-icon">
+                                  <Table2 size={16} />
+                                </span>
+                                <span className="table-label">
+                                  <strong>{table.name}</strong>
+                                </span>
+                              </button>
+                              <Button
+                                className="table-columns-toggle"
+                                title={`Toggle columns · ${table.name}`}
+                                aria-label={`Toggle columns · ${table.name}`}
+                                aria-expanded={expandedTables.includes(
+                                  tableExpansionKey(table.id),
+                                )}
+                                onClick={async () => {
+                                  if (mode !== "sql") {
+                                    if (!(await leaveDraft())) return;
+                                    setDataTable(table.id);
+                                  }
+                                  toggleTableColumns(table.id);
+                                }}
+                              >
+                                {expandedTables.includes(
+                                  tableExpansionKey(table.id),
+                                ) ? (
+                                  <ChevronDown size={12} />
+                                ) : (
+                                  <ChevronRight size={12} />
+                                )}
+                              </Button>
+                            </div>
+                            {expandedTables.includes(
+                              tableExpansionKey(table.id),
+                            ) && (
+                              <div className="tree-columns">
+                                {table.columns.map((c) => (
+                                  <button
+                                    key={c.id}
+                                    disabled
+                                    title={`${table.namespace ? table.namespace + "." : ""}${table.name}.${c.name} · ${c.nativeType ?? c.type}${table.primaryKey.includes(c.id) ? " · Primary key" : ""}${!c.nullable ? " · Required" : ""}`}
+                                  >
+                                    {table.primaryKey.includes(c.id) ? (
+                                      <KeyRound size={11} className="gold" />
+                                    ) : w.schema.relationships.some((r) =>
+                                        r.sourceColumns.includes(c.id),
+                                      ) ? (
+                                      <Link2 size={11} className="blue" />
+                                    ) : (
+                                      <span className="column-dot" />
+                                    )}
+                                    <span>{c.name}</span>
+                                    <code>
+                                      {c.nativeType ?? c.type.toLowerCase()}
+                                    </code>
+                                  </button>
+                                ))}
+                              </div>
                             )}
-                            <span>{c.name}</span>
-                            <code>{c.nativeType ?? c.type.toLowerCase()}</code>
-                          </button>
+                          </div>
                         ))}
                       </div>
                     )}
                   </div>
-                ))}
+                );
+              })}
               {!w.schema.tables.length && (
                 <p className="sidebar-empty">Your tables will appear here.</p>
               )}
@@ -690,35 +1149,9 @@ export default function App() {
                 <p className="sidebar-empty">No matching tables.</p>
               )}
             </div>
-            {filteredTables.length > 50 && (
-              <nav className="table-pagination" aria-label="Table pages">
-                <Button
-                  title="Previous table page"
-                  disabled={currentTablePage === 0}
-                  onClick={() => setTablePage(currentTablePage - 1)}
-                >
-                  <ChevronLeft size={13} />
-                </Button>
-                <span
-                  role="status"
-                  title={`${filteredTables.length} tables · 50 per page`}
-                >
-                  {currentTablePage * 50 + 1}–
-                  {Math.min((currentTablePage + 1) * 50, filteredTables.length)}{" "}
-                  <span className="muted">/ {filteredTables.length}</span>
-                </span>
-                <Button
-                  title="Next table page"
-                  disabled={currentTablePage + 1 >= tablePageCount}
-                  onClick={() => setTablePage(currentTablePage + 1)}
-                >
-                  <ChevronRight size={13} />
-                </Button>
-              </nav>
-            )}
           </aside>
         )}
-        {left && (
+        {left && hasConnection && (
           <div
             className="sidebar-divider"
             role="separator"
@@ -761,7 +1194,7 @@ export default function App() {
           />
         )}
         <main className={"main-view mode-" + mode}>
-          {w.sources && mode === "sql" ? (
+          {hasConnection && w.sources && mode === "sql" ? (
             <MultiSqlWorkspace
               connectionHost={connectionHost}
               key={w.id}
@@ -792,28 +1225,37 @@ export default function App() {
               dataLayout={dataLayout}
               onDataLayoutChange={setDataLayout}
               onSelectTable={(id) => void chooseTable(id)}
+              onReorderTables={setOpenDataTableIds}
               onCloseTable={(id) => void closeDataTable(id)}
+              onCloseTables={(ids, nextActive) =>
+                void closeDataTablesBatch(ids, nextActive)
+              }
               runRef={remoteRun}
               onBusy={setBusy}
               onDirty={setDirty}
             />
           ) : (
-            <div className="empty-slate">
-              <Database size={32} className="accent" />
-              <h2>No database connected</h2>
+            <section
+              className="connection-empty"
+              aria-labelledby="connection-empty-title"
+            >
+              <div className="connection-empty-mark" aria-hidden="true">
+                <Database size={25} />
+              </div>
+              <h2 id="connection-empty-title">Connect to a database</h2>
               <p>
-                Connect to a PostgreSQL or SQL Server database to explore
-                tables, view data, and run SQL queries.
+                Add a PostgreSQL or SQL Server connection to browse tables and
+                run queries.
               </p>
               <Button
-                className="primary"
+                variant="primary"
                 onClick={() =>
                   requestConnection(w.id, w.activeSourceId ?? "primary", "new")
                 }
               >
                 Add connection
               </Button>
-            </div>
+            </section>
           )}
         </main>
       </div>

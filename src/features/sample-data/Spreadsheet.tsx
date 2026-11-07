@@ -1,3 +1,4 @@
+import { RowFilter } from "./RowFilter";
 import {
   gridPosition,
   rememberGridPosition,
@@ -9,7 +10,8 @@ import {
   useColumnWidths,
   useColumnWindow,
 } from "./column-sizing";
-import { columnTypeHint } from "../sql/ResultSetView";
+import { columnTypeHint, STACK_DEFAULT_ROWS } from "../sql/ResultSetView";
+import { createPortal } from "react-dom";
 import {
   memo,
   useEffect,
@@ -43,7 +45,6 @@ import {
   Maximize2,
   Plus,
   RotateCcw,
-  Search,
   Trash2,
   X,
 } from "lucide-react";
@@ -69,6 +70,11 @@ import {
 } from "./model";
 
 const PAGE_SIZE = 100;
+const SHEET_ROW_HEIGHT = 29;
+const SHEET_ROW_OVERSCAN = 45;
+const SHEET_ROW_CHUNK = 30;
+const SHEET_VIRTUALIZE_THRESHOLD_LOCKED = 400;
+const SHEET_VIRTUALIZE_THRESHOLD_EDITABLE = 120;
 
 interface SortState {
   colId: string;
@@ -187,10 +193,12 @@ interface Props {
     onToggleCollapse: () => void;
     onMaximize: () => void;
     onClose?: () => void;
+    rowLimit?: number;
+    onRowLimitChange?: (limit: number | undefined) => void;
   };
 }
 
-export function Spreadsheet({
+export const Spreadsheet = memo(function Spreadsheet({
   viewKey,
   table,
   rows,
@@ -235,9 +243,25 @@ export function Spreadsheet({
   } | null>(null);
 
   const lastSelectedIndexRef = useRef<number | null>(null);
+  const rangeAnchorRef = useRef<{ rowPos: number; col: number } | null>(null);
+  const isDraggingRangeRef = useRef(false);
+  const [cellRange, setCellRange] = useState<{
+    startRowPos: number;
+    endRowPos: number;
+    startCol: number;
+    endCol: number;
+  } | null>(null);
   const copyMenuRef = useRef<HTMLDivElement>(null);
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const stopDrag = () => {
+      isDraggingRangeRef.current = false;
+    };
+    window.addEventListener("mouseup", stopDrag);
+    return () => window.removeEventListener("mouseup", stopDrag);
+  }, []);
 
   useEffect(() => {
     if (viewKey) rememberGridView(viewKey, page, filter);
@@ -247,6 +271,7 @@ export function Spreadsheet({
     setSort(null);
     setFilterCol("*");
     setIsUnlocked(false);
+    setCellRange(null);
   }, [table.id, table.namespace]);
 
   useEffect(() => {
@@ -291,11 +316,24 @@ export function Spreadsheet({
         setContextMenu(null);
       }
     };
+    const handleAnyScroll = (event: Event) => {
+      if (
+        contextMenu &&
+        contextMenuRef.current &&
+        event.target instanceof Node &&
+        contextMenuRef.current.contains(event.target)
+      ) {
+        return;
+      }
+      setContextMenu(null);
+    };
     window.addEventListener("mousedown", handlePointerDown);
     window.addEventListener("keydown", handleEscape);
+    window.addEventListener("scroll", handleAnyScroll, true);
     return () => {
       window.removeEventListener("mousedown", handlePointerDown);
       window.removeEventListener("keydown", handleEscape);
+      window.removeEventListener("scroll", handleAnyScroll, true);
     };
   }, [copyMenuOpen, exportMenuOpen, contextMenu]);
 
@@ -341,13 +379,22 @@ export function Spreadsheet({
     [table.columns, columnViewport.start, columnViewport.end],
   );
   const previousRows = useRef(rows);
-  const dirty = drafts.some(isChanged);
+  const changes = useMemo(() => drafts.filter(isChanged), [drafts]);
+  const dirty = changes.length > 0;
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
-  const changes = drafts.filter(isChanged);
-  const added = changes.filter((r) => !r.original && !r.deleted).length;
-  const changed = changes.filter((r) => r.original && !r.deleted).length;
-  const removed = changes.filter((r) => r.original && r.deleted).length;
+  const added = useMemo(
+    () => changes.filter((r) => !r.original && !r.deleted).length,
+    [changes],
+  );
+  const changed = useMemo(
+    () => changes.filter((r) => r.original && !r.deleted).length,
+    [changes],
+  );
+  const removed = useMemo(
+    () => changes.filter((r) => r.original && r.deleted).length,
+    [changes],
+  );
 
   useEffect(() => {
     onDirty(dirty);
@@ -703,6 +750,126 @@ export function Spreadsheet({
     () => visible.filter(({ row }) => !row.deleted),
     [visible],
   );
+  const effectiveStackLimit = stackHeader?.rowLimit ?? STACK_DEFAULT_ROWS;
+  const selectableRowCount = stackHeader
+    ? Math.min(visible.length, Math.max(1, effectiveStackLimit))
+    : visible.length;
+  const normalizedRange = useMemo(() => {
+    if (
+      selected.size > 0 ||
+      !cellRange ||
+      !selectableRowCount ||
+      !table.columns.length
+    ) {
+      return null;
+    }
+    const maxRowIdx = selectableRowCount - 1;
+    const maxColIdx = table.columns.length - 1;
+    const minRowPos = Math.max(
+      0,
+      Math.min(maxRowIdx, Math.min(cellRange.startRowPos, cellRange.endRowPos)),
+    );
+    const maxRowPos = Math.max(
+      0,
+      Math.min(maxRowIdx, Math.max(cellRange.startRowPos, cellRange.endRowPos)),
+    );
+    const minCol = Math.max(
+      0,
+      Math.min(maxColIdx, Math.min(cellRange.startCol, cellRange.endCol)),
+    );
+    const maxCol = Math.max(
+      0,
+      Math.min(maxColIdx, Math.max(cellRange.startCol, cellRange.endCol)),
+    );
+    const rowCount = maxRowPos - minRowPos + 1;
+    const colCount = maxCol - minCol + 1;
+    return {
+      minRowPos,
+      maxRowPos,
+      minCol,
+      maxCol,
+      rowCount,
+      colCount,
+      cellCount: rowCount * colCount,
+    };
+  }, [selected.size, cellRange, selectableRowCount, table.columns.length]);
+  const hasActiveRange = Boolean(
+    normalizedRange && normalizedRange.cellCount > 1,
+  );
+  const sheetVirtualizeThreshold = editable
+    ? SHEET_VIRTUALIZE_THRESHOLD_EDITABLE
+    : SHEET_VIRTUALIZE_THRESHOLD_LOCKED;
+  const shouldVirtualizeRows =
+    !stackHeader && visible.length > sheetVirtualizeThreshold;
+
+  const [rowRange, setRowRange] = useState(() => {
+    const initialTop = viewKey ? gridPosition(viewKey).top : 0;
+    const rawStart = Math.max(
+      0,
+      Math.floor(initialTop / SHEET_ROW_HEIGHT) - SHEET_ROW_OVERSCAN,
+    );
+    const start = Math.floor(rawStart / SHEET_ROW_CHUNK) * SHEET_ROW_CHUNK;
+    const end = start + SHEET_ROW_OVERSCAN * 2 + SHEET_ROW_CHUNK * 2;
+    return { start, end };
+  });
+
+  useLayoutEffect(() => {
+    if (!shouldVirtualizeRows) return;
+    const element = columnViewport.ref.current;
+    if (!element) return;
+    let frame = 0;
+    const measure = () => {
+      frame = 0;
+      const top = element.scrollTop;
+      const height = Math.max(element.clientHeight || 420, 240);
+      const rawStart = Math.max(
+        0,
+        Math.floor(top / SHEET_ROW_HEIGHT) - SHEET_ROW_OVERSCAN,
+      );
+      const start = Math.floor(rawStart / SHEET_ROW_CHUNK) * SHEET_ROW_CHUNK;
+      const rawEnd =
+        Math.ceil((top + height) / SHEET_ROW_HEIGHT) + SHEET_ROW_OVERSCAN;
+      const end = Math.ceil(rawEnd / SHEET_ROW_CHUNK) * SHEET_ROW_CHUNK;
+      setRowRange((old) =>
+        old.start === start && old.end === end ? old : { start, end },
+      );
+    };
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(measure);
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(element);
+    element.addEventListener("scroll", schedule, { passive: true });
+    measure();
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      element.removeEventListener("scroll", schedule);
+    };
+  }, [shouldVirtualizeRows]);
+
+  const rowStart = shouldVirtualizeRows
+    ? Math.min(rowRange.start, Math.max(0, visible.length - 1))
+    : 0;
+  const rowEnd = shouldVirtualizeRows
+    ? Math.min(visible.length, Math.max(rowStart + 1, rowRange.end))
+    : visible.length;
+  const renderedRows = useMemo(
+    () =>
+      stackHeader
+        ? visible.slice(0, Math.max(1, effectiveStackLimit))
+        : shouldVirtualizeRows
+          ? visible.slice(rowStart, rowEnd)
+          : visible,
+    [
+      stackHeader,
+      visible,
+      effectiveStackLimit,
+      shouldVirtualizeRows,
+      rowStart,
+      rowEnd,
+    ],
+  );
 
   function toggleSort(colId: string) {
     setSort((current) => {
@@ -720,18 +887,14 @@ export function Spreadsheet({
   }
 
   function getTargetDraftRows(explicitRowIndex?: number): DraftRow[] {
-    if (
-      explicitRowIndex !== undefined &&
-      drafts[explicitRowIndex] &&
-      !selected.has(drafts[explicitRowIndex].id)
-    ) {
-      const target = drafts[explicitRowIndex];
-      return !target.deleted ? [target] : [];
-    }
     if (selected.size > 0) {
       return matchingPopulated
         .map(({ row }) => row)
         .filter((row) => selected.has(row.id));
+    }
+    if (explicitRowIndex !== undefined && drafts[explicitRowIndex]) {
+      const target = drafts[explicitRowIndex];
+      return !target.deleted ? [target] : [];
     }
     if (drafts[active.row] && !drafts[active.row].deleted) {
       return [drafts[active.row]];
@@ -748,27 +911,138 @@ export function Spreadsheet({
     return matchingPopulated.map(({ row }) => row);
   }
 
+  function resolveCopyScope(
+    explicitRowIndex?: number,
+    allRows = false,
+  ): {
+    draftRows: DraftRow[];
+    cols: ColumnDefinition[];
+    colNames: string[];
+    isRange: boolean;
+  } {
+    if (allRows) {
+      return {
+        draftRows: visiblePopulated.map(({ row }) => row),
+        cols: table.columns,
+        colNames: allColumnNames,
+        isRange: false,
+      };
+    }
+    if (hasActiveRange && normalizedRange) {
+      const rangeRows = visible
+        .slice(normalizedRange.minRowPos, normalizedRange.maxRowPos + 1)
+        .map(({ row }) => row)
+        .filter((r) => !r.deleted && isPopulatedRow(r));
+      const rangeCols = table.columns.slice(
+        normalizedRange.minCol,
+        normalizedRange.maxCol + 1,
+      );
+      return {
+        draftRows: rangeRows,
+        cols: rangeCols,
+        colNames: rangeCols.map((c) => c.name),
+        isRange: true,
+      };
+    }
+    if (selected.size > 0) {
+      return {
+        draftRows: getTargetDraftRows(explicitRowIndex),
+        cols: table.columns,
+        colNames: allColumnNames,
+        isRange: false,
+      };
+    }
+    const targetRowIdx =
+      explicitRowIndex !== undefined
+        ? explicitRowIndex
+        : contextMenu
+          ? contextMenu.rowIndex
+          : active.row;
+    const targetColIdx = Math.max(
+      0,
+      Math.min(
+        table.columns.length - 1,
+        contextMenu ? contextMenu.colIndex : active.col,
+      ),
+    );
+    const targetCol = table.columns[targetColIdx];
+    const targetRows = getTargetDraftRows(targetRowIdx);
+    if (targetCol && targetRows.length === 1) {
+      return {
+        draftRows: targetRows,
+        cols: [targetCol],
+        colNames: [targetCol.name],
+        isRange: true,
+      };
+    }
+    return {
+      draftRows: targetRows,
+      cols: table.columns,
+      colNames: allColumnNames,
+      isRange: false,
+    };
+  }
+
+  function setNullTargetCells(
+    fallbackRow = active.row,
+    fallbackCol = active.col,
+  ) {
+    if (!editable || disabled || saving || readOnlyReason) return;
+    if (hasActiveRange && normalizedRange) {
+      const targetRowIndices = new Set(
+        visible
+          .slice(normalizedRange.minRowPos, normalizedRange.maxRowPos + 1)
+          .map(({ index }) => index),
+      );
+      const targetCols = table.columns
+        .slice(normalizedRange.minCol, normalizedRange.maxCol + 1)
+        .filter((col) => !col.generated && !col.readOnly && col.nullable);
+      if (!targetRowIndices.size || !targetCols.length) return;
+      setError("");
+      setNotice("");
+      setDrafts((current) =>
+        current.map((r, idx) => {
+          if (!targetRowIndices.has(idx) || r.deleted) return r;
+          if (r.original && !table.primaryKey.length) return r;
+          const nextCells = { ...r.cells };
+          for (const col of targetCols) {
+            nextCells[col.name] = null;
+          }
+          return { ...r, cells: nextCells };
+        }),
+      );
+      return;
+    }
+    update(fallbackRow, fallbackCol, null);
+  }
+
   async function handleCopyAsInsert(explicitRowIndex?: number) {
-    const targetDrafts = getTargetDraftRows(explicitRowIndex);
-    if (!targetDrafts.length) return;
-    const records = targetDrafts.map((r) => draftToRecord(r, table.columns));
+    const { draftRows: targetDrafts, cols, colNames, isRange } =
+      resolveCopyScope(explicitRowIndex, false);
+    if (!targetDrafts.length || !colNames.length) return;
+    const records = targetDrafts.map((r) => draftToRecord(r, cols));
     const sqlText = buildCopyAsInsert({
       table,
-      columns: allColumnNames,
+      columns: colNames,
       rows: records,
       dialect,
     });
     await copyTextToClipboard(sqlText);
     setNotice(
-      `Copied ${records.length} row${records.length === 1 ? "" : "s"} as INSERT`,
+      isRange
+        ? `Copied ${records.length}×${colNames.length} as INSERT`
+        : `Copied ${records.length} row${records.length === 1 ? "" : "s"} as INSERT`,
     );
     setCopyMenuOpen(false);
     setContextMenu(null);
   }
 
   async function handleCopyAsUpdate(explicitRowIndex?: number) {
-    const targetDrafts = getTargetDraftRows(explicitRowIndex);
-    if (!targetDrafts.length) return;
+    const { draftRows: targetDrafts, colNames, isRange } = resolveCopyScope(
+      explicitRowIndex,
+      false,
+    );
+    if (!targetDrafts.length || !colNames.length) return;
     const updateRows = targetDrafts.map((r) => ({
       current: draftToRecord(r, table.columns),
       original: r.original,
@@ -776,51 +1050,85 @@ export function Spreadsheet({
     const sqlText = buildCopyAsUpdate({
       table,
       columns: allColumnNames,
+      setColumns: isRange ? colNames : undefined,
       rows: updateRows,
       dialect,
     });
     await copyTextToClipboard(sqlText);
     setNotice(
-      `Copied ${updateRows.length} row${updateRows.length === 1 ? "" : "s"} as UPDATE`,
+      isRange
+        ? `Copied ${updateRows.length}×${colNames.length} as UPDATE`
+        : `Copied ${updateRows.length} row${updateRows.length === 1 ? "" : "s"} as UPDATE`,
     );
     setCopyMenuOpen(false);
     setContextMenu(null);
   }
 
   async function handleCopyAsCsv(explicitRowIndex?: number) {
-    const targetDrafts = getTargetDraftRows(explicitRowIndex);
-    if (!targetDrafts.length) return;
-    const records = targetDrafts.map((r) => draftToRecord(r, table.columns));
-    const csvText = buildCopyAsCsv(allColumnNames, records);
+    const { draftRows: targetDrafts, cols, colNames, isRange } =
+      resolveCopyScope(explicitRowIndex, false);
+    if (!targetDrafts.length || !colNames.length) return;
+    const records = targetDrafts.map((r) => draftToRecord(r, cols));
+    const csvText = buildCopyAsCsv(colNames, records);
     await copyTextToClipboard(csvText);
     setNotice(
-      `Copied ${records.length} row${records.length === 1 ? "" : "s"} as CSV`,
+      isRange
+        ? `Copied ${records.length}×${colNames.length} as CSV`
+        : `Copied ${records.length} row${records.length === 1 ? "" : "s"} as CSV`,
     );
     setCopyMenuOpen(false);
     setContextMenu(null);
   }
 
-  async function handleCopyAsTsv(explicitRowIndex?: number) {
-    const targetDrafts = getTargetDraftRows(explicitRowIndex);
-    if (!targetDrafts.length) return;
-    const records = targetDrafts.map((r) => draftToRecord(r, table.columns));
-    const tsvText = buildCopyAsTsv(allColumnNames, records);
+  async function handleCopyAsTsv(
+    explicitRowIndex?: number,
+    includeHeader = false,
+  ) {
+    const { draftRows: targetDrafts, cols, colNames, isRange } =
+      resolveCopyScope(explicitRowIndex, false);
+    if (!targetDrafts.length || !colNames.length) return;
+    const records = targetDrafts.map((r) => draftToRecord(r, cols));
+    const tsvText = buildCopyAsTsv(colNames, records, includeHeader);
     await copyTextToClipboard(tsvText);
     setNotice(
-      `Copied ${records.length} row${records.length === 1 ? "" : "s"} as TSV`,
+      isRange
+        ? `Copied ${records.length}×${colNames.length}${includeHeader ? " with header" : " as TSV"}`
+        : `Copied ${records.length} row${records.length === 1 ? "" : "s"}${includeHeader ? " with header" : " as TSV"}`,
+    );
+    setCopyMenuOpen(false);
+    setContextMenu(null);
+  }
+
+  async function handleCopyWithHeader(
+    explicitRowIndex?: number,
+    allRows = false,
+  ) {
+    const { draftRows: targetDrafts, cols, colNames, isRange } =
+      resolveCopyScope(explicitRowIndex, allRows);
+    if (!targetDrafts.length || !colNames.length) return;
+    const records = targetDrafts.map((r) => draftToRecord(r, cols));
+    const tsvText = buildCopyAsTsv(colNames, records, true);
+    await copyTextToClipboard(tsvText);
+    setNotice(
+      isRange
+        ? `Copied ${records.length}×${colNames.length} with header`
+        : `Copied ${records.length} row${records.length === 1 ? "" : "s"} with header`,
     );
     setCopyMenuOpen(false);
     setContextMenu(null);
   }
 
   async function handleCopyAsJson(explicitRowIndex?: number) {
-    const targetDrafts = getTargetDraftRows(explicitRowIndex);
-    if (!targetDrafts.length) return;
-    const records = targetDrafts.map((r) => draftToRecord(r, table.columns));
+    const { draftRows: targetDrafts, cols, colNames, isRange } =
+      resolveCopyScope(explicitRowIndex, false);
+    if (!targetDrafts.length || !colNames.length) return;
+    const records = targetDrafts.map((r) => draftToRecord(r, cols));
     const jsonText = JSON.stringify(records, null, 2);
     await copyTextToClipboard(jsonText);
     setNotice(
-      `Copied ${records.length} row${records.length === 1 ? "" : "s"} as JSON`,
+      isRange
+        ? `Copied ${records.length}×${colNames.length} as JSON`
+        : `Copied ${records.length} row${records.length === 1 ? "" : "s"} as JSON`,
     );
     setCopyMenuOpen(false);
     setContextMenu(null);
@@ -917,12 +1225,15 @@ export function Spreadsheet({
     rowIndex: number,
     checked: boolean,
     shiftKey = false,
+    additive = true,
   ) {
+    setCellRange(null);
+    const anchorIndex = lastSelectedIndexRef.current ?? active.row;
     setSelected((current) => {
-      const next = new Set(current);
-      if (shiftKey && lastSelectedIndexRef.current !== null) {
+      const next = new Set(additive ? current : []);
+      if (shiftKey && anchorIndex !== null && anchorIndex !== undefined) {
         const visibleIndices = visible.map((item) => item.index);
-        const posA = visibleIndices.indexOf(lastSelectedIndexRef.current);
+        const posA = visibleIndices.indexOf(anchorIndex);
         const posB = visibleIndices.indexOf(rowIndex);
         if (posA >= 0 && posB >= 0) {
           const [startPos, endPos] =
@@ -934,7 +1245,6 @@ export function Spreadsheet({
               else next.delete(item.row.id);
             }
           }
-          lastSelectedIndexRef.current = rowIndex;
           return next;
         }
       }
@@ -945,21 +1255,150 @@ export function Spreadsheet({
     });
   }
 
+  function handleCellMouseDown(
+    event: ReactMouseEvent,
+    visiblePos: number,
+    rowIndex: number,
+    colIndex: number,
+  ) {
+    if (event.button !== 0) return;
+    const row = drafts[rowIndex];
+    if ((event.metaKey || event.ctrlKey) && row && isPopulatedRow(row)) {
+      event.preventDefault();
+      setCellRange(null);
+      handleRowSelect(row.id, rowIndex, !selected.has(row.id), false, true);
+      setActive((old) =>
+        old.row === rowIndex && old.col === colIndex
+          ? old
+          : { row: rowIndex, col: colIndex },
+      );
+      return;
+    }
+    if (selected.size > 0) {
+      event.preventDefault();
+      isDraggingRangeRef.current = false;
+      setCellRange(null);
+      return;
+    }
+    if (event.shiftKey && row) {
+      event.preventDefault();
+      const fallbackPos = visible.findIndex(
+        ({ index }) => index === active.row,
+      );
+      const anchor = rangeAnchorRef.current ?? {
+        rowPos: fallbackPos >= 0 ? fallbackPos : visiblePos,
+        col: active.col,
+      };
+      rangeAnchorRef.current = anchor;
+      isDraggingRangeRef.current = true;
+      setCellRange({
+        startRowPos: anchor.rowPos,
+        endRowPos: visiblePos,
+        startCol: anchor.col,
+        endCol: colIndex,
+      });
+      setActive((old) =>
+        old.row === rowIndex && old.col === colIndex
+          ? old
+          : { row: rowIndex, col: colIndex },
+      );
+      return;
+    }
+    rangeAnchorRef.current = { rowPos: visiblePos, col: colIndex };
+    lastSelectedIndexRef.current = rowIndex;
+    isDraggingRangeRef.current = true;
+    setCellRange(null);
+    setActive((old) =>
+      old.row === rowIndex && old.col === colIndex
+        ? old
+        : { row: rowIndex, col: colIndex },
+    );
+  }
+
+  function handleCellMouseEnter(
+    event: ReactMouseEvent,
+    visiblePos: number,
+    rowIndex: number,
+    colIndex: number,
+  ) {
+    if (
+      selected.size > 0 ||
+      !isDraggingRangeRef.current ||
+      (event.buttons & 1) !== 1
+    ) {
+      return;
+    }
+    const anchor = rangeAnchorRef.current;
+    if (!anchor) return;
+    if (anchor.rowPos === visiblePos && anchor.col === colIndex) {
+      setCellRange(null);
+      return;
+    }
+    window.getSelection()?.removeAllRanges();
+    if (
+      document.activeElement instanceof HTMLInputElement &&
+      root.current?.contains(document.activeElement)
+    ) {
+      document.activeElement.blur();
+    }
+    setCellRange((prev) =>
+      prev &&
+      prev.startRowPos === anchor.rowPos &&
+      prev.endRowPos === visiblePos &&
+      prev.startCol === anchor.col &&
+      prev.endCol === colIndex
+        ? prev
+        : {
+            startRowPos: anchor.rowPos,
+            endRowPos: visiblePos,
+            startCol: anchor.col,
+            endCol: colIndex,
+          },
+    );
+    setActive((old) =>
+      old.row === rowIndex && old.col === colIndex
+        ? old
+        : { row: rowIndex, col: colIndex },
+    );
+  }
+
   function openContextMenu(
     event: ReactMouseEvent,
+    visiblePos: number,
     rowIndex: number,
     colIndex: number,
   ) {
     event.preventDefault();
-    const safeCol = Math.max(0, colIndex);
-    setActive({ row: rowIndex, col: safeCol });
+    const isGutter = colIndex < 0;
+    const safeCol = isGutter ? Math.max(0, active.col) : Math.max(0, colIndex);
     const row = drafts[rowIndex];
-    if (row && !selected.has(row.id)) {
-      setSelected(new Set([row.id]));
+    const insideRange =
+      !isGutter &&
+      hasActiveRange &&
+      normalizedRange !== null &&
+      visiblePos >= normalizedRange.minRowPos &&
+      visiblePos <= normalizedRange.maxRowPos &&
+      safeCol >= normalizedRange.minCol &&
+      safeCol <= normalizedRange.maxCol;
+
+    if (selected.size > 0) {
+      setCellRange(null);
+    } else if (isGutter) {
+      setCellRange(null);
+      rangeAnchorRef.current = { rowPos: visiblePos, col: safeCol };
+      setActive({ row: rowIndex, col: safeCol });
+      if (row) {
+        setSelected(new Set([row.id]));
+        lastSelectedIndexRef.current = rowIndex;
+      }
+    } else if (!insideRange) {
+      setCellRange(null);
+      rangeAnchorRef.current = { rowPos: visiblePos, col: safeCol };
+      setActive({ row: rowIndex, col: safeCol });
       lastSelectedIndexRef.current = rowIndex;
     }
-    const menuWidth = 225;
-    const menuHeight = 340;
+    const menuWidth = 235;
+    const menuHeight = 360;
     const x = Math.min(
       event.clientX,
       Math.max(12, window.innerWidth - menuWidth - 12),
@@ -976,6 +1415,8 @@ export function Spreadsheet({
     handleKey,
     paste,
     focus: () => {},
+    cellMouseDown: () => {},
+    cellMouseEnter: () => {},
     select: () => {},
     contextMenu: () => {},
   });
@@ -984,10 +1425,15 @@ export function Spreadsheet({
     update,
     handleKey,
     paste,
-    focus: (row, col) =>
+    focus: (row, col) => {
+      if (selected.size > 0) return;
+      lastSelectedIndexRef.current = row;
       setActive((old) =>
         old.row === row && old.col === col ? old : { row, col },
-      ),
+      );
+    },
+    cellMouseDown: handleCellMouseDown,
+    cellMouseEnter: handleCellMouseEnter,
     contextMenu: openContextMenu,
   };
 
@@ -1031,11 +1477,28 @@ export function Spreadsheet({
     !activeColumn?.generated &&
     !activeColumn?.readOnly;
 
-  const targetCopyCount = selected.size
-    ? selected.size
-    : selectedRow && !selectedRow.deleted
-      ? 1
-      : visiblePopulated.length;
+  const targetCopyCount =
+    hasActiveRange && normalizedRange
+      ? normalizedRange.rowCount
+      : selected.size
+        ? selected.size
+        : selectedRow && !selectedRow.deleted
+          ? 1
+          : visiblePopulated.length;
+  const scopeBadge =
+    hasActiveRange && normalizedRange
+      ? `${normalizedRange.rowCount}×${normalizedRange.colCount}`
+      : selected.size > 1
+        ? `${selected.size}`
+        : "";
+  const scopeDescription =
+    hasActiveRange && normalizedRange
+      ? `${normalizedRange.rowCount} row${normalizedRange.rowCount === 1 ? "" : "s"} × ${normalizedRange.colCount} col${normalizedRange.colCount === 1 ? "" : "s"} · ${qualifiedTableName}`
+      : selected.size > 0
+        ? `${selected.size} row${selected.size === 1 ? "" : "s"} selected · ${qualifiedTableName}`
+        : contextMenu
+          ? `Row ${contextMenu.rowIndex + 1} · ${table.columns[contextMenu.colIndex]?.name ?? qualifiedTableName}`
+          : `${targetCopyCount} row(s) · ${qualifiedTableName}`;
 
   return (
     <div
@@ -1057,11 +1520,39 @@ export function Spreadsheet({
             )}
             <strong>{qualifiedTableName}</strong>
             <span className="stack-row-badge">
-              {matchingPopulated.length} row
-              {matchingPopulated.length === 1 ? "" : "s"}
+              {!stackHeader.collapsed &&
+              renderedRows.length < matchingPopulated.length
+                ? `${renderedRows.length} / ${matchingPopulated.length} rows`
+                : `${matchingPopulated.length} row${matchingPopulated.length === 1 ? "" : "s"}`}
             </span>
           </button>
           <div className="stack-header-spacer" />
+          {(selected.size > 0 || hasActiveRange) && (
+            <span className="stack-selection-pill">
+              <span>
+                {hasActiveRange && normalizedRange
+                  ? `${normalizedRange.rowCount}×${normalizedRange.colCount} selected`
+                  : `${selected.size} row${selected.size === 1 ? "" : "s"} selected`}
+              </span>
+              <button
+                type="button"
+                aria-label="Clear selection"
+                title="Clear selection"
+                onClick={() => {
+                  setSelected(new Set());
+                  setCellRange(null);
+                }}
+              >
+                <X size={10} />
+              </button>
+            </span>
+          )}
+          {notice && (
+            <span className="result-status-summary is-notice" role="status">
+              <Check size={11} />
+              {notice}
+            </span>
+          )}
           <div className="stack-header-actions">
             <Button
               data-icon-only="true"
@@ -1102,7 +1593,34 @@ export function Spreadsheet({
         tabIndex={0}
         aria-label="Table data"
         ref={columnViewport.ref}
+        onKeyDown={(event) => {
+          if (
+            (event.metaKey || event.ctrlKey) &&
+            event.key.toLowerCase() === "c"
+          ) {
+            if (
+              document.activeElement instanceof HTMLInputElement &&
+              document.activeElement.selectionStart !==
+                document.activeElement.selectionEnd
+            ) {
+              return;
+            }
+            if (hasActiveRange || selected.size > 0 || !editable) {
+              event.preventDefault();
+              if (event.shiftKey) {
+                void handleCopyWithHeader(undefined, false);
+              } else if (hasActiveRange || selected.size > 0) {
+                void handleCopyAsTsv(undefined, false);
+              } else {
+                void handleCopyCellValue(active.row, active.col);
+              }
+            }
+          } else if (event.key === "Escape" && cellRange) {
+            setCellRange(null);
+          }
+        }}
         onScroll={(event) => {
+          if (contextMenu) setContextMenu(null);
           if (viewKey)
             rememberGridPosition(
               viewKey,
@@ -1115,7 +1633,9 @@ export function Spreadsheet({
           className={
             "sheet-grid" +
             (!editable ? " is-locked" : "") +
-            (stackHeader ? " is-compact" : "")
+            (stackHeader ? " is-compact" : "") +
+            (selected.size > 0 ? " has-row-selection" : "") +
+            (hasActiveRange ? " has-range-selection" : "")
           }
           aria-label={`${table.name} data grid`}
           style={{ width: 38 + widths.reduce((sum, width) => sum + width, 0) }}
@@ -1134,16 +1654,21 @@ export function Spreadsheet({
                     type="checkbox"
                     aria-label="Select visible rows"
                     checked={
-                      visible.length > 0 &&
-                      visible.every(({ row }) => selected.has(row.id))
-                    }
-                    onChange={(e) =>
-                      setSelected(
-                        e.target.checked
-                          ? new Set(visible.map(({ row }) => row.id))
-                          : new Set(),
+                      selected.size > 0 &&
+                      (stackHeader ? renderedRows : visible).length > 0 &&
+                      (stackHeader ? renderedRows : visible).every(({ row }) =>
+                        selected.has(row.id),
                       )
                     }
+                    onChange={(e) => {
+                      setCellRange(null);
+                      const targetList = stackHeader ? renderedRows : visible;
+                      setSelected(
+                        e.target.checked
+                          ? new Set(targetList.map(({ row }) => row.id))
+                          : new Set(),
+                      );
+                    }}
                   />
                   <span>#</span>
                 </label>
@@ -1170,11 +1695,22 @@ export function Spreadsheet({
                   .filter(Boolean)
                   .join(" · ");
 
+                const colInRange =
+                  hasActiveRange &&
+                  normalizedRange !== null &&
+                  i >= normalizedRange.minCol &&
+                  i <= normalizedRange.maxCol;
+
                 return (
                   <th
                     key={c.id}
                     className={[
-                      active.col === i ? "column-active" : "",
+                      selected.size === 0 &&
+                      !hasActiveRange &&
+                      active.col === i
+                        ? "column-active"
+                        : "",
+                      colInRange ? "column-in-range" : "",
                       isSorted ? "column-sorted" : "",
                     ]
                       .filter(Boolean)
@@ -1186,6 +1722,27 @@ export function Spreadsheet({
                         title={`${c.name} · ${colMeta}`}
                         disabled={structureDisabled || saving}
                         data-column-id={c.id}
+                        onClick={(event) => {
+                          if (!visible.length) return;
+                          if (selected.size > 0) {
+                            setActive((old) => ({ ...old, col: i }));
+                            return;
+                          }
+                          const startCol =
+                            event.shiftKey && rangeAnchorRef.current
+                              ? rangeAnchorRef.current.col
+                              : i;
+                          if (!event.shiftKey || !rangeAnchorRef.current) {
+                            rangeAnchorRef.current = { rowPos: 0, col: i };
+                          }
+                          setCellRange({
+                            startRowPos: 0,
+                            endRowPos: selectableRowCount - 1,
+                            startCol,
+                            endCol: i,
+                          });
+                          setActive((old) => ({ ...old, col: i }));
+                        }}
                         onDoubleClick={(event) => {
                           if (editable)
                             onEditColumn?.(c.id, event.currentTarget);
@@ -1266,28 +1823,126 @@ export function Spreadsheet({
             </tr>
           </thead>
           <tbody>
-            {visible.map(({ row, index: r }) => (
-              <GridRow
-                key={row.id}
-                row={row}
-                rowIndex={r}
-                selected={selected.has(row.id)}
-                activeCol={active.row === r ? active.col : -1}
-                visibleColumns={visibleColumns}
-                start={columnViewport.start}
-                end={columnViewport.end}
-                columnCount={table.columns.length}
-                hasPrimaryKey={!!table.primaryKey.length}
-                pageIndex={serverPage?.index ?? 0}
-                disabled={disabled || saving}
-                locked={!editable}
-                cellHints={cellHints}
-                handlers={cellHandlers}
-              />
-            ))}
+            {!stackHeader && rowStart > 0 && (
+              <tr
+                className="result-row-spacer"
+                style={{ height: rowStart * SHEET_ROW_HEIGHT }}
+                aria-hidden="true"
+              >
+                <td colSpan={1 + table.columns.length} />
+              </tr>
+            )}
+            {renderedRows.map(({ row, index: r }, offset) => {
+              const visiblePos = stackHeader ? offset : rowStart + offset;
+              const rowInRange =
+                hasActiveRange &&
+                normalizedRange !== null &&
+                visiblePos >= normalizedRange.minRowPos &&
+                visiblePos <= normalizedRange.maxRowPos;
+              return (
+                <GridRow
+                  key={row.id}
+                  row={row}
+                  rowIndex={r}
+                  visiblePos={visiblePos}
+                  selected={selected.has(row.id)}
+                  inRangeRow={rowInRange}
+                  rangeMinCol={
+                    rowInRange && normalizedRange ? normalizedRange.minCol : -1
+                  }
+                  rangeMaxCol={
+                    rowInRange && normalizedRange ? normalizedRange.maxCol : -1
+                  }
+                  isRangeTop={
+                    rowInRange &&
+                    normalizedRange !== null &&
+                    visiblePos === normalizedRange.minRowPos
+                  }
+                  isRangeBottom={
+                    rowInRange &&
+                    normalizedRange !== null &&
+                    visiblePos === normalizedRange.maxRowPos
+                  }
+                  activeCol={
+                    selected.size > 0 || hasActiveRange
+                      ? -1
+                      : active.row === r
+                        ? active.col
+                        : -1
+                  }
+                  visibleColumns={visibleColumns}
+                  start={columnViewport.start}
+                  end={columnViewport.end}
+                  columnCount={table.columns.length}
+                  hasPrimaryKey={!!table.primaryKey.length}
+                  pageIndex={serverPage?.index ?? 0}
+                  disabled={disabled || saving}
+                  locked={!editable}
+                  cellHints={cellHints}
+                  handlers={cellHandlers}
+                />
+              );
+            })}
+            {!stackHeader && rowEnd < visible.length && (
+              <tr
+                className="result-row-spacer"
+                style={{
+                  height: (visible.length - rowEnd) * SHEET_ROW_HEIGHT,
+                }}
+                aria-hidden="true"
+              >
+                <td colSpan={1 + table.columns.length} />
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
+
+      {stackHeader && visible.length > STACK_DEFAULT_ROWS && (
+        <footer className="stack-block-footer">
+          <span className="stack-footer-summary">
+            Showing {renderedRows.length} of {visible.length} rows
+          </span>
+          <div className="stack-footer-actions">
+            {renderedRows.length < visible.length && (
+              <>
+                <button
+                  type="button"
+                  className="stack-footer-btn"
+                  onClick={() =>
+                    stackHeader.onRowLimitChange?.(
+                      Math.min(visible.length, renderedRows.length + 20),
+                    )
+                  }
+                >
+                  Show more (+
+                  {Math.min(20, visible.length - renderedRows.length)})
+                </button>
+                {visible.length - renderedRows.length > 20 && (
+                  <button
+                    type="button"
+                    className="stack-footer-btn"
+                    onClick={() =>
+                      stackHeader.onRowLimitChange?.(visible.length)
+                    }
+                  >
+                    Show all ({visible.length})
+                  </button>
+                )}
+              </>
+            )}
+            {renderedRows.length > STACK_DEFAULT_ROWS && (
+              <button
+                type="button"
+                className="stack-footer-btn"
+                onClick={() => stackHeader.onRowLimitChange?.(undefined)}
+              >
+                Show less
+              </button>
+            )}
+          </div>
+        </footer>
+      )}
 
       {/* Unified Navicat-style Bottom Action & Navigation Bar (hidden in compact stack mode) */}
       {!stackHeader && (
@@ -1315,6 +1970,11 @@ export function Spreadsheet({
             {visiblePopulated.length > 0 && activeVisiblePosition >= 0
               ? `${activeVisiblePosition + 1} / ${visiblePopulated.length}`
               : `0 / ${visiblePopulated.length}`}
+            {hasActiveRange && normalizedRange
+              ? ` · ${normalizedRange.rowCount}×${normalizedRange.colCount} selected`
+              : selected.size > 1
+                ? ` · ${selected.size} selected`
+                : ""}
           </span>
           <Button
             data-icon-only="true"
@@ -1382,9 +2042,9 @@ export function Spreadsheet({
               <Trash2 size={13} />
             </Button>
             <Button
-              title="Set active cell to NULL (Option+Backspace)"
-              disabled={!canSetNullActiveCell}
-              onClick={() => update(active.row, active.col, null)}
+              title="Set active cell or selected range to NULL (Option+Backspace)"
+              disabled={!hasActiveRange && !canSetNullActiveCell}
+              onClick={() => setNullTargetCells(active.row, active.col)}
             >
               NULL
             </Button>
@@ -1476,44 +2136,74 @@ export function Spreadsheet({
             </Button>
             {copyMenuOpen && (
               <div className="result-floating-menu" role="menu">
-                <div className="result-menu-label">
-                  {selected.size
-                    ? `${selected.size} selected row(s)`
-                    : `${targetCopyCount} row(s) · ${qualifiedTableName}`}
-                </div>
+                <div className="result-menu-label">{scopeDescription}</div>
                 <button
                   type="button"
                   role="menuitem"
                   onClick={() => void handleCopyAsInsert()}
                 >
-                  <span>Copy as INSERT</span>
+                  <span>
+                    Copy as INSERT{scopeBadge ? ` (${scopeBadge})` : ""}
+                  </span>
                 </button>
                 <button
                   type="button"
                   role="menuitem"
                   onClick={() => void handleCopyAsUpdate()}
                 >
-                  <span>Copy as UPDATE</span>
+                  <span>
+                    Copy as UPDATE{scopeBadge ? ` (${scopeBadge})` : ""}
+                  </span>
                 </button>
                 <hr />
+                {hasActiveRange ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => void handleCopyAsTsv(undefined, false)}
+                  >
+                    <span>Copy Selected Cells ({scopeBadge})</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => void handleCopyCellValue()}
+                  >
+                    <span>Copy Cell Value</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   role="menuitem"
-                  onClick={() => void handleCopyCellValue()}
+                  onClick={() => void handleCopyWithHeader()}
                 >
-                  <span>Copy Cell Value</span>
+                  <span>
+                    Copy with Header{scopeBadge ? ` (${scopeBadge})` : ""}
+                  </span>
                 </button>
+                {visiblePopulated.length > 1 && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => void handleCopyWithHeader(undefined, true)}
+                  >
+                    <span>
+                      Copy All with Header ({visiblePopulated.length})
+                    </span>
+                  </button>
+                )}
                 <button
                   type="button"
                   role="menuitem"
                   onClick={() => void handleCopyAsCsv()}
                 >
-                  <span>Copy as CSV</span>
+                  <span>Copy as CSV{scopeBadge ? ` (${scopeBadge})` : ""}</span>
                 </button>
                 <button
                   type="button"
                   role="menuitem"
-                  onClick={() => void handleCopyAsTsv()}
+                  onClick={() => void handleCopyAsTsv(undefined, false)}
                 >
                   <span>Copy as TSV (Tab-separated)</span>
                 </button>
@@ -1522,7 +2212,9 @@ export function Spreadsheet({
                   role="menuitem"
                   onClick={() => void handleCopyAsJson()}
                 >
-                  <span>Copy as JSON</span>
+                  <span>
+                    Copy as JSON{scopeBadge ? ` (${scopeBadge})` : ""}
+                  </span>
                 </button>
               </div>
             )}
@@ -1596,8 +2288,7 @@ export function Spreadsheet({
             </span>
           ) : null}
 
-          <div className="sheet-search result-row-filter">
-            <Search size={12} />
+          <RowFilter active={hasActiveFilter || filterCol !== "*"}>
             {filterCol !== "*" && (
               <span className="filter-col-pill" title={`Filtering column ${filterCol}`}>
                 {filterCol}:
@@ -1627,7 +2318,7 @@ export function Spreadsheet({
                 <X size={11} />
               </button>
             )}
-          </div>
+          </RowFilter>
 
           {serverPage ? (
             <span className="row sheet-pagination-group">
@@ -1681,202 +2372,263 @@ export function Spreadsheet({
       )}
 
       {/* Right-click context menu */}
-      {contextMenu && (
-        <div
-          ref={contextMenuRef}
-          className="result-floating-menu result-context-menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-          role="menu"
-        >
-          <div className="result-menu-label">
-            {selected.size > 1
-              ? `${selected.size} rows selected`
-              : `Row ${contextMenu.rowIndex + 1}`}
-            {` · ${qualifiedTableName}`}
-          </div>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => void handleCopyAsInsert(contextMenu.rowIndex)}
+      {contextMenu &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div
+            ref={contextMenuRef}
+            className="result-floating-menu result-context-menu"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            role="menu"
           >
-            <span>Copy as INSERT</span>
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => void handleCopyAsUpdate(contextMenu.rowIndex)}
-          >
-            <span>Copy as UPDATE</span>
-          </button>
-          <hr />
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() =>
-              void handleCopyCellValue(
-                contextMenu.rowIndex,
-                contextMenu.colIndex,
-              )
-            }
-          >
-            <span>Copy Cell Value</span>
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => void handleCopyAsCsv(contextMenu.rowIndex)}
-          >
-            <span>Copy Row(s) as CSV</span>
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => void handleCopyAsTsv(contextMenu.rowIndex)}
-          >
-            <span>Copy Row(s) as TSV</span>
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => void handleCopyAsJson(contextMenu.rowIndex)}
-          >
-            <span>Copy Row(s) as JSON</span>
-          </button>
-          {table.columns[contextMenu.colIndex] && (
-            <>
-              <hr />
+            <div className="result-menu-label">{scopeDescription}</div>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => void handleCopyAsInsert(contextMenu.rowIndex)}
+            >
+              <span>Copy as INSERT{scopeBadge ? ` (${scopeBadge})` : ""}</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => void handleCopyAsUpdate(contextMenu.rowIndex)}
+            >
+              <span>Copy as UPDATE{scopeBadge ? ` (${scopeBadge})` : ""}</span>
+            </button>
+            <hr />
+            {hasActiveRange ? (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => void handleCopyAsTsv(contextMenu.rowIndex, false)}
+              >
+                <span>Copy Selected Cells ({scopeBadge})</span>
+              </button>
+            ) : (
               <button
                 type="button"
                 role="menuitem"
                 onClick={() =>
-                  handleFilterByCell(contextMenu.rowIndex, contextMenu.colIndex)
+                  void handleCopyCellValue(
+                    contextMenu.rowIndex,
+                    contextMenu.colIndex,
+                  )
                 }
               >
-                <span>
-                  Filter by Cell Value (
-                  {table.columns[contextMenu.colIndex].name})
-                </span>
+                <span>Copy Cell Value</span>
               </button>
+            )}
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() =>
+                void handleCopyWithHeader(contextMenu.rowIndex, false)
+              }
+            >
+              <span>
+                Copy with Header{scopeBadge ? ` (${scopeBadge})` : ""}
+              </span>
+            </button>
+            {visiblePopulated.length > 1 && (
               <button
                 type="button"
                 role="menuitem"
-                onClick={() => {
-                  setSort({
-                    colId: table.columns[contextMenu.colIndex].id,
-                    dir: "asc",
-                  });
-                  setContextMenu(null);
-                }}
+                onClick={() =>
+                  void handleCopyWithHeader(contextMenu.rowIndex, true)
+                }
               >
-                <span>
-                  Sort Ascending ({table.columns[contextMenu.colIndex].name})
-                </span>
+                <span>Copy All with Header ({visiblePopulated.length})</span>
               </button>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setSort({
-                    colId: table.columns[contextMenu.colIndex].id,
-                    dir: "desc",
-                  });
-                  setContextMenu(null);
-                }}
-              >
-                <span>
-                  Sort Descending ({table.columns[contextMenu.colIndex].name})
-                </span>
-              </button>
-              {sort && (
+            )}
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => void handleCopyAsCsv(contextMenu.rowIndex)}
+            >
+              <span>
+                Copy {hasActiveRange ? `Selection (${scopeBadge})` : "Row(s)"} as CSV
+              </span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => void handleCopyAsTsv(contextMenu.rowIndex, false)}
+            >
+              <span>
+                Copy {hasActiveRange ? `Selection (${scopeBadge})` : "Row(s)"} as TSV
+              </span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => void handleCopyAsJson(contextMenu.rowIndex)}
+            >
+              <span>
+                Copy {hasActiveRange ? `Selection (${scopeBadge})` : "Row(s)"} as JSON
+              </span>
+            </button>
+            {table.columns[contextMenu.colIndex] && (
+              <>
+                <hr />
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() =>
+                    handleFilterByCell(
+                      contextMenu.rowIndex,
+                      contextMenu.colIndex,
+                    )
+                  }
+                >
+                  <span>
+                    Filter by Cell Value (
+                    {table.columns[contextMenu.colIndex].name})
+                  </span>
+                </button>
                 <button
                   type="button"
                   role="menuitem"
                   onClick={() => {
-                    setSort(null);
+                    setSort({
+                      colId: table.columns[contextMenu.colIndex].id,
+                      dir: "asc",
+                    });
                     setContextMenu(null);
                   }}
                 >
-                  <span>Clear Sort</span>
+                  <span>
+                    Sort Ascending ({table.columns[contextMenu.colIndex].name})
+                  </span>
                 </button>
-              )}
-            </>
-          )}
-          {editable && !disabled ? (
-            <>
-              <hr />
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  duplicateRows(
-                    selected.size > 0 ? undefined : [contextMenu.rowIndex],
-                  );
-                  setContextMenu(null);
-                }}
-              >
-                <span>Duplicate Row(s)</span>
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  update(contextMenu.rowIndex, contextMenu.colIndex, null);
-                  setContextMenu(null);
-                }}
-              >
-                <span>Set NULL</span>
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  addRow();
-                  setContextMenu(null);
-                }}
-              >
-                <span>Add Row</span>
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                className="danger-item"
-                onClick={() => {
-                  const row = drafts[contextMenu.rowIndex];
-                  deleteSelected(
-                    selected.size > 0
-                      ? selected
-                      : row
-                        ? new Set([row.id])
-                        : undefined,
-                  );
-                  setContextMenu(null);
-                }}
-              >
-                <span>Delete Row(s)</span>
-              </button>
-            </>
-          ) : canUnlock && !disabled ? (
-            <>
-              <hr />
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setIsUnlocked(true);
-                  setContextMenu(null);
-                }}
-              >
-                <span>Unlock Editing</span>
-              </button>
-            </>
-          ) : null}
-        </div>
-      )}
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setSort({
+                      colId: table.columns[contextMenu.colIndex].id,
+                      dir: "desc",
+                    });
+                    setContextMenu(null);
+                  }}
+                >
+                  <span>
+                    Sort Descending ({table.columns[contextMenu.colIndex].name})
+                  </span>
+                </button>
+                {sort && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setSort(null);
+                      setContextMenu(null);
+                    }}
+                  >
+                    <span>Clear Sort</span>
+                  </button>
+                )}
+              </>
+            )}
+            {editable && !disabled ? (
+              <>
+                <hr />
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    duplicateRows(
+                      hasActiveRange && normalizedRange
+                        ? visible
+                            .slice(
+                              normalizedRange.minRowPos,
+                              normalizedRange.maxRowPos + 1,
+                            )
+                            .map(({ index }) => index)
+                        : selected.size > 0
+                          ? undefined
+                          : [contextMenu.rowIndex],
+                    );
+                    setContextMenu(null);
+                  }}
+                >
+                  <span>Duplicate Row(s)</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setNullTargetCells(
+                      contextMenu.rowIndex,
+                      contextMenu.colIndex,
+                    );
+                    setContextMenu(null);
+                  }}
+                >
+                  <span>Set NULL{scopeBadge ? ` (${scopeBadge})` : ""}</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    addRow();
+                    setContextMenu(null);
+                  }}
+                >
+                  <span>Add Row</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="danger-item"
+                  onClick={() => {
+                    const row = drafts[contextMenu.rowIndex];
+                    deleteSelected(
+                      hasActiveRange && normalizedRange
+                        ? new Set(
+                            visible
+                              .slice(
+                                normalizedRange.minRowPos,
+                                normalizedRange.maxRowPos + 1,
+                              )
+                              .map(({ row: item }) => item.id),
+                          )
+                        : selected.size > 0
+                          ? selected
+                          : row
+                            ? new Set([row.id])
+                            : undefined,
+                    );
+                    setCellRange(null);
+                    setContextMenu(null);
+                  }}
+                >
+                  <span>Delete Row(s)</span>
+                </button>
+              </>
+            ) : canUnlock && !disabled ? (
+              <>
+                <hr />
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setIsUnlocked(true);
+                    setContextMenu(null);
+                  }}
+                >
+                  <span>Unlock Editing</span>
+                </button>
+              </>
+            ) : null}
+          </div>,
+          document.body,
+        )}
         </>
       )}
     </div>
   );
-}
+});
 
 interface CellHandlers {
   select: (
@@ -1884,6 +2636,7 @@ interface CellHandlers {
     rowIndex: number,
     checked: boolean,
     shiftKey?: boolean,
+    additive?: boolean,
   ) => void;
   update: (row: number, col: number, value: string) => void;
   handleKey: (
@@ -1897,8 +2650,21 @@ interface CellHandlers {
     col: number,
   ) => void;
   focus: (row: number, col: number) => void;
+  cellMouseDown: (
+    event: ReactMouseEvent,
+    visiblePos: number,
+    rowIndex: number,
+    colIndex: number,
+  ) => void;
+  cellMouseEnter: (
+    event: ReactMouseEvent,
+    visiblePos: number,
+    rowIndex: number,
+    colIndex: number,
+  ) => void;
   contextMenu: (
     event: ReactMouseEvent,
+    visiblePos: number,
     rowIndex: number,
     colIndex: number,
   ) => void;
@@ -1907,25 +2673,39 @@ interface CellHandlers {
 const GridCell = memo(function GridCell({
   column,
   rowIndex,
+  visiblePos,
   columnIndex,
   value,
   hint,
   isActive,
+  inCellRange,
+  isRangeTop,
+  isRangeBottom,
+  isRangeLeft,
+  isRangeRight,
   changed,
   placeholder,
   disabled,
+  locked,
   readOnly,
   handlers,
 }: {
   column: ColumnDefinition;
   rowIndex: number;
+  visiblePos: number;
   columnIndex: number;
   value: CellValue;
   hint: string;
   isActive: boolean;
+  inCellRange: boolean;
+  isRangeTop: boolean;
+  isRangeBottom: boolean;
+  isRangeLeft: boolean;
+  isRangeRight: boolean;
   changed: boolean;
   placeholder: string;
   disabled: boolean;
+  locked: boolean;
   readOnly: boolean;
   handlers: RefObject<CellHandlers>;
 }) {
@@ -1933,35 +2713,62 @@ const GridCell = memo(function GridCell({
     <td
       className={[
         isActive ? "cell-active" : "",
+        inCellRange ? "cell-in-range" : "",
+        inCellRange && isRangeTop ? "range-top" : "",
+        inCellRange && isRangeBottom ? "range-bottom" : "",
+        inCellRange && isRangeLeft ? "range-left" : "",
+        inCellRange && isRangeRight ? "range-right" : "",
         changed ? "cell-changed" : "",
         value === null ? "cell-null" : "",
-      ].join(" ")}
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      title={value === null ? "NULL" : (value ?? "")}
+      onMouseDown={(event) =>
+        handlers.current.cellMouseDown(event, visiblePos, rowIndex, columnIndex)
+      }
+      onMouseEnter={(event) =>
+        handlers.current.cellMouseEnter(
+          event,
+          visiblePos,
+          rowIndex,
+          columnIndex,
+        )
+      }
       onContextMenu={(event) =>
-        handlers.current.contextMenu(event, rowIndex, columnIndex)
+        handlers.current.contextMenu(event, visiblePos, rowIndex, columnIndex)
       }
     >
-      <input
-        aria-label={`${column.name}, row ${rowIndex + 1}`}
-        title={`${value === null ? "NULL" : (value ?? "")}\n${hint}`}
-        data-row={rowIndex}
-        data-col={columnIndex}
-        value={value ?? ""}
-        placeholder={placeholder}
-        disabled={disabled}
-        readOnly={readOnly}
-        spellCheck={false}
-        autoComplete="off"
-        onFocus={() => handlers.current.focus(rowIndex, columnIndex)}
-        onChange={(event) =>
-          handlers.current.update(rowIndex, columnIndex, event.target.value)
-        }
-        onKeyDown={(event) =>
-          handlers.current.handleKey(event, rowIndex, columnIndex)
-        }
-        onPaste={(event) =>
-          handlers.current.paste(event, rowIndex, columnIndex)
-        }
-      />
+      {locked ? (
+        value === null ? (
+          <em>NULL</em>
+        ) : (
+          value ?? ""
+        )
+      ) : (
+        <input
+          aria-label={`${column.name}, row ${rowIndex + 1}`}
+          title={`${value === null ? "NULL" : (value ?? "")}\n${hint}`}
+          data-row={rowIndex}
+          data-col={columnIndex}
+          value={value ?? ""}
+          placeholder={placeholder}
+          disabled={disabled}
+          readOnly={readOnly}
+          spellCheck={false}
+          autoComplete="off"
+          onFocus={() => handlers.current.focus(rowIndex, columnIndex)}
+          onChange={(event) =>
+            handlers.current.update(rowIndex, columnIndex, event.target.value)
+          }
+          onKeyDown={(event) =>
+            handlers.current.handleKey(event, rowIndex, columnIndex)
+          }
+          onPaste={(event) =>
+            handlers.current.paste(event, rowIndex, columnIndex)
+          }
+        />
+      )}
     </td>
   );
 });
@@ -1969,7 +2776,13 @@ const GridCell = memo(function GridCell({
 const GridRow = memo(function GridRow({
   row,
   rowIndex: r,
+  visiblePos,
   selected,
+  inRangeRow,
+  rangeMinCol,
+  rangeMaxCol,
+  isRangeTop,
+  isRangeBottom,
   activeCol,
   visibleColumns,
   start,
@@ -1984,7 +2797,13 @@ const GridRow = memo(function GridRow({
 }: {
   row: DraftRow;
   rowIndex: number;
+  visiblePos: number;
   selected: boolean;
+  inRangeRow: boolean;
+  rangeMinCol: number;
+  rangeMaxCol: number;
+  isRangeTop: boolean;
+  isRangeBottom: boolean;
   activeCol: number;
   visibleColumns: { column: ColumnDefinition; index: number }[];
   start: number;
@@ -2003,11 +2822,14 @@ const GridRow = memo(function GridRow({
         row.deleted ? "row-deleted" : "",
         !row.original ? "row-new" : "",
         selected ? "row-selected" : "",
+        inRangeRow ? "row-in-range" : "",
       ].join(" ")}
     >
       <th
         className="row-gutter"
-        onContextMenu={(event) => handlers.current.contextMenu(event, r, 0)}
+        onContextMenu={(event) =>
+          handlers.current.contextMenu(event, visiblePos, r, -1)
+        }
       >
         <label
           onClick={(e) => {
@@ -2038,15 +2860,23 @@ const GridRow = memo(function GridRow({
       )}
       {visibleColumns.map(({ column, index: c }) => {
         const value = valueAt(row, column.name);
+        const inCellRange =
+          inRangeRow && c >= rangeMinCol && c <= rangeMaxCol;
         return (
           <GridCell
             key={column.id}
             column={column}
             rowIndex={r}
+            visiblePos={visiblePos}
             columnIndex={c}
             value={value}
             hint={cellHints[c]}
             isActive={activeCol === c}
+            inCellRange={inCellRange}
+            isRangeTop={inCellRange && isRangeTop}
+            isRangeBottom={inCellRange && isRangeBottom}
+            isRangeLeft={inCellRange && c === rangeMinCol}
+            isRangeRight={inCellRange && c === rangeMaxCol}
             changed={Object.hasOwn(row.cells, column.name)}
             placeholder={
               value === null
@@ -2062,6 +2892,7 @@ const GridRow = memo(function GridRow({
                   : ""
             }
             disabled={!!(disabled || row.deleted)}
+            locked={locked}
             readOnly={
               locked ||
               !!column.generated ||

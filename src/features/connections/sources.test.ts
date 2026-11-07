@@ -17,7 +17,7 @@ import {
   updateSource,
   workspaceSources,
 } from "./sources";
-import { sqlTabs, setSqlTabs, bindNewTabs } from "../sql/tabs";
+import { activeSqlTab, sqlTabs, setSqlTabs, bindNewTabs } from "../sql/tabs";
 import {
   storage,
   saveWorkspace,
@@ -103,13 +103,23 @@ describe("workspace connections and tab routing", () => {
     activateSource(w, a);
     removeSource(w, a);
     expect(w.activeSourceId).toBe("primary");
-    expect(sqlTabs(w)[0]).toEqual({
+    expect(sqlTabs(w)[0]).toMatchObject({
       id: "tab",
       name: "query",
       sql: "SELECT important",
       sourceId: "primary",
     });
-    expect(() => removeSource(w, "primary")).toThrow("at least one");
+    const last = attachSource(w, pg);
+    activateSource(w, last);
+    w.sources = w.sources!.filter((source) => source.id === last);
+    setSqlTabs(w, [{ ...sqlTabs(w)[0], sourceId: last }], "tab");
+    removeSource(w, last);
+    expect(workspaceSources(w).some((source) => source.connection)).toBe(false);
+    expect(w.postgres).toBeUndefined();
+    expect(sqlTabs(w)[0]).toMatchObject({
+      sql: "SELECT important",
+      sourceId: w.activeSourceId,
+    });
   });
   it("persists active catalogs and per-tab connection assignments through storage and JSON", async () => {
     const w = createWorkspace();
@@ -274,6 +284,41 @@ describe("databases under one connection", () => {
       sql: "SELECT 1",
     });
     expect(() => parseWorkspace(JSON.stringify(w))).not.toThrow();
+  });
+  it("restores each tab's database after disconnect, reload and reconnect", () => {
+    const w = createWorkspace(false);
+    const root = attachSource(w, pg);
+    const child = attachDatabase(w, root, "other");
+    const unrelated = attachSource(w, ms);
+    setSqlTabs(
+      w,
+      [
+        { id: "root", name: "root.sql", sql: "SELECT 1", sourceId: root },
+        { id: "child", name: "child.sql", sql: "SELECT 2", sourceId: child },
+        {
+          id: "other",
+          name: "other.sql",
+          sql: "SELECT 3",
+          sourceId: unrelated,
+        },
+      ],
+      "child",
+    );
+    activateSource(w, child);
+    removeSource(w, root);
+    expect(tabSource(w, activeSqlTab(w)).connection).toBeUndefined();
+
+    const restored = parseWorkspace(JSON.stringify(w));
+    const reattached = attachSource(restored, pg);
+    const [rootTab, childTab, unrelatedTab] = sqlTabs(restored);
+    expect(rootTab.sourceId).toBe(reattached);
+    expect(tabSource(restored, childTab).parentSourceId).toBe(reattached);
+    expect(tabSource(restored, childTab).connection?.config.database).toBe(
+      "other",
+    );
+    expect(childTab.sql).toBe("SELECT 2");
+    expect(childTab.disconnectedFrom).toBeUndefined();
+    expect(unrelatedTab.sourceId).toBe(unrelated);
   });
   it("rejects orphaned, nested and cross-server database references", () => {
     const w = createWorkspace(false);
