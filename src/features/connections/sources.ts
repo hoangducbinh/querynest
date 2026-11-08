@@ -13,12 +13,13 @@ const clone = <T>(value: T): T =>
 export const sourceSessionKey = (workspaceId: string, sourceId: string) =>
   `${workspaceId}:source:${sourceId}`;
 export function currentSource(w: WorkspaceDefinition): WorkspaceSource {
+  const existingSource = w.sources?.find((s) => s.id === w.activeSourceId);
   return {
     id: w.activeSourceId ?? "primary",
-    name: w.sources?.find((s) => s.id === w.activeSourceId)?.name ?? w.name,
-    parentSourceId: w.sources?.find((s) => s.id === w.activeSourceId)
-      ?.parentSourceId,
-    databases: w.sources?.find((s) => s.id === w.activeSourceId)?.databases,
+    name: existingSource?.name ?? w.name,
+    parentSourceId: existingSource?.parentSourceId,
+    databases: existingSource?.databases,
+    color: existingSource?.color,
     connectionId: w.connectionId,
     connection: w.mssql
       ? { engine: "mssql", config: w.mssql }
@@ -88,6 +89,7 @@ export function attachSource(
   const source: WorkspaceSource = {
     id: crypto.randomUUID(),
     name: profile.name,
+    color: profile.color,
     connectionId: profile.id,
     connection: clone({
       engine: profile.engine,
@@ -216,6 +218,11 @@ export function removeSource(w: WorkspaceDefinition, sourceId: string) {
   const removedSources = sources.filter((s) => removed.has(s.id));
   const root = removedSources.find((s) => s.id === sourceId);
   w.sources = sources.filter((s) => !removed.has(s.id));
+  if (!w.sources.some((s) => s.connection)) {
+    w.postgres = undefined;
+    w.mssql = undefined;
+    w.connectionId = undefined;
+  }
   setSqlTabs(
     w,
     sqlTabs(w).map((tab) => {
@@ -281,7 +288,7 @@ export function attachDatabase(
   const existing = w.sources!.find(
     (s) =>
       (s.id === rootId || s.parentSourceId === rootId) &&
-      s.connection?.config.database === database,
+      s.connection?.config.database?.toLowerCase() === database.toLowerCase(),
   );
   if (existing) return existing.id;
   if (w.sources!.length >= 1000)

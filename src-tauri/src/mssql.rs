@@ -494,8 +494,40 @@ ORDER BY s.name,o.name,c.column_id;
             .unwrap()
             .push(json!(format!("{target}:{tc}")));
     }
+    let mut functions = Vec::new();
+    if let Ok(result) = client.simple_query("SELECT o.object_id, s.name AS schema_name, o.name AS name, CASE o.type WHEN 'P' THEN 'procedure' WHEN 'PC' THEN 'procedure' WHEN 'FN' THEN 'scalar_function' WHEN 'IF' THEN 'inline_table_function' WHEN 'TF' THEN 'table_function' ELSE 'function' END AS kind, OBJECT_DEFINITION(o.object_id) AS definition FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE o.type IN ('P', 'PC', 'FN', 'IF', 'TF') AND o.is_ms_shipped = 0 ORDER BY s.name, o.name").await {
+        if let Ok(f_rows) = result.into_first_result().await {
+            for row in f_rows {
+                if let (Ok(Some(id)), Ok(Some(schema)), Ok(Some(name)), Ok(Some(kind))) = (
+                    row.try_get::<i32, _>("object_id"),
+                    row.try_get::<&str, _>("schema_name"),
+                    row.try_get::<&str, _>("name"),
+                    row.try_get::<&str, _>("kind"),
+                ) {
+                    let definition: Option<&str> = row.try_get("definition").unwrap_or(None);
+                    functions.push(json!({
+                        "id": id.to_string(),
+                        "schema": schema,
+                        "name": name,
+                        "kind": kind,
+                        "definition": definition
+                    }));
+                }
+            }
+        }
+    }
+    let mut schemas = Vec::new();
+    if let Ok(result) = client.simple_query("SELECT name FROM sys.schemas WHERE name NOT IN ('guest', 'INFORMATION_SCHEMA', 'sys') AND name NOT LIKE 'db_%' ORDER BY name").await {
+        if let Ok(s_rows) = result.into_first_result().await {
+            for row in s_rows {
+                if let Ok(Some(name)) = row.try_get::<&str, _>("name") {
+                    schemas.push(name.to_string());
+                }
+            }
+        }
+    }
     Ok(
-        json!({"tables":tables.into_values().collect::<Vec<_>>(),"relationships":relations.into_values().collect::<Vec<_>>()}),
+        json!({"schemas":schemas,"tables":tables.into_values().collect::<Vec<_>>(),"relationships":relations.into_values().collect::<Vec<_>>(),"functions":functions}),
     )
 }
 async fn metadata(config: Config) -> Result<(String, Value, MsClient), Failure> {

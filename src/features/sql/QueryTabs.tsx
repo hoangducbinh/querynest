@@ -40,13 +40,8 @@ import {
 import { listDatabases } from "../connections/databases";
 import {
   getSession,
-  profileSessions,
-  requestConnection,
-  sameServer,
   useSessionRevision,
 } from "../connections/sessions";
-import { storage } from "../../lib/storage/workspaces";
-import type { ConnectionProfile } from "../connections/model";
 import { isTauri } from "../postgres/client";
 import { setSqlTabs, sqlTabs } from "./tabs";
 import type { SqlTab } from "../../types/schema";
@@ -56,6 +51,7 @@ interface Props {
   activeId: string;
   onTabsChange: (tabs: SqlTab[], activeId: string) => void;
   busy: boolean;
+  newTabSourceId?: string;
   newTabConnectionName?: string;
   onTabConnectionChange?: (tabId: string, sourceId: string) => void;
   onTabDatabaseChange?: (tabId: string, database: string) => void;
@@ -125,6 +121,7 @@ export function QueryTabs({
   activeId,
   onTabsChange,
   busy,
+  newTabSourceId,
   newTabConnectionName,
   onTabConnectionChange,
   onTabDatabaseChange,
@@ -145,7 +142,6 @@ export function QueryTabs({
     y: number;
     section: "none" | "connection" | "database";
   } | null>(null);
-  const [savedProfiles, setSavedProfiles] = useState<ConnectionProfile[]>([]);
   const [dbFilter, setDbFilter] = useState("");
   const sqlFileInput = useRef<HTMLInputElement>(null);
   const openTargetTabId = useRef<string | null>(null);
@@ -209,15 +205,27 @@ export function QueryTabs({
     const dbName = source.connection?.config.database ?? "";
     const databases =
       includeDatabases && source.connection
-        ? [
-            ...new Set([
-              source.connection.config.database,
+        ? (() => {
+            const initialDb = root.connection?.config.database;
+            const dbList = [
               ...(root.databases ?? []),
+              ...(initialDb ? [initialDb] : []),
               ...databaseSources(workspace, root.id).flatMap((s) =>
                 s.connection ? [s.connection.config.database] : [],
               ),
-            ]),
-          ].sort((a, b) => a.localeCompare(b))
+            ];
+            const seen = new Set<string>();
+            const result: string[] = [];
+            for (const db of dbList) {
+              if (!db) continue;
+              const key = db.toLowerCase();
+              if (!seen.has(key)) {
+                seen.add(key);
+                result.push(db);
+              }
+            }
+            return result.sort((a, b) => a.localeCompare(b));
+          })()
         : [];
     return {
       source,
@@ -233,12 +241,7 @@ export function QueryTabs({
   function isRootConnected(root: (typeof rootSources)[number]) {
     return (
       !root.connection ||
-      !!getSession(sourceSessionKey(workspace.id, root.id), root.connection) ||
-      profileSessions(root.connectionId).some(
-        (entry) =>
-          entry.connected !== false &&
-          sameServer(entry.config, root.connection!),
-      )
+      !!getSession(sourceSessionKey(workspace.id, root.id), root.connection)
     );
   }
 
@@ -250,7 +253,17 @@ export function QueryTabs({
     const { source, root } = getTabContextInfo(tab);
     if (!source.connection || root.databases || !isTauri()) return;
     void listDatabases(workspace, source)
-      .then((names) => {
+      .then((rawNames) => {
+        const seen = new Set<string>();
+        const names: string[] = [];
+        for (const name of rawNames) {
+          if (!name) continue;
+          const key = name.toLowerCase();
+          if (!seen.has(key)) {
+            seen.add(key);
+            names.push(name);
+          }
+        }
         if (useStore.getState().workspace.id === workspace.id) {
           editWorkspace((draft) => {
             ensureSources(draft);
@@ -486,9 +499,6 @@ export function QueryTabs({
     ? tabs.find((t) => t.id === contextMenu.tabId)
     : undefined;
   const contextInfo = contextTab ? getTabContextInfo(contextTab, true) : undefined;
-  const unattachedProfiles = savedProfiles.filter(
-    (p) => !rootSources.some((s) => s.connectionId === p.id),
-  );
 
   return (
     <div className="sql-tabs-left-strip">
@@ -510,18 +520,30 @@ export function QueryTabs({
         aria-label="SQL queries"
       >
         {tabs.map((tab) => {
-        const info = getTabContextInfo(tab);
-        const isActive = tab.id === currentActiveId;
-        return (
-          <div
-            className={
-              "sql-tab" +
-              (isActive ? " active" : "") +
-              (tab.pinned ? " is-pinned" : "") +
-              (tab.locked ? " is-locked" : "")
-            }
-            key={tab.id}
-            data-tab-id={tab.id}
+          const info = getTabContextInfo(tab);
+          const isActive = tab.id === currentActiveId;
+          const source = tabSource(workspace, tab);
+          const root = connectionRoot(workspace, source);
+          const tabColor = root.color;
+          return (
+            <div
+              className={
+                "sql-tab" +
+                (isActive ? " active" : "") +
+                (tab.pinned ? " is-pinned" : "") +
+                (tab.locked ? " is-locked" : "")
+              }
+              key={tab.id}
+              data-tab-id={tab.id}
+              data-connection-color={tabColor ? "true" : undefined}
+              style={
+                tabColor
+                  ? ({
+                      "--conn-color": tabColor,
+                      borderTop: `2px solid ${tabColor}`,
+                    } as React.CSSProperties)
+                  : undefined
+              }
             {...tabDrag(tab.id, renaming !== tab.id)}
             onAuxClick={(event) => {
               if (
@@ -541,11 +563,6 @@ export function QueryTabs({
               if (busy) return;
               setDbFilter("");
               discoverForTab(tab);
-              void storage.connections
-                .orderBy("name")
-                .toArray()
-                .then(setSavedProfiles)
-                .catch(() => {});
               const x = Math.min(event.clientX, window.innerWidth - 240);
               const y = Math.min(event.clientY, window.innerHeight - 310);
               setContextMenu({
@@ -684,10 +701,12 @@ export function QueryTabs({
           let number = 1;
           while (tabs.some((tab) => tab.name === `query-${number}.sql`))
             number++;
+          const activeTab = tabs.find((tab) => tab.id === currentActiveId);
           const next = {
             id: crypto.randomUUID(),
             name: `query-${number}.sql`,
             sql: "",
+            sourceId: newTabSourceId ?? activeTab?.sourceId,
           };
           onTabsChange([...tabs, next], next.id);
         }}
@@ -851,20 +870,6 @@ export function QueryTabs({
                   </button>
                 );
               })}
-              {unattachedProfiles.map((profile) => (
-                <button
-                  key={profile.id}
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setContextMenu(null);
-                    requestConnection(workspace.id, profile.id, "attach");
-                  }}
-                >
-                  <span className="sql-tab-ctx-check" />
-                  <span className="sql-tab-ctx-subname">{profile.name}</span>
-                </button>
-              ))}
             </div>
           )}
 

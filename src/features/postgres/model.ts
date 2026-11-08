@@ -55,7 +55,17 @@ export interface CatalogTable {
     defaultValue?: string;
   }[];
 }
+export interface CatalogFunction {
+  id: string;
+  schema: string;
+  name: string;
+  kind?: string;
+  resultType?: string;
+  arguments?: string;
+  definition?: string;
+}
 export interface PgCatalog {
+  schemas?: string[];
   tables: CatalogTable[];
   relationships: {
     id: string;
@@ -64,6 +74,7 @@ export interface PgCatalog {
     sourceColumns: string[];
     targetColumns: string[];
   }[];
+  functions?: CatalogFunction[];
 }
 function mappedType(type: string): DataType {
   if (/^(tinyint|smallint|integer|int)$/.test(type)) return "INTEGER";
@@ -76,14 +87,18 @@ function mappedType(type: string): DataType {
   return "VARCHAR";
 }
 export function catalogSchema(catalog: PgCatalog): DatabaseSchema {
-  const ids = new Set(catalog.tables.map((t) => t.id));
+  const ids = new Set((catalog.tables || []).map((t) => t.id));
   return {
-    tables: catalog.tables.map((t, index) => ({
+    schemas: catalog.schemas || [],
+    tables: (catalog.tables || []).map((t, index) => ({
       id: t.id,
       name: t.name,
       namespace: t.schema,
+      kind: ["v", "m", "V"].includes(t.kind?.trim() || "")
+        ? ("view" as const)
+        : ("table" as const),
       readOnly: !["r", "p", "U", "U "].includes(t.kind),
-      columns: t.columns.map((c) => ({
+      columns: (t.columns || []).map((c) => ({
         id: c.id,
         name: c.name,
         type: mappedType(c.type),
@@ -94,12 +109,21 @@ export function catalogSchema(catalog: PgCatalog): DatabaseSchema {
         readOnly: (c.readOnly ?? false) || (c.generated ?? false),
         defaultValue: c.defaultValue || (c.generated ? "Generated" : ""),
       })),
-      primaryKey: t.columns.filter((c) => c.primaryKey).map((c) => c.id),
+      primaryKey: (t.columns || []).filter((c) => c.primaryKey).map((c) => c.id),
       position: { x: (index % 3) * 330, y: Math.floor(index / 3) * 300 },
     })),
-    relationships: catalog.relationships
+    relationships: (catalog.relationships || [])
       .filter((r) => ids.has(r.sourceTable) && ids.has(r.targetTable))
       .map((r) => ({ ...r, kind: "physical" as const })),
+    functions: (catalog.functions || []).map((f) => ({
+      id: f.id,
+      name: f.name,
+      namespace: f.schema,
+      kind: f.kind,
+      resultType: f.resultType,
+      arguments: f.arguments,
+      definition: f.definition,
+    })),
   };
 }
 export function pgError(error: unknown): string {

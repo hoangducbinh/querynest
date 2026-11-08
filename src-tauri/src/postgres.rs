@@ -192,16 +192,36 @@ FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
 WHERE c.relkind IN ('r','p','v','m','f') AND n.nspname NOT LIKE 'pg_%' AND n.nspname<>'information_schema'
 AND has_table_privilege(c.oid, 'SELECT')) t
 "#;
+const SCHEMAS: &str = r#"
+SELECT COALESCE(json_agg(n.nspname ORDER BY n.nspname), '[]'::json)
+FROM pg_namespace n
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+"#;
 const RELATIONS: &str = r#"
 SELECT COALESCE(json_agg(json_build_object('id', c.oid::text, 'sourceTable', c.conrelid::text, 'targetTable', c.confrelid::text,
  'sourceColumns', (SELECT json_agg(c.conrelid::text || ':' || k ORDER BY pos) FROM unnest(c.conkey) WITH ORDINALITY x(k,pos)),
  'targetColumns', (SELECT json_agg(c.confrelid::text || ':' || k ORDER BY pos) FROM unnest(c.confkey) WITH ORDINALITY x(k,pos)))), '[]'::json)
 FROM pg_constraint c WHERE c.contype='f'
 "#;
+const FUNCTIONS: &str = r#"
+SELECT COALESCE(json_agg(f ORDER BY f.schema, f.name), '[]'::json) FROM (
+SELECT p.oid::text AS id, n.nspname AS schema, p.proname AS name,
+ CASE p.prokind WHEN 'p' THEN 'procedure' WHEN 'a' THEN 'aggregate' WHEN 'w' THEN 'window' ELSE 'function' END AS kind,
+ pg_get_function_result(p.oid) AS "resultType",
+ pg_get_function_arguments(p.oid) AS arguments,
+ CASE WHEN l.lanname IN ('sql', 'plpgsql') THEN pg_get_functiondef(p.oid) ELSE NULL END AS definition
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+LEFT JOIN pg_language l ON l.oid = p.prolang
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+AND has_function_privilege(p.oid, 'EXECUTE')) f
+"#;
 async fn catalog(pool: &PgPool) -> Result<Value, PgFailure> {
+    let schemas: Value = sqlx::query_scalar(SCHEMAS).fetch_one(pool).await.unwrap_or(json!([]));
     let tables: Value = sqlx::query_scalar(TABLES).fetch_one(pool).await?;
     let relationships: Value = sqlx::query_scalar(RELATIONS).fetch_one(pool).await?;
-    Ok(json!({"tables":tables,"relationships":relationships}))
+    let functions: Value = sqlx::query_scalar(FUNCTIONS).fetch_one(pool).await.unwrap_or(json!([]));
+    Ok(json!({"schemas":schemas,"tables":tables,"relationships":relationships,"functions":functions}))
 }
 #[tauri::command]
 pub async fn pg_connect(

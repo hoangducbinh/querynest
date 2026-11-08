@@ -41,14 +41,12 @@ import {
 } from "./sources";
 export function MultiSqlWorkspace({
   workspace: w,
-  connectionHost,
   dark,
   busy,
   onBusy,
   runRef,
 }: {
   workspace: WorkspaceDefinition;
-  connectionHost?: HTMLElement | null;
   dark: boolean;
   busy: boolean;
   onBusy: (value: boolean) => void;
@@ -74,10 +72,6 @@ export function MultiSqlWorkspace({
   const sources = workspaceSources(w);
   const activeSource = tabSource(w, activeSqlTab(w));
   const activeSourceId = activeSource.id;
-  useEffect(() => {
-    if (activeSourceId !== w.activeSourceId)
-      edit((draft) => syncActiveSqlSource(draft));
-  }, [activeSourceId, w.activeSourceId, edit]);
   const activeConnectionSignature = JSON.stringify(activeSource.connection);
   useEffect(() => {
     if (!activeSource.connection || !isTauri()) return;
@@ -120,7 +114,7 @@ export function MultiSqlWorkspace({
     updateSqlTabView(`${w.id}:${tab.id}`, { resultsVisible: true });
     const source = sourceFor(tabId);
     const text =
-      suppliedSql ??
+      (suppliedSql && suppliedSql.trim() ? suppliedSql : undefined) ??
       (selection.current.tabId === tab.id && selection.current.sql.trim()
         ? selection.current.sql
         : tab.sql);
@@ -227,7 +221,6 @@ export function MultiSqlWorkspace({
         </div>
       )}
       <SqlWorkspace
-        connectionHost={connectionHost}
         tabs={sqlTabs(w)}
         activeId={activeSqlTab(w).id}
         layout={w.sqlLayout}
@@ -245,7 +238,15 @@ export function MultiSqlWorkspace({
           })
         }
         value={activeSqlTab(w).sql}
-        onChange={() => {}}
+        onChange={(sql) => {
+          edit((draft) => {
+            const tabs = sqlTabs(draft);
+            const activeId = activeSqlTab(draft).id;
+            const target = tabs.find((t) => t.id === activeId);
+            if (target) target.sql = sql;
+            setSqlTabs(draft, tabs, activeId);
+          });
+        }}
         onRun={(tabId, sql) => void run(tabId, sql)}
         disabled={busy}
         runningTabId={queryTimings.runningTabId}
@@ -312,16 +313,27 @@ export function MultiSqlWorkspace({
             connectionRootId: connectionRoot(w, source).id,
             database: source.connection?.config.database,
             databases: source.connection
-              ? [
-                  ...new Set([
-                    source.connection.config.database,
-                    ...(connectionRoot(w, source).databases ?? []),
-                    ...databaseSources(w, connectionRoot(w, source).id).flatMap(
-                      (s) =>
-                        s.connection ? [s.connection.config.database] : [],
+              ? (() => {
+                  const root = connectionRoot(w, source);
+                  const dbList = [
+                    ...(root.databases ?? []),
+                    ...(source.connection ? [source.connection.config.database] : []),
+                    ...databaseSources(w, root.id).flatMap((s) =>
+                      s.connection ? [s.connection.config.database] : [],
                     ),
-                  ]),
-                ].sort((a, b) => a.localeCompare(b))
+                  ];
+                  const seen = new Set<string>();
+                  const result: string[] = [];
+                  for (const db of dbList) {
+                    if (!db) continue;
+                    const key = db.toLowerCase();
+                    if (!seen.has(key)) {
+                      seen.add(key);
+                      result.push(db);
+                    }
+                  }
+                  return result.sort((a, b) => a.localeCompare(b));
+                })()
               : undefined,
             sourceId: source.id,
             schema: source.connection
@@ -344,7 +356,17 @@ export function MultiSqlWorkspace({
           const root = connectionRoot(w, source);
           if (!root.connection || root.databases) return;
           void listDatabases(w, source)
-            .then((databases) => {
+            .then((rawDatabases) => {
+              const seen = new Set<string>();
+              const databases: string[] = [];
+              for (const db of rawDatabases) {
+                if (!db) continue;
+                const key = db.toLowerCase();
+                if (!seen.has(key)) {
+                  seen.add(key);
+                  databases.push(db);
+                }
+              }
               if (useStore.getState().workspace.id === w.id)
                 edit((draft) => updateSource(draft, root.id, { databases }));
             })

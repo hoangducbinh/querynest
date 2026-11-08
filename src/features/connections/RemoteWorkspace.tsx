@@ -4,7 +4,7 @@ import { STACK_DEFAULT_ROWS } from "../sql/ResultSetView";
 import { updateSqlTabView } from "../sql/view-state";
 import { editableResult } from "../sql/editable-result";
 import { saveQueryResult } from "./save-query-result";
-import { currentSource } from "./sources";
+import { currentSource, workspaceSources, connectionRoot } from "./sources";
 import {
   cachedTablePage,
   loadTablePage,
@@ -14,7 +14,6 @@ import {
 import { useSqlResults } from "../sql/result-state";
 import {
   useConnectionSession,
-  requestConnection,
   markConnectionUnavailable,
   NeedsConnection,
 } from "./sessions";
@@ -99,6 +98,14 @@ export function RemoteWorkspace({
   const currentConfig: RemoteConfig = w.mssql
     ? { engine: "mssql", config: w.mssql }
     : { engine: "postgres", config: w.postgres! };
+  const currentSrc = useMemo(() => {
+    const sources = workspaceSources(w);
+    const active =
+      sources.find((s) => s.id === (w.activeSourceId ?? "primary")) ??
+      sources[0];
+    return connectionRoot(w, active);
+  }, [w]);
+  const dataTabColor = currentSrc.color;
   const shared = useConnectionSession(sessionKey, currentConfig);
   const edit = useStore((state) => state.edit);
   const [sessionId, setSessionId] = useState(shared?.sessionId ?? "");
@@ -361,8 +368,6 @@ export function RemoteWorkspace({
       stale = true;
     };
   }, [shared, sessionKey]);
-  const requestConnect = () =>
-    requestConnection(w.id, w.activeSourceId ?? "primary");
   useEffect(() => {
     if (mode !== "data" || !sessionId || !tableId) {
       setDataLoading(false);
@@ -657,11 +662,6 @@ export function RemoteWorkspace({
               ? "Connect once to use SQL and Data in this workspace."
               : "Direct database connections are available in the Tauri desktop app. Your local workspaces still work in the browser."}
           </p>
-          {isTauri() && (
-            <Button className="primary" onClick={() => requestConnect()}>
-              Connect
-            </Button>
-          )}
         </div>
       ) : mode === "sql" ? (
         <SqlWorkspace
@@ -770,6 +770,15 @@ export function RemoteWorkspace({
                         key={tbl.id}
                         className={`data-table-tab${isCurrent ? " is-active" : ""}${isPinned ? " is-pinned" : ""}`}
                         data-tab-id={tbl.id}
+                        data-connection-color={dataTabColor ? "true" : undefined}
+                        style={
+                          dataTabColor
+                            ? ({
+                                "--conn-color": dataTabColor,
+                                borderTop: `2px solid ${dataTabColor}`,
+                              } as React.CSSProperties)
+                            : undefined
+                        }
                         {...dataTabDrag(tbl.id)}
                         onAuxClick={(event) => {
                           if (

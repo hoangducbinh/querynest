@@ -16,6 +16,7 @@ export interface ColumnDefinition {
 export interface TableDefinition {
   readOnly?: boolean;
   namespace?: string;
+  kind?: "table" | "view";
   id: string;
   name: string;
   columns: ColumnDefinition[];
@@ -30,9 +31,20 @@ export interface RelationshipDefinition {
   targetColumns: string[];
   kind: "physical" | "logical";
 }
+export interface FunctionDefinition {
+  id: string;
+  name: string;
+  namespace?: string;
+  kind?: string;
+  resultType?: string;
+  arguments?: string;
+  definition?: string;
+}
 export interface DatabaseSchema {
+  schemas?: string[];
   tables: TableDefinition[];
   relationships: RelationshipDefinition[];
+  functions?: FunctionDefinition[];
 }
 export interface TestCase {
   id: string;
@@ -57,6 +69,7 @@ export interface WorkspaceSource {
   databases?: string[];
   id: string;
   name: string;
+  color?: string;
   connectionId?: string;
   connection?: RemoteConfig;
   schema: DatabaseSchema;

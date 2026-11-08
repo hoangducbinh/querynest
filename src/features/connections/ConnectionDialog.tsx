@@ -390,32 +390,38 @@ export function ConnectionDialog({
             )}
             <div className="pg-dialog-actions">
               <Button
-                className="connection-test"
+                className={`connection-test ${action === "test" ? "is-loading" : ""}`}
                 disabled={busy || !isTauri()}
                 title={!isTauri() ? "Test in the desktop app" : undefined}
                 onClick={() => void submit(true)}
               >
                 {action === "test" ? (
-                  <LoaderCircle className="spin" size={13} />
+                  <LoaderCircle className="spin shrink-0" size={13} />
                 ) : (
-                  <Plug size={13} />
-                )}{" "}
-                {action === "test" ? "Testing…" : "Test connection"}
+                  <Plug size={13} className="shrink-0" />
+                )}
+                <span>{action === "test" ? "Testing…" : "Test connection"}</span>
               </Button>
               <Button disabled={busy} onClick={onClose}>
                 Cancel
               </Button>
-              <Button className="primary" type="submit" disabled={busy}>
+              <Button
+                className={`primary ${action === "connect" ? "is-loading" : ""}`}
+                type="submit"
+                disabled={busy}
+              >
                 {action === "connect" && (
-                  <LoaderCircle className="spin" size={13} />
-                )}{" "}
-                {action === "connect"
-                  ? profileMode
-                    ? "Saving…"
-                    : "Connecting…"
-                  : profileMode
-                    ? "Save connection"
-                    : "Connect"}
+                  <LoaderCircle className="spin shrink-0" size={13} />
+                )}
+                <span>
+                  {action === "connect"
+                    ? profileMode
+                      ? "Saving…"
+                      : "Connecting…"
+                    : profileMode
+                      ? "Save connection"
+                      : "Connect"}
+                </span>
               </Button>
             </div>
           </form>

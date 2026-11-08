@@ -137,6 +137,8 @@ export function ConnectionController({
     void (async () => {
       if (request.action === "new") {
         if (await onBeforeAction()) setEditing(defaultRemoteConfig("mssql"));
+      } else if (request.action === "login") {
+        if (source?.connection) setLogin(source);
       } else if (request.action === "edit") {
         if (!(await onBeforeAction())) return;
         const profile =
@@ -176,22 +178,9 @@ export function ConnectionController({
       }
     })().catch((error) => onError(pgError(error)));
   }, [request?.id, busy, pending]);
-  const hasLiveConnection = workspaceSources(workspace).some(
-    (source) =>
-      source.connection &&
-      getSession(sourceSessionKey(workspace.id, source.id), source.connection),
-  );
 
   return (
     <>
-      {hasLiveConnection && (
-        <span
-          className="status-dot"
-          role="img"
-          aria-label="Database connected"
-          title="Database connected"
-        />
-      )}
       {editing && (
         <ConnectionDialog
           initial={editing}
@@ -260,7 +249,7 @@ export function ConnectionController({
                     schema: catalogSchema(result.catalog),
                   }),
                 );
-                onConnected();
+                await onConnected(source.id);
               } catch (error) {
                 await remoteClient(config.engine)
                   .disconnect(result.sessionId)

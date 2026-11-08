@@ -10,9 +10,6 @@ import {
 import { QueryResults, type ResultEditing } from "./QueryResults";
 import { useSqlTabView } from "./view-state";
 import { useStore } from "../schema/store";
-import { DatabasePicker } from "../connections/DatabasePicker";
-import { ConnectionPicker } from "../connections/ConnectionPicker";
-import { createPortal } from "react-dom";
 import { bindNewTabs } from "./tabs";
 import {
   initialPane,
@@ -53,7 +50,6 @@ export interface TabContext {
   remote: boolean;
 }
 interface Props extends ResultEditing {
-  connectionHost?: HTMLElement | null;
   connectionOptions?: { id: string; name: string }[];
   newTabSourceId?: string;
   newTabConnectionName?: string;
@@ -88,47 +84,8 @@ interface Props extends ResultEditing {
   onCancel?: () => void;
   cancelPending?: boolean;
 }
-function SqlConnectionControls({
-  tabContext,
-  connectionOptions,
-  busy,
-  activeId,
-  onTabConnectionChange,
-  onTabDatabaseChange,
-  onDiscoverTabDatabases,
-}: Pick<
-  Props,
-  | "tabContext"
-  | "connectionOptions"
-  | "busy"
-  | "activeId"
-  | "onTabConnectionChange"
-  | "onTabDatabaseChange"
-  | "onDiscoverTabDatabases"
->) {
-  return (
-    tabContext &&
-    connectionOptions && (
-      <>
-        <ConnectionPicker
-          value={tabContext.connectionRootId ?? tabContext.sourceId}
-          disabled={busy}
-          onSelect={(id) => onTabConnectionChange?.(activeId, id)}
-        />
-        <DatabasePicker
-          value={tabContext.database ?? "Select database"}
-          databases={tabContext.databases ?? []}
-          disabled={busy || !tabContext.remote}
-          onDiscover={() => onDiscoverTabDatabases?.(activeId)}
-          onSelect={(database) => onTabDatabaseChange?.(activeId, database)}
-        />
-      </>
-    )
-  );
-}
 
 function SqlPane({
-  connectionHost,
   tabs,
   autoFocus,
   newTabSourceId,
@@ -222,6 +179,7 @@ function SqlPane({
           activeId={activeId}
           onTabsChange={onTabsChange}
           busy={busy}
+          newTabSourceId={newTabSourceId}
           newTabConnectionName={
             newTabConnectionName ??
             connectionOptions?.find((source) => source.id === newTabSourceId)
@@ -234,17 +192,6 @@ function SqlPane({
           onSaveSqlFile={handleSaveSqlTab}
         />
         <div className="row sql-toolbar-actions">
-          {!connectionHost && (
-            <SqlConnectionControls
-              tabContext={tabContext}
-              connectionOptions={connectionOptions}
-              busy={busy}
-              activeId={activeId}
-              onTabConnectionChange={onTabConnectionChange}
-              onTabDatabaseChange={onTabDatabaseChange}
-              onDiscoverTabDatabases={onDiscoverTabDatabases}
-            />
-          )}
           <span
             className="sql-validation-status"
             role="status"
@@ -524,23 +471,6 @@ export function SqlWorkspace(props: Props) {
       className={"sql-panes " + (splitOpen ? "is-split" : "")}
       ref={container}
     >
-      {props.connectionHost &&
-        createPortal(
-          <div
-            className="titlebar-connection-controls"
-            role="group"
-            aria-label="Active SQL tab database"
-            title={`Database for ${props.tabs.find((tab) => tab.id === props.activeId)?.name ?? "active SQL tab"}`}
-          >
-            <SqlConnectionControls
-              {...props}
-              tabContext={
-                props.getTabContext?.(props.activeId) ?? props.tabContext
-              }
-            />
-          </div>,
-          props.connectionHost,
-        )}
       {groups.map((group, index) => {
         const paneTabs = group.ids.flatMap((id) => {
           const tab = props.tabs.find((tab) => tab.id === id);

@@ -26,6 +26,7 @@ export const connectionEngines: {
 export type ConnectionProfile = RemoteConfig & {
   id: string;
   name: string;
+  color?: string;
   updatedAt: number;
 };
 export const engineName = (engine: RemoteConfig["engine"]) =>

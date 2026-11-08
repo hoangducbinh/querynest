@@ -116,4 +116,65 @@ describe("PostgreSQL workspace metadata", () => {
       '"DisplayName"',
     );
   });
+  it("distinguishes views from tables and extracts functions into database schema", () => {
+    const schema = catalogSchema({
+      tables: [
+        {
+          id: "10",
+          schema: "public",
+          name: "users",
+          kind: "r",
+          columns: [{ id: "10:1", name: "id", type: "integer", nullable: false, primaryKey: true }],
+        },
+        {
+          id: "11",
+          schema: "public",
+          name: "active_users",
+          kind: "v",
+          columns: [{ id: "11:1", name: "id", type: "integer", nullable: false, primaryKey: false }],
+        },
+      ],
+      relationships: [],
+      functions: [
+        {
+          id: "100",
+          schema: "public",
+          name: "calculate_tax",
+          kind: "function",
+          resultType: "numeric",
+          arguments: "subtotal numeric, rate numeric",
+        },
+        {
+          id: "101",
+          schema: "public",
+          name: "archive_records",
+          kind: "procedure",
+          arguments: "cutoff date",
+        },
+      ],
+    });
+
+    expect(schema.tables[0].kind).toBe("table");
+    expect(schema.tables[0].readOnly).toBe(false);
+    expect(schema.tables[1].kind).toBe("view");
+    expect(schema.tables[1].readOnly).toBe(true);
+
+    expect(schema.functions).toHaveLength(2);
+    expect(schema.functions?.[0]).toEqual({
+      id: "100",
+      name: "calculate_tax",
+      namespace: "public",
+      kind: "function",
+      resultType: "numeric",
+      arguments: "subtotal numeric, rate numeric",
+    });
+    expect(schema.functions?.[1]).toEqual({
+      id: "101",
+      name: "archive_records",
+      namespace: "public",
+      kind: "procedure",
+      resultType: undefined,
+      arguments: "cutoff date",
+    });
+  });
 });

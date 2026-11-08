@@ -206,7 +206,8 @@ export interface ConnectionRequest {
     | "delete-profile"
     | "disconnect"
     | "refresh"
-    | "reconnect";
+    | "reconnect"
+    | "login";
   id: number;
 }
 let request: ConnectionRequest | undefined;
