@@ -8,6 +8,7 @@ export interface SqlResult {
   sql: string;
   rows: Record<string, unknown>[];
   columns: string[];
+  columnTypes?: string[];
   status: string;
   error?: boolean;
   messages?: string[];
@@ -17,11 +18,13 @@ export async function executeSqlBatch(
   query: (sql: string) => Promise<{
     rows: Record<string, unknown>[];
     columns: string[];
+    columnTypes?: string[];
     status?: string;
     messages?: string[];
     resultSets?: {
       rows: Record<string, unknown>[];
       columns: string[];
+      columnTypes?: string[];
       status?: string;
       messages?: string[];
     }[];
@@ -50,6 +53,7 @@ export async function executeSqlBatch(
           sql: setSqls[index] ?? statement.sql.trim(),
           rows: set.rows,
           columns: set.columns,
+          columnTypes: set.columnTypes,
           status:
             set.status ??
             `${set.rows.length} rows · ${Math.round(performance.now() - start)} ms`,
@@ -67,6 +71,7 @@ export async function executeSqlBatch(
             partial,
           ): partial is {
             columns: string[];
+            columnTypes?: string[];
             rows: Record<string, unknown>[];
             truncated?: boolean;
           } =>
@@ -84,6 +89,9 @@ export async function executeSqlBatch(
           results.push({
             sql: setSqls[partialIndex] ?? statement.sql.trim(),
             columns: partial.columns,
+            columnTypes: Array.isArray(partial.columnTypes)
+              ? partial.columnTypes
+              : undefined,
             rows: partial.rows,
             status: `${partial.rows.length} rows · before error${partial.truncated ? " · truncated" : ""}`,
           });

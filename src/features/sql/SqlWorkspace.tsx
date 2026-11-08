@@ -396,7 +396,6 @@ function SqlPane({
           style={{ flex: results ? `0 0 ${ratio * 100}%` : "1 1 100%" }}
         >
           <SqlEditor
-            key={activeId}
             viewKey={viewKey}
             autoFocus={autoFocus}
             readOnly={!!tabs.find((t) => t.id === activeId)?.locked}
@@ -550,12 +549,13 @@ export function SqlWorkspace(props: Props) {
         const tab =
           paneTabs.find((item) => item.id === group.activeId) ?? paneTabs[0];
         if (!tab) return null;
+        const isPaneActive = group.ids.includes(props.activeId);
         return (
           <div
             key={index}
             className={
               "sql-pane-container " +
-              (props.activeId === tab.id ? "is-active" : "")
+              (isPaneActive ? "is-active" : "")
             }
             role="region"
             aria-label={`SQL pane ${index + 1}`}
@@ -566,10 +566,17 @@ export function SqlWorkspace(props: Props) {
                   : "1 1 0"
                 : "1 1 0",
             }}
+            onPointerDownCapture={() => {
+              if (props.busy) return;
+              if (!isPaneActive && tab) {
+                props.onTabsChange(props.tabs, tab.id);
+              }
+            }}
             onFocusCapture={() => {
               if (props.busy) return;
-              if (props.activeId !== tab.id)
+              if (!isPaneActive && tab) {
                 props.onTabsChange(props.tabs, tab.id);
+              }
             }}
           >
             <SqlPane

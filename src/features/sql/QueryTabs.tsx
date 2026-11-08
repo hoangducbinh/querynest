@@ -1,9 +1,7 @@
 import { reorderTabs, useTabReorder } from "./tab-reorder";
-import * as Popover from "@radix-ui/react-popover";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, startTransition } from "react";
 import {
   Code2,
-  MoreHorizontal,
   Plus,
   X,
   Check,
@@ -21,6 +19,10 @@ import {
   FolderOpen,
   Download,
 } from "lucide-react";
+import {
+  useHorizontalWheelScroll,
+  scrollActiveTabIntoView,
+} from "../../lib/ui/use-horizontal-scroll";
 import { Button } from "../../components/ui/button";
 import { confirmAction } from "../../lib/dialogs";
 import { saveSqlFile } from "../../lib/platform/save-file";
@@ -137,9 +139,6 @@ export function QueryTabs({
   const [tabName, setTabName] = useState("");
   const container = useRef<HTMLDivElement>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(0);
-  const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState("");
   const [contextMenu, setContextMenu] = useState<{
     tabId: string;
     x: number;
@@ -150,16 +149,31 @@ export function QueryTabs({
   const [dbFilter, setDbFilter] = useState("");
   const sqlFileInput = useRef<HTMLInputElement>(null);
   const openTargetTabId = useRef<string | null>(null);
+  const [optimisticActiveId, setOptimisticActiveId] = useState<string | null>(null);
 
   useEffect(() => {
-    const element = container.current;
-    if (!element) return;
-    const observer = new ResizeObserver(([entry]) =>
-      setWidth(entry.contentRect.width),
-    );
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
+    setOptimisticActiveId(null);
+  }, [activeId]);
+
+  const currentActiveId =
+    optimisticActiveId && tabs.some((t) => t.id === optimisticActiveId)
+      ? optimisticActiveId
+      : activeId;
+
+  useHorizontalWheelScroll(container);
+
+  useEffect(() => {
+    scrollActiveTabIntoView(container.current, `[data-tab-id="${currentActiveId}"]`);
+  }, [currentActiveId]);
+
+  const selectTab = (targetId: string) => {
+    if (targetId === currentActiveId) return;
+    setOptimisticActiveId(targetId);
+    scrollActiveTabIntoView(container.current, `[data-tab-id="${targetId}"]`);
+    startTransition(() => {
+      onTabsChange(tabs, targetId);
+    });
+  };
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -187,23 +201,24 @@ export function QueryTabs({
     (s) => s.connection && !s.parentSourceId,
   );
 
-  function getTabContextInfo(tab: SqlTab) {
+  function getTabContextInfo(tab: SqlTab, includeDatabases = false) {
     const source = tabSource(workspace, tab);
     const root = connectionRoot(workspace, source);
     const connName = source.connection ? root.name : "No connection";
     const connFullName = connName;
     const dbName = source.connection?.config.database ?? "";
-    const databases = source.connection
-      ? [
-          ...new Set([
-            source.connection.config.database,
-            ...(root.databases ?? []),
-            ...databaseSources(workspace, root.id).flatMap((s) =>
-              s.connection ? [s.connection.config.database] : [],
-            ),
-          ]),
-        ].sort((a, b) => a.localeCompare(b))
-      : [];
+    const databases =
+      includeDatabases && source.connection
+        ? [
+            ...new Set([
+              source.connection.config.database,
+              ...(root.databases ?? []),
+              ...databaseSources(workspace, root.id).flatMap((s) =>
+                s.connection ? [s.connection.config.database] : [],
+              ),
+            ]),
+          ].sort((a, b) => a.localeCompare(b))
+        : [];
     return {
       source,
       root,
@@ -467,34 +482,16 @@ export function QueryTabs({
       !!tabs.find((tab) => tab.id === source)?.pinned ===
       !!tabs.find((tab) => tab.id === target)?.pinned,
   );
-  const capacity = Math.max(1, Math.floor((width - 64) / 150));
-  const overflowing = tabs.length > capacity;
-  const visible = overflowing
-    ? tabs
-        .filter(
-          (tab, index) => index < capacity || tab.id === activeId || tab.pinned,
-        )
-        .slice(0, capacity)
-    : tabs;
-  if (overflowing && !visible.some((tab) => tab.id === activeId))
-    visible[visible.length - 1] =
-      tabs.find((tab) => tab.id === activeId) ?? tabs[0];
-
   const contextTab = contextMenu
     ? tabs.find((t) => t.id === contextMenu.tabId)
     : undefined;
-  const contextInfo = contextTab ? getTabContextInfo(contextTab) : undefined;
+  const contextInfo = contextTab ? getTabContextInfo(contextTab, true) : undefined;
   const unattachedProfiles = savedProfiles.filter(
     (p) => !rootSources.some((s) => s.connectionId === p.id),
   );
 
   return (
-    <div
-      ref={container}
-      className="sql-tabs"
-      role="tablist"
-      aria-label="SQL queries"
-    >
+    <div className="sql-tabs-left-strip">
       <input
         ref={sqlFileInput}
         type="file"
@@ -506,13 +503,20 @@ export function QueryTabs({
           e.currentTarget.value = "";
         }}
       />
-      {visible.map((tab) => {
+      <div
+        ref={container}
+        className="sql-tabs"
+        role="tablist"
+        aria-label="SQL queries"
+      >
+        {tabs.map((tab) => {
         const info = getTabContextInfo(tab);
+        const isActive = tab.id === currentActiveId;
         return (
           <div
             className={
               "sql-tab" +
-              (tab.id === activeId ? " active" : "") +
+              (isActive ? " active" : "") +
               (tab.pinned ? " is-pinned" : "") +
               (tab.locked ? " is-locked" : "")
             }
@@ -582,8 +586,8 @@ export function QueryTabs({
               <button
                 role="tab"
                 disabled={busy}
-                aria-selected={tab.id === activeId}
-                tabIndex={tab.id === activeId ? 0 : -1}
+                aria-selected={isActive}
+                tabIndex={isActive ? 0 : -1}
                 onKeyDown={(event) => {
                   if (
                     busy ||
@@ -609,7 +613,7 @@ export function QueryTabs({
                                 : tabs.length - 1)) %
                             tabs.length
                     ];
-                  onTabsChange(tabs, next.id);
+                  selectTab(next.id);
                   requestAnimationFrame(() => {
                     const button = Array.from(
                       container.current?.querySelectorAll<HTMLButtonElement>(
@@ -624,7 +628,7 @@ export function QueryTabs({
                   });
                 }}
                 title={`${tab.name} · ${info.connFullName}${info.dbName ? " / " + info.dbName : ""}${tab.locked ? " · Locked" : ""}${tab.pinned ? " · Pinned" : ""}\n${tab.locked ? "Right-click to unlock or manage tab" : "Double-click to rename · Right-click for tab options"}`}
-                onClick={() => onTabsChange(tabs, tab.id)}
+                onClick={() => selectTab(tab.id)}
                 onDoubleClick={() => {
                   if (busy || tab.locked) return;
                   setTabName(tab.name);
@@ -656,7 +660,7 @@ export function QueryTabs({
               <button
                 className="sql-tab-close"
                 aria-label={`Close ${tab.name}`}
-                tabIndex={tab.id === activeId ? 0 : -1}
+                tabIndex={isActive ? 0 : -1}
                 disabled={busy}
                 onClick={() => void closeTab(tab)}
               >
@@ -666,78 +670,9 @@ export function QueryTabs({
           </div>
         );
       })}
-      {overflowing && (
-        <Popover.Root
-          open={open}
-          onOpenChange={(value) => {
-            setOpen(value);
-            if (!value) setSearch("");
-          }}
-        >
-          <Popover.Trigger asChild>
-            <Button
-              aria-label="List SQL tabs"
-              title={`All SQL tabs (${tabs.length})`}
-            >
-              <MoreHorizontal size={16} />
-            </Button>
-          </Popover.Trigger>
-          <Popover.Portal>
-            <Popover.Content
-              className="sql-tab-menu"
-              sideOffset={6}
-              align="start"
-              onOpenAutoFocus={(e) => e.preventDefault()}
-            >
-              <input
-                aria-label="Find SQL tab"
-                placeholder="Find a tab…"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
-              <div className="sql-tab-menu-list">
-                {tabs
-                  .filter((tab) =>
-                    tab.name.toLowerCase().includes(search.toLowerCase()),
-                  )
-                  .map((tab) => {
-                    const info = getTabContextInfo(tab);
-                    return (
-                      <button
-                        key={tab.id}
-                        disabled={busy}
-                        onClick={() => {
-                          onTabsChange(tabs, tab.id);
-                          setOpen(false);
-                          setSearch("");
-                        }}
-                      >
-                        {tab.pinned ? (
-                          <Pin size={13} className="sql-tab-pin" />
-                        ) : (
-                          <Code2 size={14} />
-                        )}
-                        <span className="sql-tab-menu-item-info">
-                          <span>{tab.name}</span>
-                          <small>
-                            {info.connName}
-                            {info.dbName ? " · " + info.dbName : ""}
-                          </small>
-                        </span>
-                        {tab.id === activeId && <Check size={14} />}
-                      </button>
-                    );
-                  })}
-                {!tabs.some((tab) =>
-                  tab.name.toLowerCase().includes(search.toLowerCase()),
-                ) && <span className="snippet-status">No matching tabs</span>}
-              </div>
-            </Popover.Content>
-          </Popover.Portal>
-        </Popover.Root>
-      )}
+      </div>
       <Button
-        className="sql-icon-button"
+        className="sql-icon-button sql-new-tab-button"
         title={
           newTabConnectionName
             ? `New SQL tab · ${newTabConnectionName}`

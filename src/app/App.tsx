@@ -23,7 +23,6 @@ import { restoreSqlLayout, updatePaneTabs } from "../features/sql/panes";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   invalidateSession,
-  requestConnection,
 } from "../features/connections/sessions";
 import { readDarkAppearance, saveDarkAppearance } from "./appearance";
 import {
@@ -168,10 +167,15 @@ export default function App() {
     [w.schema.tables],
   );
   const [closedAllDataTables, setClosedAllDataTables] = useState(false);
+  const [openDataTableIds, setOpenDataTableIds] = useState<string[]>([]);
   const activeTable = closedAllDataTables
     ? undefined
-    : (tablesById.get(dataTable) ?? w.schema.tables[0]);
-  const [openDataTableIds, setOpenDataTableIds] = useState<string[]>([]);
+    : (tablesById.get(dataTable) ??
+       (openDataTableIds.length
+         ? tablesById.get(openDataTableIds[0])
+         : (!closedAllDataTables && !openDataTableIds.length && !dataTable && !ready
+             ? w.schema.tables[0]
+             : undefined)));
   const [dataLayout, setDataLayout] = useState<"tabs" | "stack">("tabs");
   useEffect(() => {
     setOpenDataTableIds([]);
@@ -701,13 +705,13 @@ export default function App() {
     setMode(next);
   }
   async function chooseTable(tableId: string) {
+    if (tableId === activeTable?.id && !closedAllDataTables) return;
+    if (!(await leaveDraft())) return;
     setClosedAllDataTables(false);
+    setDataTable(tableId);
     setOpenDataTableIds((prev) =>
       prev.includes(tableId) ? prev : [...prev, tableId],
     );
-    if (tableId === activeTable?.id) return;
-    if (!(await leaveDraft())) return;
-    setDataTable(tableId);
   }
   function tableExpansionKey(tableId: string) {
     return `${w.id}:${w.activeSourceId ?? "primary"}:${tableId}`;
@@ -723,10 +727,10 @@ export default function App() {
   async function openTableData(tableId: string) {
     if (!(await leaveDraft())) return;
     setClosedAllDataTables(false);
+    setDataTable(tableId);
     setOpenDataTableIds((items) =>
       items.includes(tableId) ? items : [...items, tableId],
     );
-    setDataTable(tableId);
     const key = tableExpansionKey(tableId);
     setExpandedTables((items) =>
       items.includes(key) ? items : [...items, key],
@@ -918,16 +922,22 @@ export default function App() {
           />
         </div>
         <nav className="mode-switch" aria-label="View" data-tauri-drag-region>
-          {modes.map((item) => (
-            <button
-              key={item.id}
-              aria-current={mode === item.id ? "page" : undefined}
-              onClick={() => void changeMode(item.id)}
-            >
-              <item.icon size={13} aria-hidden="true" />
-              {item.label}
-            </button>
-          ))}
+          {modes.map((item) => {
+            const isActive = mode === item.id;
+            return (
+              <button
+                key={item.id}
+                aria-current={isActive ? "page" : undefined}
+                onClick={() => void changeMode(item.id)}
+              >
+                <item.icon size={13} aria-hidden="true" />
+                <span>{item.label}</span>
+                {isActive && (
+                  <span className="mode-active-dot" aria-hidden="true" />
+                )}
+              </button>
+            );
+          })}
         </nav>
         <div className="header-actions" data-tauri-drag-region>
           <span
@@ -1247,14 +1257,6 @@ export default function App() {
                 Add a PostgreSQL or SQL Server connection to browse tables and
                 run queries.
               </p>
-              <Button
-                variant="primary"
-                onClick={() =>
-                  requestConnection(w.id, w.activeSourceId ?? "primary", "new")
-                }
-              >
-                Add connection
-              </Button>
             </section>
           )}
         </main>

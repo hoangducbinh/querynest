@@ -8,7 +8,7 @@ import {
   withDatabaseSession,
   ensureDatabaseSession,
 } from "./databases";
-import { useEffect, useRef, useState, type MutableRefObject } from "react";
+import { useEffect, useRef, useState, startTransition, type MutableRefObject } from "react";
 import type { WorkspaceDefinition, WorkspaceSource } from "../../types/schema";
 import { useStore } from "../schema/store";
 import { SqlWorkspace } from "../sql/SqlWorkspace";
@@ -237,9 +237,11 @@ export function MultiSqlWorkspace({
           })
         }
         onTabsChange={(tabs, active, layout) =>
-          edit((draft) => {
-            setSqlTabs(draft, tabs, active, layout);
-            syncActiveSqlSource(draft);
+          startTransition(() => {
+            edit((draft) => {
+              setSqlTabs(draft, tabs, active, layout);
+              syncActiveSqlSource(draft);
+            });
           })
         }
         value={activeSqlTab(w).sql}

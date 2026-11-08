@@ -116,10 +116,48 @@ impl Drop for Running<'_> {
 #[serde(rename_all = "camelCase")]
 struct ResultSet {
     columns: Vec<String>,
+    column_types: Vec<String>,
     rows: Vec<Value>,
     affected_rows: u64,
     truncated: bool,
     messages: Vec<String>,
+}
+fn result_column_type(kind: tiberius::ColumnType) -> &'static str {
+    use tiberius::ColumnType::*;
+    match kind {
+        Null => "null",
+        Bit | Bitn => "bit",
+        Int1 => "tinyint",
+        Int2 => "smallint",
+        Int4 => "int",
+        Int8 => "bigint",
+        Intn => "integer",
+        Datetime4 => "smalldatetime",
+        Float4 => "real",
+        Float8 | Floatn => "float",
+        Money => "money",
+        Money4 => "smallmoney",
+        Datetime | Datetimen => "datetime",
+        Guid => "uniqueidentifier",
+        Decimaln => "decimal",
+        Numericn => "numeric",
+        Daten => "date",
+        Timen => "time",
+        Datetime2 => "datetime2",
+        DatetimeOffsetn => "datetimeoffset",
+        BigVarBin => "varbinary",
+        BigVarChar => "varchar",
+        BigBinary => "binary",
+        BigChar => "char",
+        NVarchar => "nvarchar",
+        NChar => "nchar",
+        Xml => "xml",
+        Udt => "udt",
+        Text => "text",
+        Image => "image",
+        NText => "ntext",
+        SSVariant => "sql_variant",
+    }
 }
 fn quote(name: &str) -> String {
     format!("[{}]", name.replace(']', "]]"))
@@ -273,6 +311,11 @@ async fn collect(
                         columns: unique_names(
                             metadata.columns().iter().map(|c| c.name().to_owned()),
                         ),
+                        column_types: metadata
+                            .columns()
+                            .iter()
+                            .map(|c| result_column_type(c.column_type()).to_owned())
+                            .collect(),
                         ..Default::default()
                     });
                 }

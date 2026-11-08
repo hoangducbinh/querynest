@@ -27,13 +27,11 @@ import {
   useEffect,
   useRef,
   useState,
+  startTransition,
   type MutableRefObject,
 } from "react";
-import * as Popover from "@radix-ui/react-popover";
 import {
-  Check,
   LoaderCircle,
-  MoreHorizontal,
   Pin,
   PinOff,
   RefreshCw,
@@ -42,10 +40,13 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import {
+  useHorizontalWheelScroll,
+  scrollActiveTabIntoView,
+} from "../../lib/ui/use-horizontal-scroll";
 import { Button } from "../../components/ui/button";
 import type { TableDefinition, WorkspaceDefinition } from "../../types/schema";
 import { useStore } from "../schema/store";
-import { EmptyResults } from "../sample-data/EmptyResults";
 import { Spreadsheet } from "../sample-data/Spreadsheet";
 import type { DraftRow } from "../sample-data/model";
 import { confirmAction } from "../../lib/dialogs";
@@ -207,14 +208,22 @@ export function RemoteWorkspace({
     return () => clearTimeout(timer);
   }, [dataLoading]);
 
-  const dataTablistStripRef = useRef<HTMLDivElement>(null);
+  const dataTableTabsRef = useRef<HTMLDivElement>(null);
   const dataTabContextMenuRef = useRef<HTMLDivElement>(null);
-  const [dataStripWidth, setDataStripWidth] = useState(0);
-  const [dataOverflowOpen, setDataOverflowOpen] = useState(false);
-  const [dataTabSearch, setDataTabSearch] = useState("");
   const [pinnedTableIds, setPinnedTableIds] = useState<Set<string>>(
     () => new Set(),
   );
+
+  useHorizontalWheelScroll(dataTableTabsRef);
+
+  useEffect(() => {
+    if (activeTable?.id) {
+      scrollActiveTabIntoView(
+        dataTableTabsRef.current,
+        `[data-tab-id="${activeTable.id}"]`,
+      );
+    }
+  }, [activeTable?.id]);
   const [dataTabContextMenu, setDataTabContextMenu] = useState<{
     tableId: string;
     x: number;
@@ -275,19 +284,6 @@ export function RemoteWorkspace({
     }
   }
 
-  useEffect(() => {
-    const el = dataTablistStripRef.current;
-    if (!el) return;
-    if (el.clientWidth > 0) {
-      setDataStripWidth(el.clientWidth);
-    }
-    const obs = new ResizeObserver(([entry]) => {
-      setDataStripWidth(entry.contentRect.width);
-    });
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, [mode]);
-
   const dataTabDrag = useTabReorder(
     !pending && !!onReorderTables,
     (source, target, side) => {
@@ -297,33 +293,6 @@ export function RemoteWorkspace({
     },
     (source, target) => pinnedTableIds.has(source) === pinnedTableIds.has(target),
   );
-  const availableForDataTabs =
-    dataStripWidth > 0 ? Math.max(120, dataStripWidth - 40) : 400;
-  const dataTableCapacity = Math.max(1, Math.floor(availableForDataTabs / 150));
-  const hasDataTableOverflow = openTables.length > dataTableCapacity;
-
-  const visibleTables = useMemo(() => {
-    if (!hasDataTableOverflow) return openTables;
-    const count = Math.max(1, dataTableCapacity);
-    const list = openTables
-      .filter(
-        (tbl, idx) =>
-          idx < count ||
-          tbl.id === activeTable?.id ||
-          pinnedTableIds.has(tbl.id),
-      )
-      .slice(0, count);
-    if (activeTable && !list.some((tbl) => tbl.id === activeTable.id)) {
-      list[list.length - 1] = activeTable;
-    }
-    return list;
-  }, [
-    openTables,
-    dataTableCapacity,
-    hasDataTableOverflow,
-    activeTable,
-    pinnedTableIds,
-  ]);
   const contextDataTable = dataTabContextMenu
     ? openTables.find((t) => t.id === dataTabContextMenu.tableId)
     : undefined;
@@ -705,7 +674,9 @@ export function RemoteWorkspace({
             })
           }
           onTabsChange={(tabs, active, layout) =>
-            edit((d) => setSqlTabs(d, tabs, active, layout))
+            startTransition(() => {
+              edit((d) => setSqlTabs(d, tabs, active, layout));
+            })
           }
           value={activeSqlTab(w).sql}
           onChange={(sql) =>
@@ -778,15 +749,16 @@ export function RemoteWorkspace({
         />
       ) : (
         <div className="pg-data" aria-busy={dataLoading}>
-          <div className="compact-toolbar data-tables-toolbar">
-            {openTables.length > 0 ? (
-              <div ref={dataTablistStripRef} className="data-tables-left-strip">
+          {openTables.length > 0 && (
+            <div className="compact-toolbar data-tables-toolbar">
+              <div className="data-tables-left-strip">
                 <div
+                  ref={dataTableTabsRef}
                   className="data-table-tabs"
                   role="tablist"
                   aria-label="Open tables"
                 >
-                  {visibleTables.map((tbl) => {
+                  {openTables.map((tbl) => {
                     const isCurrent =
                       dataLayout === "tabs" && tbl.id === activeTable?.id;
                     const isPinned = pinnedTableIds.has(tbl.id);
@@ -881,142 +853,6 @@ export function RemoteWorkspace({
                     );
                   })}
                 </div>
-
-                {hasDataTableOverflow && (
-                  <Popover.Root
-                    open={dataOverflowOpen}
-                    onOpenChange={(value) => {
-                      setDataOverflowOpen(value);
-                      if (!value) setDataTabSearch("");
-                    }}
-                  >
-                    <Popover.Trigger asChild>
-                      <button
-                        type="button"
-                        className="data-tab-overflow-btn"
-                        aria-label="More open tables"
-                        title={`All open tables (${openTables.length})`}
-                      >
-                        <MoreHorizontal size={14} />
-                      </button>
-                    </Popover.Trigger>
-                    <Popover.Portal>
-                      <Popover.Content
-                        className="sql-tab-menu data-tab-overflow-menu"
-                        sideOffset={6}
-                        align="start"
-                        onOpenAutoFocus={(e) => e.preventDefault()}
-                      >
-                        <input
-                          aria-label="Find open table"
-                          placeholder="Find a table…"
-                          value={dataTabSearch}
-                          onChange={(e) => setDataTabSearch(e.target.value)}
-                        />
-                        <div className="sql-tab-menu-list">
-                          {openTables
-                            .filter((tbl) => {
-                              const name = tbl.namespace
-                                ? `${tbl.namespace}.${tbl.name}`
-                                : tbl.name;
-                              return name
-                                .toLowerCase()
-                                .includes(dataTabSearch.toLowerCase());
-                            })
-                            .map((tbl) => {
-                              const isCurrent =
-                                dataLayout === "tabs" &&
-                                tbl.id === activeTable?.id;
-                              const isPinned = pinnedTableIds.has(tbl.id);
-                              const tableName = tbl.namespace
-                                ? `${tbl.namespace}.${tbl.name}`
-                                : tbl.name;
-                              return (
-                                <div
-                                  key={tbl.id}
-                                  style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    width: "100%",
-                                  }}
-                                >
-                                  <button
-                                    type="button"
-                                    style={{ flex: 1, minWidth: 0 }}
-                                    onClick={() => {
-                                      onSelectTable?.(tbl.id);
-                                      if (dataLayout === "stack") {
-                                        setCollapsedStackTables((prev) => {
-                                          if (!prev.has(tbl.id)) return prev;
-                                          const next = new Set(prev);
-                                          next.delete(tbl.id);
-                                          return next;
-                                        });
-                                        requestAnimationFrame(() => {
-                                          dataBlockRefs.current[
-                                            tbl.id
-                                          ]?.scrollIntoView({
-                                            block: "nearest",
-                                          });
-                                        });
-                                      }
-                                      setDataOverflowOpen(false);
-                                      setDataTabSearch("");
-                                    }}
-                                  >
-                                    {isPinned ? (
-                                      <Pin size={13} className="sql-tab-pin" />
-                                    ) : (
-                                      <Table2 size={13} />
-                                    )}
-                                    <span className="sql-tab-menu-item-info">
-                                      <span>{tableName}</span>
-                                      <small>
-                                        {tbl.columns?.length ?? 0} columns
-                                      </small>
-                                    </span>
-                                    {isCurrent && <Check size={14} />}
-                                  </button>
-                                  {!isPinned && onCloseTable && (
-                                    <button
-                                      type="button"
-                                      className="sql-tab-close"
-                                      title={`Close ${tbl.name}`}
-                                      aria-label={`Close ${tbl.name}`}
-                                      style={{
-                                        width: 22,
-                                        height: 22,
-                                        padding: 3,
-                                        flexShrink: 0,
-                                      }}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        onCloseTable(tbl.id);
-                                      }}
-                                    >
-                                      <X size={11} />
-                                    </button>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          {!openTables.some((tbl) => {
-                            const name = tbl.namespace
-                              ? `${tbl.namespace}.${tbl.name}`
-                              : tbl.name;
-                            return name
-                              .toLowerCase()
-                              .includes(dataTabSearch.toLowerCase());
-                          }) && (
-                            <span className="snippet-status">
-                              No matching tables
-                            </span>
-                          )}
-                        </div>
-                      </Popover.Content>
-                    </Popover.Portal>
-                  </Popover.Root>
-                )}
 
                 {dataTabContextMenu && contextDataTable && (
                   <div
@@ -1171,14 +1007,7 @@ export function RemoteWorkspace({
                   </div>
                 )}
               </div>
-            ) : (
-              <span>
-                {gridTable
-                  ? `${gridTable.namespace ? gridTable.namespace + "." : ""}${gridTable.name}`
-                  : "Choose a table"}
-              </span>
-            )}
-            <div className="row">
+              <div className="row">
               {openTables.length > 1 && onDataLayoutChange && (
                 <Button
                   className={dataLayout === "stack" ? "is-active" : undefined}
@@ -1219,6 +1048,7 @@ export function RemoteWorkspace({
               </Button>
             </div>
           </div>
+          )}
           {dataLayout === "stack" && openTables.length > 1 ? (
             <div className="sql-all-results data-stack-container">
               {openTables.map((tbl) => {
@@ -1390,7 +1220,7 @@ export function RemoteWorkspace({
                 );
               })}
             </div>
-          ) : gridTable ? (
+          ) : gridTable && openTables.length > 0 ? (
             <Spreadsheet
               key={`${sessionId}:${gridTable.id}:${gridPage}:${visible?.refresh ?? refresh}`}
               table={gridTable}
@@ -1418,7 +1248,15 @@ export function RemoteWorkspace({
               }}
             />
           ) : (
-            <EmptyResults />
+            <div className="empty-state" tabIndex={0} aria-label="Table data">
+              <div className="connection-empty-mark" aria-hidden="true">
+                <Table2 size={22} />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <p style={{ margin: 0, fontWeight: 500, color: "var(--text)" }}>No open tables</p>
+                <small style={{ color: "var(--secondary)" }}>Select a table from the sidebar to view and edit data</small>
+              </div>
+            </div>
           )}
         </div>
       )}

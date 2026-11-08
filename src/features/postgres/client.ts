@@ -7,6 +7,7 @@ import type { SqlDiagnostic } from "../sql/diagnostics";
 export { isTauri };
 export interface PgQueryResult {
   columns: string[];
+  columnTypes?: string[];
   rows: Record<string, unknown>[];
   affectedRows: number;
   truncated: boolean;

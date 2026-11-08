@@ -49,6 +49,34 @@ export function columnTypeHint(type: string): string {
     return "Spatial data";
   return type;
 }
+
+export function normalizeSqlColumnType(rawType?: string): string | undefined {
+  if (!rawType) return undefined;
+  const trimmed = rawType.trim();
+  if (!trimmed) return undefined;
+  const lower = trimmed.toLowerCase();
+
+  const map: Record<string, string> = {
+    int2: "smallint",
+    int4: "integer",
+    int8: "bigint",
+    float4: "real",
+    float8: "double precision",
+    bool: "boolean",
+    bpchar: "char",
+    varbit: "bit varying",
+    _int2: "smallint[]",
+    _int4: "integer[]",
+    _int8: "bigint[]",
+    _text: "text[]",
+    _varchar: "varchar[]",
+    _bool: "boolean[]",
+    _float4: "real[]",
+    _float8: "double precision[]",
+  };
+
+  return map[lower] ?? lower;
+}
 import type {
   ColumnDefinition,
   DatabaseSchema,
@@ -287,11 +315,7 @@ const ResultTableRow = memo(function ResultTableRow({
         </label>
       </td>
       {colStart > 0 && (
-        <td
-          className="column-spacer"
-          colSpan={colStart}
-          aria-hidden="true"
-        />
+        <td className="column-spacer" colSpan={colStart} aria-hidden="true" />
       )}
       {visibleColumns.map(({ name: c, index: colIdx, hint }) => {
         const edited =
@@ -339,16 +363,12 @@ const ResultTableRow = memo(function ResultTableRow({
                 value={val ?? ""}
                 spellCheck={false}
                 autoComplete="off"
-                placeholder={
-                  isNull ? "NULL" : !row.original ? hint : ""
-                }
+                placeholder={isNull ? "NULL" : !row.original ? hint : ""}
                 onFocus={() => handlers.current.onCellFocus(r, colIdx)}
                 onChange={(e) =>
                   handlers.current.onCellChange(r, colIdx, e.target.value)
                 }
-                onKeyDown={(e) =>
-                  handlers.current.onCellKeyDown(e, r, colIdx)
-                }
+                onKeyDown={(e) => handlers.current.onCellKeyDown(e, r, colIdx)}
                 onPaste={(e) => handlers.current.onCellPaste(e, r, colIdx)}
               />
             ) : isNull ? (
@@ -429,7 +449,9 @@ export const ResultSetView = memo(function ResultSetView({
     () =>
       new Set(
         (metadataTable?.primaryKey ?? [])
-          .map((pkId) => metadataTable?.columns.find((c) => c.id === pkId)?.name)
+          .map(
+            (pkId) => metadataTable?.columns.find((c) => c.id === pkId)?.name,
+          )
           .filter((name): name is string => !!name),
       ),
     [metadataTable],
@@ -554,10 +576,7 @@ export const ResultSetView = memo(function ResultSetView({
     };
   }, [contextMenu, copyMenuOpen]);
 
-  const sizing = useColumnWidths(
-    `results:${JSON.stringify(columns)}`,
-    columns,
-  );
+  const sizing = useColumnWidths(`results:${JSON.stringify(columns)}`, columns);
   const sampleRows = useMemo(() => result.rows.slice(0, 100), [result.rows]);
   const defaultWidths = useMemo(
     () =>
@@ -579,19 +598,17 @@ export const ResultSetView = memo(function ResultSetView({
 
   const visibleColumns = useMemo<VisibleColumnItem[]>(
     () =>
-      columns
-        .slice(viewport.start, viewport.end)
-        .map((name, offset) => {
-          const column = columnMap.get(name);
-          return {
-            name,
-            index: viewport.start + offset,
-            column,
-            hint: column
-              ? columnTypeHint(column.nativeType ?? column.type)
-              : undefined,
-          };
-        }),
+      columns.slice(viewport.start, viewport.end).map((name, offset) => {
+        const column = columnMap.get(name);
+        return {
+          name,
+          index: viewport.start + offset,
+          column,
+          hint: column
+            ? columnTypeHint(column.nativeType ?? column.type)
+            : undefined,
+        };
+      }),
     [columns, viewport.start, viewport.end, columnMap],
   );
 
@@ -740,7 +757,10 @@ export const ResultSetView = memo(function ResultSetView({
     const rowTop = visiblePos * rowHeight;
     const rowBottom = rowTop + rowHeight;
     const viewTop = container.scrollTop;
-    const viewHeight = Math.max(0, container.clientHeight - (compact ? 25 : 30));
+    const viewHeight = Math.max(
+      0,
+      container.clientHeight - (compact ? 25 : 30),
+    );
     if (viewHeight <= 0) return;
     if (rowTop < viewTop) {
       container.scrollTop = rowTop;
@@ -856,7 +876,10 @@ export const ResultSetView = memo(function ResultSetView({
     setError("");
   }
 
-  function setNullTargetCells(fallbackRow = clampedActiveRow, fallbackCol = active.col) {
+  function setNullTargetCells(
+    fallbackRow = clampedActiveRow,
+    fallbackCol = active.col,
+  ) {
     if (!editable || disabled || saving || requiresRefresh) return;
     if (hasActiveRange && normalizedRange) {
       const targetRowIndices = new Set(
@@ -868,7 +891,11 @@ export const ResultSetView = memo(function ResultSetView({
         .slice(normalizedRange.minCol, normalizedRange.maxCol + 1)
         .filter((colName) => {
           const colDef = columnMap.get(colName);
-          return !colDef?.generated && !colDef?.readOnly && colDef?.nullable !== false;
+          return (
+            !colDef?.generated &&
+            !colDef?.readOnly &&
+            colDef?.nullable !== false
+          );
         });
       if (!targetRowIndices.size || !targetColNames.length) return;
       setError("");
@@ -1000,13 +1027,7 @@ export const ResultSetView = memo(function ResultSetView({
     if (!/[\t\r\n]/.test(text)) return;
     event.preventDefault();
     try {
-      const pasted = pasteCells(
-        drafts,
-        table,
-        row,
-        col,
-        parseClipboard(text),
-      );
+      const pasted = pasteCells(drafts, table, row, col, parseClipboard(text));
       if (
         pasted.length > drafts.length &&
         !pasted.at(-1)?.original &&
@@ -1067,8 +1088,11 @@ export const ResultSetView = memo(function ResultSetView({
 
   async function handleCopyAsInsert(allRows = false) {
     if (isJoin) return;
-    const { rows: targetDrafts, cols: targetCols, isRange } =
-      resolveCopyScope(allRows);
+    const {
+      rows: targetDrafts,
+      cols: targetCols,
+      isRange,
+    } = resolveCopyScope(allRows);
     if (!targetDrafts.length || !targetCols.length) return;
     const rows = targetDrafts.map((d) => effectiveRowValues(d, targetCols));
     const sqlText = buildCopyAsInsert({
@@ -1092,8 +1116,11 @@ export const ResultSetView = memo(function ResultSetView({
 
   async function handleCopyAsUpdate(allRows = false) {
     if (isJoin) return;
-    const { rows: targetDrafts, cols: targetCols, isRange } =
-      resolveCopyScope(allRows);
+    const {
+      rows: targetDrafts,
+      cols: targetCols,
+      isRange,
+    } = resolveCopyScope(allRows);
     if (!targetDrafts.length || !targetCols.length) return;
     const rows = targetDrafts.map((d) => ({
       current: effectiveRowValues(d, columns),
@@ -1120,8 +1147,11 @@ export const ResultSetView = memo(function ResultSetView({
   }
 
   async function handleCopyWithHeader(allRows = false) {
-    const { rows: targetDrafts, cols: targetCols, isRange } =
-      resolveCopyScope(allRows);
+    const {
+      rows: targetDrafts,
+      cols: targetCols,
+      isRange,
+    } = resolveCopyScope(allRows);
     if (!targetDrafts.length || !targetCols.length) return;
     const rows = targetDrafts.map((d) => effectiveRowValues(d, targetCols));
     const tsv = buildCopyAsTsv(targetCols, rows, true);
@@ -1136,8 +1166,11 @@ export const ResultSetView = memo(function ResultSetView({
   }
 
   async function handleCopyAsTsv(allRows = false, includeHeader = false) {
-    const { rows: targetDrafts, cols: targetCols, isRange } =
-      resolveCopyScope(allRows);
+    const {
+      rows: targetDrafts,
+      cols: targetCols,
+      isRange,
+    } = resolveCopyScope(allRows);
     if (!targetDrafts.length || !targetCols.length) return;
     const rows = targetDrafts.map((d) => effectiveRowValues(d, targetCols));
     const tsv = buildCopyAsTsv(targetCols, rows, includeHeader);
@@ -1152,8 +1185,11 @@ export const ResultSetView = memo(function ResultSetView({
   }
 
   async function handleCopyAsCsv(allRows = false, includeHeader = true) {
-    const { rows: targetDrafts, cols: targetCols, isRange } =
-      resolveCopyScope(allRows);
+    const {
+      rows: targetDrafts,
+      cols: targetCols,
+      isRange,
+    } = resolveCopyScope(allRows);
     if (!targetDrafts.length || !targetCols.length) return;
     const rows = targetDrafts.map((d) => effectiveRowValues(d, targetCols));
     const csv = buildCopyAsCsv(targetCols, rows, includeHeader);
@@ -1168,8 +1204,11 @@ export const ResultSetView = memo(function ResultSetView({
   }
 
   async function handleCopyAsJson(allRows = false) {
-    const { rows: targetDrafts, cols: targetCols, isRange } =
-      resolveCopyScope(allRows);
+    const {
+      rows: targetDrafts,
+      cols: targetCols,
+      isRange,
+    } = resolveCopyScope(allRows);
     if (!targetDrafts.length || !targetCols.length) return;
     const rows = targetDrafts.map((d) => effectiveRowValues(d, targetCols));
     await copyTextToClipboard(JSON.stringify(rows, null, 2));
@@ -1389,11 +1428,11 @@ export const ResultSetView = memo(function ResultSetView({
 
   const rowHandlersRef = useRef<ResultRowHandlers>({
     onGutterClick: handleRowSelectClick,
-    onCheckboxChange: () => { },
+    onCheckboxChange: () => {},
     onCellMouseDown: handleCellMouseDown,
     onCellMouseEnter: handleCellMouseEnter,
     onContextMenu: openRowContextMenu,
-    onCellFocus: () => { },
+    onCellFocus: () => {},
     onCellChange: updateCell,
     onCellKeyDown: handleCellKey,
     onCellPaste: handlePaste,
@@ -1622,10 +1661,7 @@ export const ResultSetView = memo(function ResultSetView({
           </colgroup>
           <thead>
             <tr>
-              <th
-                className="result-row-gutter"
-                title="Select all rows"
-              >
+              <th className="result-row-gutter" title="Select all rows">
                 <label>
                   <input
                     type="checkbox"
@@ -1659,6 +1695,11 @@ export const ResultSetView = memo(function ResultSetView({
                 />
               )}
               {visibleColumns.map(({ name, index, column }) => {
+                const rawType =
+                  column?.nativeType ??
+                  result.columnTypes?.[index] ??
+                  column?.type?.toLowerCase();
+                const type = normalizeSqlColumnType(rawType);
                 const colInRange =
                   hasActiveRange &&
                   normalizedRange !== null &&
@@ -1668,8 +1709,8 @@ export const ResultSetView = memo(function ResultSetView({
                   <th
                     key={name}
                     title={
-                      column
-                        ? `${name} · ${column.nativeType ?? column.type} (Click to select column)`
+                      type
+                        ? `${name} · ${type} (Click to select column)`
                         : `${name} (Click to select column)`
                     }
                     className={[
@@ -1711,12 +1752,17 @@ export const ResultSetView = memo(function ResultSetView({
                       setActive((old) => ({ ...old, col: index }));
                     }}
                   >
-                    <span className="result-column-name">
-                      {pkColumnNames.has(name) && (
-                        <KeyRound size={11} className="gold" />
-                      )}
-                      <span>{name}</span>
-                    </span>
+                    <div className="result-column-header-cell">
+                      <div className="sheet-column-name result-column-name">
+                        {pkColumnNames.has(name) && (
+                          <KeyRound size={11} className="gold" />
+                        )}
+                        <span className="column-name-label">{name}</span>
+                        {type && (
+                          <span className="sheet-col-type-inline">{type}</span>
+                        )}
+                      </div>
+                    </div>
                     <ColumnResizeHandle
                       name={name}
                       width={widths[index]}
@@ -1774,8 +1820,12 @@ export const ResultSetView = memo(function ResultSetView({
                   visiblePos={visiblePos}
                   isRowSelected={selected.has(row.id)}
                   inRangeRow={rowInRange}
-                  rangeMinCol={rowInRange && normalizedRange ? normalizedRange.minCol : -1}
-                  rangeMaxCol={rowInRange && normalizedRange ? normalizedRange.maxCol : -1}
+                  rangeMinCol={
+                    rowInRange && normalizedRange ? normalizedRange.minCol : -1
+                  }
+                  rangeMaxCol={
+                    rowInRange && normalizedRange ? normalizedRange.maxCol : -1
+                  }
                   isRangeTop={
                     rowInRange &&
                     normalizedRange !== null &&
@@ -1900,7 +1950,8 @@ export const ResultSetView = memo(function ResultSetView({
               title="Next record"
               aria-label="Next record"
               disabled={
-                !visibleRows.length || activeVisiblePos + 1 >= visibleRows.length
+                !visibleRows.length ||
+                activeVisiblePos + 1 >= visibleRows.length
               }
               onClick={() => goToVisibleRow(activeVisiblePos + 1)}
             >
@@ -1910,7 +1961,8 @@ export const ResultSetView = memo(function ResultSetView({
               title="Last record"
               aria-label="Last record"
               disabled={
-                !visibleRows.length || activeVisiblePos + 1 >= visibleRows.length
+                !visibleRows.length ||
+                activeVisiblePos + 1 >= visibleRows.length
               }
               onClick={() => goToVisibleRow(visibleRows.length - 1)}
             >
@@ -1977,7 +2029,9 @@ export const ResultSetView = memo(function ResultSetView({
               >
                 {saving ? <span className="spinner" /> : <Check size={13} />}
                 <span>Apply</span>
-                {dirty && <span className="button-count">{changes.length}</span>}
+                {dirty && (
+                  <span className="button-count">{changes.length}</span>
+                )}
               </Button>
               <Button
                 title="Discard changes"
@@ -2242,19 +2296,31 @@ export const ResultSetView = memo(function ResultSetView({
               role="menuitem"
               onClick={() => void handleCopyAsCsv(false, true)}
             >
-              Copy {hasActiveRange ? `Selection (${scopeBadge})` : `Row${selected.size > 1 ? "s" : ""}`} as CSV
+              Copy{" "}
+              {hasActiveRange
+                ? `Selection (${scopeBadge})`
+                : `Row${selected.size > 1 ? "s" : ""}`}{" "}
+              as CSV
             </button>
             <button
               role="menuitem"
               onClick={() => void handleCopyAsTsv(false, false)}
             >
-              Copy {hasActiveRange ? `Selection (${scopeBadge})` : `Row${selected.size > 1 ? "s" : ""}`} as TSV
+              Copy{" "}
+              {hasActiveRange
+                ? `Selection (${scopeBadge})`
+                : `Row${selected.size > 1 ? "s" : ""}`}{" "}
+              as TSV
             </button>
             <button
               role="menuitem"
               onClick={() => void handleCopyAsJson(false)}
             >
-              Copy {hasActiveRange ? `Selection (${scopeBadge})` : `Row${selected.size > 1 ? "s" : ""}`} as JSON
+              Copy{" "}
+              {hasActiveRange
+                ? `Selection (${scopeBadge})`
+                : `Row${selected.size > 1 ? "s" : ""}`}{" "}
+              as JSON
             </button>
             {editable && (
               <>

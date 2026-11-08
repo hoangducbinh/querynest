@@ -93,6 +93,7 @@ impl PgFailure {
 #[serde(rename_all = "camelCase")]
 pub struct PgResult {
     columns: Vec<String>,
+    column_types: Vec<String>,
     rows: Vec<Value>,
     affected_rows: u64,
     truncated: bool,
@@ -393,17 +394,20 @@ async fn execute(
 ) -> Result<PgResult, PgFailure> {
     c.clear_cached_statements().await?;
     let statement = c.prepare(sql).await?; // PostgreSQL rejects multiple statements here; never execute an unparsed batch.
-    let columns = unique_columns(statement.columns().iter().map(|c| c.name().to_string()));
-    read_result(c, sql, limit, columns).await
+    read_result(c, sql, limit, statement.columns()).await
 }
 async fn read_result(
     c: &mut sqlx::PgConnection,
     sql: &str,
     limit: usize,
-    columns: Vec<String>,
+    columns: &[sqlx::postgres::PgColumn],
 ) -> Result<PgResult, PgFailure> {
     let mut result = PgResult {
-        columns,
+        columns: unique_columns(columns.iter().map(|col| col.name().to_owned())),
+        column_types: columns
+            .iter()
+            .map(|col| col.type_info().name().to_owned())
+            .collect(),
         rows: Vec::new(),
         affected_rows: 0,
         truncated: false,
@@ -420,6 +424,11 @@ async fn read_result(
                 if result.rows.is_empty() {
                     result.columns =
                         unique_columns(row.columns().iter().map(|c| c.name().to_string()));
+                    result.column_types = row
+                        .columns()
+                        .iter()
+                        .map(|col| col.type_info().name().to_owned())
+                        .collect();
                 }
                 let mut values = Map::new();
                 for (i, col) in row.columns().iter().enumerate() {
@@ -451,11 +460,10 @@ async fn preview(
 ) -> Result<PgResult, PgFailure> {
     c.clear_cached_statements().await?;
     let statement = c.prepare(sql).await?;
-    let columns = unique_columns(statement.columns().iter().map(|col| col.name().to_string()));
     let declaration = format!("DECLARE dbplayground_preview NO SCROLL CURSOR FOR {sql}");
     sqlx::query(&declaration).execute(&mut *c).await?;
     let fetch = format!("FETCH FORWARD {} FROM dbplayground_preview", limit + 1);
-    let result = read_result(c, &fetch, limit, columns).await?;
+    let result = read_result(c, &fetch, limit, statement.columns()).await?;
     sqlx::query("CLOSE dbplayground_preview")
         .execute(&mut *c)
         .await?;

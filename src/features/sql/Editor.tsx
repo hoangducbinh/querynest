@@ -221,9 +221,21 @@ export function SqlEditor({
     onValidation,
     !!validate,
     validationSource,
+    viewKey,
   ]);
+  const currentViewKeyRef = useRef(viewKey);
+  currentViewKeyRef.current = viewKey;
+
+  useEffect(() => {
+    if (autoFocus && editorInstance) {
+      editorInstance.focus();
+    }
+  }, [viewKey, autoFocus, editorInstance]);
+
   return (
     <Editor
+      path={viewKey ? `/sql/${encodeURIComponent(viewKey)}.sql` : "/sql/default.sql"}
+      saveViewState
       height="100%"
       language="sql"
       theme={dark ? "workspace-dark" : "workspace-light"}
@@ -252,8 +264,9 @@ export function SqlEditor({
         if (saved) editor.restoreViewState(saved);
         if (autoFocus) editor.focus();
         const saveView = () => {
-          if (alive.current && viewKey && !editor.getModel()?.isDisposed())
-            rememberSqlEditorView(viewKey, editor.saveViewState());
+          const key = currentViewKeyRef.current;
+          if (alive.current && key && !editor.getModel()?.isDisposed())
+            rememberSqlEditorView(key, editor.saveViewState());
         };
         const scheduleSaveView = () => {
           if (scrollSaveTimer) window.clearTimeout(scrollSaveTimer);
