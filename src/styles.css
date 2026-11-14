@@ -2995,7 +2995,6 @@ select:focus {
   padding: 3px 4px;
 }
 
-/* The explorer follows the title bar database; it no longer repeats connections. */
 .explorer>.search {
   height: 26px;
   margin: 0 2px 7px;
@@ -3509,24 +3508,79 @@ body.is-resizing-column * {
 }
 
 .explorer>.search {
-  margin: 0 2px 12px;
+  margin: 0 2px 8px;
   height: 28px;
-  border: 1px solid color-mix(in srgb, var(--text) 5%, transparent);
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--text) 4%, transparent);
-}
-
-.explorer>.section-heading {
-  padding-inline: 8px;
-  min-height: 25px;
-  font-size: 10px;
-  letter-spacing: .3px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
   color: var(--secondary);
 }
 
-/* Tree Connection & Database Nodes (Navicat Style Explorer) */
-.tree-connection-group {
-  margin-bottom: 6px;
+.explorer>.search:focus-within {
+  border-color: var(--accent);
+}
+
+.explorer>.search input::placeholder {
+  color: var(--secondary);
+  opacity: 1;
+}
+
+.sidebar-heading {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 2px 7px 7px;
+  flex-shrink: 0;
+}
+
+.sidebar-heading h2 {
+  margin: 0 auto 0 0;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.sidebar-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.sidebar-icon-button:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.sidebar-icon-button:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+.sidebar-filter-scope {
+  margin: -5px 8px 7px;
+  color: var(--secondary);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.explorer>.search input {
+  min-width: 0;
+  flex: 1;
+}
+
+.explorer>.search .sidebar-icon-button {
+  padding: 0 2px;
 }
 
 .tree-connection-header-row {
@@ -3534,9 +3588,8 @@ body.is-resizing-column * {
   align-items: center;
   position: relative;
   border-radius: 6px;
-  min-height: 28px;
+  min-height: 24px;
   background: transparent;
-  margin-bottom: 2px;
   padding-right: 2px;
   transition: background 120ms ease;
 }
@@ -3550,9 +3603,9 @@ body.is-resizing-column * {
   align-items: center;
   flex: 1;
   min-width: 0;
-  min-height: 28px;
-  padding: 3px 6px;
-  gap: 6px;
+  min-height: 24px;
+  padding: 2px 5px;
+  gap: 4px;
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -3562,12 +3615,6 @@ body.is-resizing-column * {
   user-select: none;
 }
 
-.tree-schema-arrow-placeholder {
-  width: 13px;
-  height: 13px;
-  flex-shrink: 0;
-}
-
 .tree-connection-icon {
   position: relative;
   display: flex;
@@ -3575,80 +3622,58 @@ body.is-resizing-column * {
   justify-content: center;
   width: 16px;
   height: 16px;
-  color: #3b82f6;
+  color: var(--secondary);
   flex-shrink: 0;
 }
 
-.dark .tree-connection-icon {
-  color: #60a5fa;
+.tree-connection-header-row.is-active-root {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
-.tree-connection-icon.is-closed {
-  color: var(--muted) !important;
+.tree-connection-header-row > .sidebar-icon-button {
+  margin-inline-end: 2px;
 }
 
-.tree-connection-status-badge {
-  font-size: 9px;
-  font-weight: 600;
-  padding: 1px 4px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--text) 8%, transparent);
-  color: var(--muted);
-  margin-left: 4px;
-  line-height: 1.2;
-}
-
-.tree-connection-header-row.is-closed {
-  opacity: 0.75;
-  background: transparent;
-}
-
-.tree-connection-header-row.is-closed:hover {
-  opacity: 0.9;
-  background: color-mix(in srgb, var(--text) 3%, transparent);
-}
-
-.tree-connection-label {
+.tree-connection-label,
+.saved-connection-label {
+  display: flex;
   flex: 1;
   min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tree-connection-label strong,
+.saved-connection-label strong,
+.saved-connection-label small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.tree-connection-label strong {
-  font-size: 11.5px;
-  font-weight: 700;
-  letter-spacing: -.1px;
+.tree-connection-label strong,
+.saved-connection-label strong {
   color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
 }
 
-.tree-connection-color-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  margin-left: auto;
-  flex-shrink: 0;
-  box-shadow: 0 0 4px color-mix(in srgb, currentColor 40%, transparent);
-  transition: transform 120ms ease;
+.saved-connection-label small {
+  color: var(--secondary);
+  font-size: 10px;
 }
 
-.tree-connection-header:hover .tree-connection-color-dot {
-  transform: scale(1.2);
+.table-list {
+  --tree-indent: 12px;
+  --tree-guide: color-mix(in srgb, var(--text) 13%, transparent);
 }
 
-.tree-connection-content {
-  margin-left: 6px;
-  padding-left: 6px;
-  border-left: 1px dashed color-mix(in srgb, var(--line) 80%, transparent);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-/* Database Node */
-.tree-database-group {
-  margin-bottom: 2px;
+.tree-connection-content,
+.tree-database-list,
+.tree-database-content,
+.tree-schema-content {
+  margin-inline-start: calc(var(--tree-indent) - 1px);
+  border-inline-start: 1px solid var(--tree-guide);
 }
 
 .tree-database-header-row {
@@ -3656,7 +3681,7 @@ body.is-resizing-column * {
   align-items: center;
   position: relative;
   border-radius: 6px;
-  min-height: 26px;
+  min-height: 24px;
 }
 
 .tree-database-header-row:hover {
@@ -3672,9 +3697,9 @@ body.is-resizing-column * {
   align-items: center;
   flex: 1;
   min-width: 0;
-  min-height: 26px;
-  padding: 3px 5px;
-  gap: 5px;
+  min-height: 24px;
+  padding: 2px 5px;
+  gap: 4px;
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -3705,7 +3730,7 @@ body.is-resizing-column * {
 }
 
 .tree-database-icon.is-active {
-  color: #0284c7;
+  color: var(--accent);
 }
 
 .dark .tree-database-icon.is-active {
@@ -3728,12 +3753,8 @@ body.is-resizing-column * {
 }
 
 .tree-database-content {
-  margin-left: 8px;
-  padding-left: 5px;
-  border-left: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
   display: flex;
   flex-direction: column;
-  gap: 2px;
 }
 
 /* Schemas section header inside database */
@@ -3747,25 +3768,6 @@ body.is-resizing-column * {
   letter-spacing: .4px;
   color: var(--muted);
   text-transform: uppercase;
-}
-
-.tree-new-schema-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--secondary);
-  cursor: pointer;
-  padding: 0;
-}
-
-.tree-new-schema-btn:hover {
-  background: color-mix(in srgb, var(--text) 10%, transparent);
-  color: var(--text);
 }
 
 .tree-schema-group {
@@ -3922,12 +3924,8 @@ body.is-resizing-column * {
 }
 
 .tree-schema-content {
-  margin-left: 9px;
-  padding-left: 5px;
-  border-left: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
   display: flex;
   flex-direction: column;
-  gap: 2px;
 }
 
 .tree-category-folder {
@@ -4250,6 +4248,8 @@ body.is-resizing-column * {
   flex-wrap: nowrap;
 }
 
+#titlebar-sql-actions .button.is-active[data-icon-only="true"],
+.titlebar-right .titlebar-files-toggle.is-active,
 .sql-workspace>.compact-toolbar .button.is-active[data-icon-only="true"] {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, transparent);
@@ -4349,7 +4349,6 @@ body.is-resizing-column * {
   margin-inline: 18px;
 }
 
-/* The connection selector is the single management entry point. */
 .connection-picker-trigger {
   max-width: 190px;
   gap: 6px;
@@ -4597,6 +4596,38 @@ body.is-resizing-column * {
   box-shadow: var(--menu-shadow);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
+}
+
+.saved-connections.connection-menu {
+  width: min(312px, calc(100vw - 16px));
+  min-width: 0;
+}
+
+.saved-connections .connection-menu-row {
+  align-items: center;
+}
+
+.saved-connections .connection-menu-choice {
+  border: 0;
+  background: transparent;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.saved-connections .connection-menu-choice:hover {
+  background: var(--hover);
+}
+
+.saved-connections .connection-menu-choice:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.saved-connections-empty {
+  margin: 9px 8px;
+  color: var(--secondary);
+  font-size: 12px;
 }
 
 .connection-menu-list {
@@ -6855,6 +6886,24 @@ body.is-resizing-column * {
   gap: 6px;
 }
 
+#titlebar-sql-actions:empty {
+  display: none;
+}
+
+#titlebar-sql-actions .sql-toolbar-actions {
+  flex-wrap: nowrap;
+  gap: 4px;
+}
+
+#titlebar-sql-actions .sql-validation-status:empty {
+  display: none;
+}
+
+#titlebar-sql-actions .sql-icon-button {
+  padding: 0;
+  flex-shrink: 0;
+}
+
 .sql-toolbar-group {
   display: inline-flex;
   align-items: center;
@@ -6954,18 +7003,19 @@ textarea,
 /* Results and messages use the same flat tab treatment as the editor. */
 .query-output-toolbar.unified-results-toolbar,
 .unified-results-toolbar {
-  height: 28px;
-  min-height: 28px;
+  height: 24px;
+  min-height: 24px;
   display: flex;
   align-items: stretch;
-  justify-content: space-between;
-  padding: 0 6px 0 0;
+  gap: 0;
+  padding: 0;
   background: var(--bg);
   border-bottom: 1px solid var(--line);
   overflow: hidden;
 }
 
-.unified-results-left-strip {
+.query-output-toolbar > .unified-results-left-strip {
+  gap: 0;
   display: flex;
   align-items: stretch;
   min-width: 0;
@@ -6980,7 +7030,7 @@ textarea,
   gap: 0;
   height: 100%;
   min-width: 0;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   padding: 0;
   overflow-x: auto;
   overflow-y: hidden;
@@ -6991,14 +7041,14 @@ textarea,
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 3px;
   height: 100%;
-  padding: 0 7px;
+  padding: 0 5px;
   margin: 0;
   border: 0;
   border-right: 1px solid var(--line);
   border-radius: 0;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 400;
   color: var(--secondary);
   background: transparent;
@@ -7348,10 +7398,16 @@ textarea,
   background: var(--hover);
 }
 
-/* Keep execution feedback local to Run/Stop instead of flashing all app chrome. */
-.app.is-working .app-header button:disabled,
-.app.is-working .compact-toolbar button:disabled {
+/* A temporary execution lock should not dim the surrounding controls. */
+.app.is-working .sql-toolbar-actions [data-execution-lock]:disabled,
+.app.is-working .explorer .sidebar-icon-button:disabled:not([data-unavailable]),
+.app.is-working .tree-connection-header:disabled,
+.app.is-working .sql-tabs button:disabled {
   opacity: 1;
+}
+
+.app.is-working .tree-database-header-row:not(.is-active):not(:hover):not(:focus-within) .tree-database-query:disabled {
+  opacity: 0;
 }
 
 .sql-stop-button {
@@ -7376,12 +7432,12 @@ textarea,
 }
 
 .sql-execution-control .sql-run-button {
-  width: auto;
+  width: 26px;
   min-width: 0;
   flex: 0 0 auto;
   height: 26px;
   min-height: 26px;
-  padding: 0 9px;
+  padding: 0;
   justify-content: center;
   gap: 5px;
   border: 1px solid transparent;
@@ -7397,9 +7453,10 @@ textarea,
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
-  width: 94px;
-  min-width: 94px;
-  padding: 0 8px;
+  flex: 0 0 auto;
+  min-width: 9ch;
+  margin-inline-start: 6px;
+  padding: 0 6px;
   border-left: 1px solid var(--line);
   color: var(--muted);
   font-size: 10px;
@@ -7415,6 +7472,8 @@ textarea,
   padding: 0;
 }
 
+#titlebar-sql-actions .sql-icon-button,
+.titlebar-right .titlebar-files-toggle,
 .sql-workspace>.compact-toolbar .sql-icon-button {
   width: 24px;
   min-width: 24px;
@@ -7673,28 +7732,6 @@ textarea,
   margin: 0;
 }
 
-.sidebar-new-connection-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  margin-top: 6px;
-  padding: 6px 12px;
-  font-size: 11.5px;
-  font-weight: 550;
-  border-radius: 6px;
-  border: 1px solid color-mix(in srgb, var(--line) 90%, transparent);
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
-  color: var(--accent);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.sidebar-new-connection-btn:hover {
-  background: color-mix(in srgb, var(--accent) 25%, transparent);
-  border-color: var(--accent);
-}
-
 /* VS Code–style seamless active tabs: the strip's bottom line is drawn as an
    inset shadow so the active tab (surface background, no bottom line) merges
    with the content below, while inactive tabs keep their own bottom edge. */
@@ -7717,4 +7754,359 @@ textarea,
 .unified-results-tabs [role="tab"][aria-selected="true"],
 .unified-results-toolbar .unified-messages-tab[aria-selected="true"] {
   box-shadow: none;
+}
+.activity-bar {
+  display: flex;
+  flex: 0 0 48px;
+  flex-direction: column;
+  background: color-mix(in srgb, var(--sidebar) 94%, var(--text));
+  border-inline-end: 1px solid var(--line);
+}
+
+.activity-bar > button,
+.activity-settings > summary {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 48px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--secondary);
+  cursor: pointer;
+}
+
+.activity-bar > button:hover,
+.activity-bar > button[aria-current],
+.activity-bar > button[aria-expanded="true"],
+.activity-settings > summary:hover,
+.activity-settings[open] > summary {
+  color: var(--text);
+}
+
+.activity-bar > button[aria-current] .sidebar-glyph {
+  outline: 4px solid color-mix(in srgb, var(--text) 6%, transparent);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.activity-bar:not(:has(.activity-search[aria-expanded="true"])) > button[aria-expanded="true"]::before,
+.activity-bar > .activity-search[aria-expanded="true"]::before {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 2px;
+  background: var(--accent);
+  content: "";
+}
+
+.activity-bar > button:focus-visible,
+.activity-settings > summary:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -3px;
+}
+
+.activity-settings {
+  margin-block-start: auto;
+}
+
+.activity-settings > div {
+  inset: auto auto 4px calc(100% + 4px);
+}
+
+.sidebar-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.sidebar-toolbar .sidebar-icon-button {
+  width: 23px;
+  min-height: 23px;
+  padding: 0;
+  color: var(--secondary);
+}
+
+.sidebar-glyph {
+  width: 18px;
+  height: 18px;
+  stroke-width: 1.4;
+}
+
+.sidebar-toolbar .sidebar-glyph {
+  width: 14px;
+  height: 14px;
+}
+
+.tree-database-folder {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 24px;
+  gap: 4px;
+  padding: 2px 5px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--secondary);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tree-database-folder:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.tree-folder-icon {
+  color: var(--secondary);
+}
+
+.tree-database-folder small {
+  margin-inline-start: auto;
+  color: var(--muted);
+}
+
+
+
+.tree-database-query {
+  margin-inline-end: 2px;
+}
+
+.tree-database-header-row:not(.is-active):not(:hover):not(:focus-within) .tree-database-query {
+  opacity: 0;
+}
+
+.tree-folder-icon {
+  display: grid;
+  place-items: center;
+  width: 15px;
+  flex-shrink: 0;
+}
+
+.table-list :is(.tree-connection-icon, .tree-database-icon, .tree-folder-icon) > svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.45;
+}
+
+.table-list :is(.tree-schema-arrow, .tree-category-arrow) > svg {
+  width: 12px;
+  height: 12px;
+  stroke-width: 1.5;
+}
+
+.table-list :is(.tree-connection-header-row, .tree-database-header-row, .tree-database-folder) {
+  transition: background-color 120ms ease;
+}
+
+.table-list :is(.tree-connection-header, .tree-database-header, .tree-database-folder):focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .tree-connection-header-row:not(:hover):not(:focus-within) > .sidebar-icon-button:not([aria-expanded="true"]) {
+    opacity: .55;
+  }
+}
+
+.system-terminal {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.system-terminal[hidden],
+.query-output-toolbar > .query-output-meta[hidden] {
+  display: none;
+}
+
+.system-terminal-screen {
+  flex: 1;
+  min-height: 0;
+  margin: 1px 8px 0;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.system-terminal-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.query-output-toolbar > .system-terminal-toolbar-slot {
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.system-terminal-tools {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.system-terminal-tools select {
+  max-width: 130px;
+  height: 20px;
+  padding: 0 4px;
+  border-color: transparent;
+  border-radius: 3px;
+  background: transparent;
+  font-size: 10px;
+}
+
+.system-terminal-tools select:hover {
+  background: var(--hover);
+}
+
+.system-terminal-tools .button {
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+}
+
+.system-terminal .xterm-helper-textarea:focus {
+  box-shadow: none;
+}
+
+.system-terminal .xterm .composition-view {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.sql-split.is-panel-expanded > :is(.sql-editor-pane, .sql-divider) {
+  display: none;
+}
+
+.query-output-toolbar .query-panel-toggle {
+  align-self: center;
+  width: 22px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  margin-inline-end: 2px;
+  flex-shrink: 0;
+}
+
+.system-terminal .xterm-viewport {
+  scrollbar-width: thin;
+  scrollbar-color: var(--muted) transparent;
+}
+
+.system-terminal .xterm-viewport::-webkit-scrollbar {
+  display: block;
+  width: 7px;
+}
+
+.system-terminal .xterm-viewport::-webkit-scrollbar-thumb {
+  border-radius: 6px;
+  background: var(--muted);
+}
+
+.sql-files-panel {
+  display: flex;
+  flex: 0 0 248px;
+  min-width: 0;
+  flex-direction: column;
+  border-inline-start: 1px solid var(--line);
+  background: var(--sidebar);
+  font-size: 12px;
+}
+
+.sql-files-panel header {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 34px;
+  padding-inline: 5px;
+  border-bottom: 1px solid var(--line);
+}
+
+.sql-files-panel header strong {
+  flex: 1;
+  padding-inline-start: 6px;
+  font-weight: 600;
+}
+
+.sql-files-panel button {
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.sql-files-panel header button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+}
+
+.sql-files-panel button:hover {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.sql-files-list {
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 5px;
+}
+
+.sql-files-list ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sql-files-list li > ul {
+  padding-inline-start: 13px;
+}
+
+.sql-files-list p {
+  margin: 8px;
+  color: var(--secondary);
+  overflow-wrap: anywhere;
+}
+
+.sql-file-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 24px;
+  padding-inline: 5px;
+  text-align: start;
+}
+
+.sql-file-row.sql-file-item {
+  padding-inline-start: 23px;
+}
+
+.sql-file-row svg {
+  flex-shrink: 0;
+}
+
+.sql-file-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sql-file-row[aria-expanded="true"] .sql-folder-chevron {
+  transform: rotate(90deg);
 }

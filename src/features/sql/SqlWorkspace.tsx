@@ -19,6 +19,7 @@ import {
   restoreSqlLayout,
 } from "./panes";
 import { useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   ZoomIn,
   ZoomOut,
@@ -28,8 +29,6 @@ import {
   Square,
   Columns2,
   ArrowLeftRight,
-  FolderOpen,
-  Download,
 } from "lucide-react";
 import type { SqlDialect } from "./data-types";
 import type { SqlTab, SqlLayout, DatabaseSchema } from "../../types/schema";
@@ -50,6 +49,7 @@ export interface TabContext {
   remote: boolean;
 }
 interface Props extends ResultEditing {
+  toolbarHost?: HTMLElement | null;
   connectionOptions?: { id: string; name: string }[];
   newTabSourceId?: string;
   newTabConnectionName?: string;
@@ -65,16 +65,13 @@ interface Props extends ResultEditing {
   onTabsChange: (tabs: SqlTab[], activeId: string, layout?: SqlLayout) => void;
   layout?: SqlLayout;
   onLayoutChange: (layout: SqlLayout) => void;
-  value: string;
-  onChange: (sql: string) => void;
-  onRun: (tabId?: string, sql?: string) => void;
+  onRun: (tabId: string, sql: string) => void;
   disabled: boolean;
   busy: boolean;
   timings?: Record<string, QueryTiming>;
   runningTabId?: string;
   dark: boolean;
   queryResults?: SqlResult[];
-  onSelection: (sql: string, tabId?: string) => void;
   allResults?: Record<string, SqlResult[]>;
   onSplit?: () => void;
   onMoveTab?: () => void;
@@ -86,6 +83,8 @@ interface Props extends ResultEditing {
 }
 
 function SqlPane({
+  toolbarHost,
+  showToolbar,
   tabs,
   autoFocus,
   newTabSourceId,
@@ -99,7 +98,6 @@ function SqlPane({
   busy,
   dark,
   queryResults,
-  onSelection,
   validate,
   validationSource,
   onCancel,
@@ -117,7 +115,7 @@ function SqlPane({
   getEditableResult,
   onSaveResult,
   onEditingResult,
-}: Props) {
+}: Props & { showToolbar: boolean; value: string; onChange: (sql: string) => void }) {
   const isRunning = runningTabId === activeId;
   const fontSize = useEditorZoom((state) => state.fontSize);
   const workspaceId = useStore((state) => state.workspace.id);
@@ -125,11 +123,15 @@ function SqlPane({
   const [view, updateView] = useSqlTabView(viewKey);
   const selection = view.selection;
   const hasSelection = !!selection.trim();
+  const sqlToRun = hasSelection ? selection : value;
   const [validationStatus, setValidationStatus] = useState("");
+  const [panelExpanded, setPanelExpanded] = useState(false);
   const ratio = view.ratio;
   const results = view.resultsVisible;
-  const setResults = (resultsVisible: boolean) =>
+  const setResults = (resultsVisible: boolean) => {
+    if (!resultsVisible) setPanelExpanded(false);
     updateView({ resultsVisible });
+  };
   const setRatio = (next: number | ((previous: number) => number)) =>
     updateView({ ratio: typeof next === "function" ? next(ratio) : next });
   const split = useRef<HTMLDivElement>(null);
@@ -157,11 +159,141 @@ function SqlPane({
     void saveSqlFile(target.name, target.sql);
   }
 
+  const toolbar = (
+    <div className="row sql-toolbar-actions" data-sql-tab-id={activeId}>
+      <span
+        className="sql-validation-status"
+        role="status"
+        title={
+          validationStatus ||
+          `${validationSource ?? "SQL"} checks SQL without executing it`
+        }
+      >
+        {validationStatus}
+      </span>
+      <div
+        className="sql-toolbar-group"
+        role="group"
+        aria-label="SQL view actions"
+      >
+        <Button
+          className="sql-icon-button"
+          aria-label="Zoom out SQL code"
+          title="Zoom out code (Ctrl/⌘ −)"
+          disabled={fontSize <= MIN_EDITOR_FONT_SIZE}
+          onClick={() => zoomEditor(-1)}
+        >
+          <ZoomOut size={14} />
+        </Button>
+        <Button
+          className="sql-zoom-reset"
+          aria-label={`SQL code font size ${fontSize}px. Reset zoom`}
+          title="Reset code zoom to 14px (Ctrl/⌘ 0)"
+          onClick={() => setEditorFontSize(DEFAULT_EDITOR_FONT_SIZE)}
+        >
+          {fontSize}px
+        </Button>
+        <Button
+          className="sql-icon-button"
+          aria-label="Zoom in SQL code"
+          title="Zoom in code (Ctrl/⌘ +)"
+          disabled={fontSize >= MAX_EDITOR_FONT_SIZE}
+          onClick={() => zoomEditor(1)}
+        >
+          <ZoomIn size={14} />
+        </Button>
+        {splitOpen && (
+          <Button
+            className="sql-icon-button"
+            title="Move tab to other pane"
+            onClick={onMoveTab}
+            disabled={busy}
+            data-execution-lock=""
+          >
+            <ArrowLeftRight size={14} />
+          </Button>
+        )}
+        <Button
+          title={splitOpen ? "Close SQL split" : "Split SQL editor"}
+          aria-pressed={!!splitOpen}
+          className={"sql-icon-button" + (splitOpen ? " is-active" : "")}
+          onClick={onSplit}
+          disabled={busy}
+          data-execution-lock=""
+        >
+          <Columns2 size={14} />
+        </Button>
+        <Button
+          title={results ? "Hide results" : "Show results"}
+          disabled={busy}
+          data-execution-lock=""
+          aria-pressed={results}
+          className={"sql-icon-button" + (results ? " is-active" : "")}
+          onClick={() => setResults(!results)}
+        >
+          <PanelBottom size={14} />
+        </Button>
+      </div>
+      <span className="sql-toolbar-divider" aria-hidden="true" />
+      <div
+        className="sql-execution-control"
+        role="group"
+        aria-label="Query execution"
+      >
+        <Button
+          title={
+            isRunning && onCancel
+              ? "Stop query"
+              : hasSelection
+                ? "Run selection"
+                : "Run SQL"
+          }
+          className={
+            "sql-run-button" +
+            (isRunning && onCancel ? " sql-stop-button" : "")
+          }
+          data-action={isRunning && onCancel ? "stop" : "run"}
+          aria-label={
+            isRunning && onCancel
+              ? "Stop query"
+              : hasSelection
+                ? "Run selection"
+                : "Run SQL"
+          }
+          aria-keyshortcuts={
+            isRunning ? undefined : "F5 Control+Enter Meta+Enter"
+          }
+          disabled={
+            isRunning
+              ? !onCancel || cancelPending
+              : disabled || busy || !sqlToRun.trim()
+          }
+          onClick={() => {
+            if (isRunning) {
+              onCancel?.();
+              return;
+            }
+            if (!results) setResults(true);
+            onRun(activeId, sqlToRun);
+          }}
+        >
+          {isRunning ? (
+            cancelPending || !onCancel ? (
+              <LoaderCircle className="spin" size={14} />
+            ) : (
+              <Square size={12} fill="currentColor" />
+            )
+          ) : (
+            <Play size={12} fill="currentColor" strokeWidth={0} />
+          )}
+        </Button>
+      </div>
+    </div>
+  );
+
   return (
-    <section
-      className="sql-workspace"
-      onFocusCapture={() => onSelection(selection)}
-    >
+    <section className="sql-workspace" data-sql-tab-id={activeId}>
+      {toolbarHost && showToolbar && createPortal(toolbar, toolbarHost)}
       <input
         ref={sqlFileInput}
         type="file"
@@ -191,160 +323,19 @@ function SqlPane({
           onOpenSqlFile={triggerOpenSqlFile}
           onSaveSqlFile={handleSaveSqlTab}
         />
-        <div className="row sql-toolbar-actions">
-          <span
-            className="sql-validation-status"
-            role="status"
-            title={
-              validationStatus ||
-              `${validationSource ?? "SQL"} checks SQL without executing it`
-            }
-          >
-            {validationStatus}
-          </span>
-          <div
-            className="sql-toolbar-group"
-            role="group"
-            aria-label="SQL file actions"
-          >
-            <Button
-              className="sql-icon-button"
-              title="Open SQL file (.sql)"
-              aria-label="Open SQL file"
-              disabled={busy}
-              onClick={() => triggerOpenSqlFile(activeId)}
-            >
-              <FolderOpen size={14} />
-            </Button>
-            <Button
-              className="sql-icon-button"
-              title="Save active SQL tab (.sql)"
-              aria-label="Save SQL file"
-              disabled={busy || !tabs.length}
-              onClick={() => handleSaveSqlTab()}
-            >
-              <Download size={14} />
-            </Button>
-          </div>
-          <span className="sql-toolbar-divider" aria-hidden="true" />
-          <div
-            className="sql-toolbar-group"
-            role="group"
-            aria-label="SQL view actions"
-          >
-            <Button
-              className="sql-icon-button"
-              aria-label="Zoom out SQL code"
-              title="Zoom out code (Ctrl/⌘ −)"
-              disabled={fontSize <= MIN_EDITOR_FONT_SIZE}
-              onClick={() => zoomEditor(-1)}
-            >
-              <ZoomOut size={14} />
-            </Button>
-            <Button
-              className="sql-zoom-reset"
-              aria-label={`SQL code font size ${fontSize}px. Reset zoom`}
-              title="Reset code zoom to 14px (Ctrl/⌘ 0)"
-              onClick={() => setEditorFontSize(DEFAULT_EDITOR_FONT_SIZE)}
-            >
-              {fontSize}px
-            </Button>
-            <Button
-              className="sql-icon-button"
-              aria-label="Zoom in SQL code"
-              title="Zoom in code (Ctrl/⌘ +)"
-              disabled={fontSize >= MAX_EDITOR_FONT_SIZE}
-              onClick={() => zoomEditor(1)}
-            >
-              <ZoomIn size={14} />
-            </Button>
-            {splitOpen && (
-              <Button
-                className="sql-icon-button"
-                title="Move tab to other pane"
-                onClick={onMoveTab}
-                disabled={busy}
-              >
-                <ArrowLeftRight size={14} />
-              </Button>
-            )}
-            <Button
-              title={splitOpen ? "Close SQL split" : "Split SQL editor"}
-              aria-pressed={!!splitOpen}
-              className={"sql-icon-button" + (splitOpen ? " is-active" : "")}
-              onClick={onSplit}
-              disabled={busy}
-            >
-              <Columns2 size={14} />
-            </Button>
-            <Button
-              title={results ? "Hide results" : "Show results"}
-              disabled={busy}
-              aria-pressed={results}
-              className={"sql-icon-button" + (results ? " is-active" : "")}
-              onClick={() => setResults(!results)}
-            >
-              <PanelBottom size={14} />
-            </Button>
-          </div>
-          <span className="sql-toolbar-divider" aria-hidden="true" />
-          <div
-            className="sql-execution-control"
-            role="group"
-            aria-label="Query execution"
-          >
-            <Button
-              title={
-                isRunning && onCancel
-                  ? "Stop the running query and skip remaining batches"
-                  : validationSource === "SQL Server"
-                    ? "Run selected T-SQL or the whole tab (F5 or Ctrl/⌘+Enter). Use GO on its own line to separate batches."
-                    : "Run selected SQL or the whole tab (F5 or Ctrl/⌘+Enter). Separate SELECT queries with a blank line or semicolon."
-              }
-              className={
-                "sql-run-button" +
-                (isRunning && onCancel ? " sql-stop-button" : "")
-              }
-              data-action={isRunning && onCancel ? "stop" : "run"}
-              aria-label={isRunning && onCancel ? "Stop query" : "Run SQL"}
-              disabled={isRunning ? !onCancel || cancelPending : disabled}
-              onClick={() => {
-                if (isRunning) {
-                  onCancel?.();
-                  return;
-                }
-                if (!results) setResults(true);
-                onRun(activeId, hasSelection ? selection : value);
-              }}
-            >
-              {isRunning ? (
-                cancelPending || !onCancel ? (
-                  <LoaderCircle className="spin" size={14} />
-                ) : (
-                  <Square size={12} fill="currentColor" />
-                )
-              ) : (
-                <Play size={12} fill="currentColor" strokeWidth={0} />
-              )}
-              <span>
-                {isRunning && onCancel
-                  ? cancelPending
-                    ? "Stopping…"
-                    : "Stop"
-                  : "Run"}
-              </span>
-            </Button>
-          </div>
-        </div>
+        {!toolbarHost && toolbar}
       </div>
-      <div className="sql-split" ref={split}>
+      <div
+        className={results && panelExpanded ? "sql-split is-panel-expanded" : "sql-split"}
+        ref={split}
+      >
         <div
           className="sql-editor-pane"
           style={{ flex: results ? `0 0 ${ratio * 100}%` : "1 1 100%" }}
         >
           <SqlEditor
             viewKey={viewKey}
-            autoFocus={autoFocus}
+            autoFocus={autoFocus && !(results && panelExpanded)}
             readOnly={!!tabs.find((t) => t.id === activeId)?.locked}
             schema={tabContext?.schema}
             dialect={tabContext?.dialect}
@@ -352,10 +343,7 @@ function SqlPane({
             validate={validate}
             validationSource={validationSource}
             onValidation={setValidationStatus}
-            onSelection={(sql) => {
-              updateView({ selection: sql });
-              onSelection(sql);
-            }}
+            onSelection={(selection) => updateView({ selection })}
             value={value}
             onChange={onChange}
             dark={dark}
@@ -416,6 +404,8 @@ function SqlPane({
               <span />
             </div>
             <QueryResults
+              panelExpanded={panelExpanded}
+              onTogglePanel={() => setPanelExpanded((expanded) => !expanded)}
               timing={timings?.[activeId]}
               results={queryResults ?? []}
               tabId={activeId}
@@ -479,6 +469,7 @@ export function SqlWorkspace(props: Props) {
         const tab =
           paneTabs.find((item) => item.id === group.activeId) ?? paneTabs[0];
         if (!tab) return null;
+        const tabContext = props.getTabContext?.(tab.id) ?? props.tabContext;
         const isPaneActive = group.ids.includes(props.activeId);
         return (
           <div
@@ -511,16 +502,19 @@ export function SqlWorkspace(props: Props) {
           >
             <SqlPane
               {...props}
+              showToolbar={
+                props.runningTabId ? props.runningTabId === tab.id : isPaneActive
+              }
               tabs={paneTabs}
               autoFocus={focusTabId === tab.id || props.activeId === tab.id}
-              tabContext={props.getTabContext?.(tab.id) ?? props.tabContext}
+              tabContext={tabContext}
               validate={
                 props.validateTab
                   ? (sql) => props.validateTab!(tab.id, sql)
                   : props.validate
               }
               validationSource={
-                props.getTabContext?.(tab.id).label ?? props.validationSource
+                tabContext?.label ?? props.validationSource
               }
               activeId={tab.id}
               value={tab.sql}
@@ -582,7 +576,6 @@ export function SqlWorkspace(props: Props) {
                   tab.id,
                 )
               }
-              onSelection={(sql) => props.onSelection(sql, tab.id)}
             />
             {splitOpen && index === 0 && (
               <div

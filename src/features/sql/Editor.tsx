@@ -9,7 +9,7 @@ import {
 import { sqlEditorView, rememberSqlEditorView } from "./view-state";
 import type { DatabaseSchema } from "../../types/schema";
 import type { SqlDialect } from "./data-types";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Editor, { loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor/editor/editor.api";
 import "monaco-editor/languages/definitions/sql/register";
@@ -138,6 +138,7 @@ export function SqlEditor({
     const model = editorInstance?.getModel();
     if (!model) return;
     let cancelCheck: (() => void) | undefined;
+    let diagnosticTimer: number | undefined;
     const markers = (items: SqlDiagnostic[], source: string) =>
       items.map((item) => {
         const length = model.getValueLength();
@@ -204,9 +205,14 @@ export function SqlEditor({
       );
     };
     check();
-    const changes = model.onDidChangeContent(check);
+    const changes = model.onDidChangeContent(() => {
+      cancelCheck?.();
+      window.clearTimeout(diagnosticTimer);
+      diagnosticTimer = window.setTimeout(check, 250);
+    });
     return () => {
       changes.dispose();
+      window.clearTimeout(diagnosticTimer);
       cancelCheck?.();
       if (!model.isDisposed()) {
         monaco.editor.setModelMarkers(model, "sql-validation", []);
@@ -232,6 +238,42 @@ export function SqlEditor({
     }
   }, [viewKey, autoFocus, editorInstance]);
 
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const options = useMemo<monaco.editor.IStandaloneEditorConstructionOptions>(
+    () => ({
+      contextmenu: false,
+      readOnly,
+      domReadOnly: readOnly,
+      renderValidationDecorations: "on",
+      hover: { enabled: "on" },
+      minimap: { enabled: false },
+      fontSize,
+      cursorBlinking: reduceMotion ? "solid" : "smooth",
+      cursorSmoothCaretAnimation: reduceMotion ? "off" : "explicit",
+      mouseWheelZoom: false,
+      scrollbar: {
+        verticalScrollbarSize: 8,
+        horizontalScrollbarSize: 8,
+        useShadows: false,
+      },
+      padding: { top: 12, bottom: 12 },
+      scrollBeyondLastLine: false,
+      scrollBeyondLastColumn: 0,
+      automaticLayout: true,
+      wordWrap: "off",
+      editContext: false,
+      quickSuggestions: { other: true, comments: false, strings: false },
+      suggestOnTriggerCharacters: true,
+      tabCompletion: "on",
+      snippetSuggestions: "top",
+      acceptSuggestionOnEnter: "on",
+      wordBasedSuggestions: "off",
+      suggest: { showWords: false, preview: true },
+    }),
+    [fontSize, readOnly, reduceMotion],
+  );
+
   return (
     <Editor
       path={viewKey ? `/sql/${encodeURIComponent(viewKey)}.sql` : "/sql/default.sql"}
@@ -254,9 +296,9 @@ export function SqlEditor({
         });
         const node = editor.getDomNode();
         const unbindWheelZoom = node ? bindEditorWheelZoom(node) : undefined;
-        let scrollSaveTimer = 0;
+        let viewSaveTimer = 0;
         editor.onDidDispose(() => {
-          if (scrollSaveTimer) window.clearTimeout(scrollSaveTimer);
+          if (viewSaveTimer) window.clearTimeout(viewSaveTimer);
           zoomKeys.dispose();
           unbindWheelZoom?.();
         });
@@ -269,10 +311,11 @@ export function SqlEditor({
             rememberSqlEditorView(key, editor.saveViewState());
         };
         const scheduleSaveView = () => {
-          if (scrollSaveTimer) window.clearTimeout(scrollSaveTimer);
-          scrollSaveTimer = window.setTimeout(() => {
-            scrollSaveTimer = 0;
-            saveView();
+          const model = editor.getModel();
+          if (viewSaveTimer) window.clearTimeout(viewSaveTimer);
+          viewSaveTimer = window.setTimeout(() => {
+            viewSaveTimer = 0;
+            if (editor.getModel() === model) saveView();
           }, 180);
         };
         const publishSelection = () => {
@@ -283,7 +326,7 @@ export function SqlEditor({
               ? (editor.getModel()?.getValueInRange(selection) ?? "")
               : "",
           );
-          saveView();
+          scheduleSaveView();
         };
         publishSelection();
         editor.onDidChangeCursorSelection(publishSelection);
@@ -349,34 +392,7 @@ export function SqlEditor({
           },
         );
       }}
-      options={{
-        contextmenu: false,
-        readOnly,
-        domReadOnly: readOnly,
-        renderValidationDecorations: "on",
-        hover: { enabled: "on" },
-        minimap: { enabled: false },
-        fontSize,
-        mouseWheelZoom: false,
-        scrollbar: {
-          verticalScrollbarSize: 8,
-          horizontalScrollbarSize: 8,
-          useShadows: false,
-        },
-        padding: { top: 12, bottom: 12 },
-        scrollBeyondLastLine: false,
-        scrollBeyondLastColumn: 0,
-        automaticLayout: true,
-        wordWrap: "off",
-        editContext: false,
-        quickSuggestions: { other: true, comments: false, strings: false },
-        suggestOnTriggerCharacters: true,
-        tabCompletion: "on",
-        snippetSuggestions: "top",
-        acceptSuggestionOnEnter: "on",
-        wordBasedSuggestions: "off",
-        suggest: { showWords: false, preview: true },
-      }}
+      options={options}
     />
   );
 }

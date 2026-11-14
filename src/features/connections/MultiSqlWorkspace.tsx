@@ -1,5 +1,4 @@
 import { useQueryTimings } from "../sql/QueryTimer";
-import { updateSqlTabView } from "../sql/view-state";
 import { editableResult } from "../sql/editable-result";
 import { saveQueryResult } from "./save-query-result";
 import { useSqlResults } from "../sql/result-state";
@@ -8,7 +7,7 @@ import {
   withDatabaseSession,
   ensureDatabaseSession,
 } from "./databases";
-import { useEffect, useRef, useState, startTransition, type MutableRefObject } from "react";
+import { useEffect, useRef, useState, startTransition } from "react";
 import type { WorkspaceDefinition, WorkspaceSource } from "../../types/schema";
 import { useStore } from "../schema/store";
 import { SqlWorkspace } from "../sql/SqlWorkspace";
@@ -41,22 +40,21 @@ import {
 } from "./sources";
 export function MultiSqlWorkspace({
   workspace: w,
+  toolbarHost,
   dark,
   busy,
   onBusy,
-  runRef,
 }: {
   workspace: WorkspaceDefinition;
+  toolbarHost: HTMLElement | null;
   dark: boolean;
   busy: boolean;
   onBusy: (value: boolean) => void;
-  runRef: MutableRefObject<() => void>;
 }) {
   const edit = useStore((state) => state.edit);
   const [results, setResults, resultContexts] = useSqlResults(w.id);
   const [error, setError] = useState("");
   const revision = useSessionRevision();
-  const selection = useRef({ tabId: "", sql: "" });
   const running = useRef(false);
   const executionId = useRef(0);
   const [queryRunning, setQueryRunning] = useState(false);
@@ -107,18 +105,11 @@ export function MultiSqlWorkspace({
     if (!tab) throw Error("SQL tab was closed.");
     return tabSource(w, tab);
   }
-  async function run(tabId = activeSqlTab(w).id, suppliedSql?: string) {
-    if (busy || running.current) return;
+  async function run(tabId: string, text: string) {
+    if (busy || running.current || !text.trim()) return;
     const tab = sqlTabs(w).find((tab) => tab.id === tabId);
     if (!tab) return;
-    updateSqlTabView(`${w.id}:${tab.id}`, { resultsVisible: true });
     const source = sourceFor(tabId);
-    const text =
-      (suppliedSql && suppliedSql.trim() ? suppliedSql : undefined) ??
-      (selection.current.tabId === tab.id && selection.current.sql.trim()
-        ? selection.current.sql
-        : tab.sql);
-    if (!text.trim()) return;
     queryTimings.start(tab.id);
     running.current = true;
     executionId.current++;
@@ -210,9 +201,6 @@ export function MultiSqlWorkspace({
       onBusy(false);
     }
   }
-  runRef.current = () => {
-    void run();
-  };
   return (
     <section className="multi-sql-workspace">
       {error && (
@@ -221,6 +209,7 @@ export function MultiSqlWorkspace({
         </div>
       )}
       <SqlWorkspace
+        toolbarHost={toolbarHost}
         tabs={sqlTabs(w)}
         activeId={activeSqlTab(w).id}
         layout={w.sqlLayout}
@@ -237,16 +226,6 @@ export function MultiSqlWorkspace({
             });
           })
         }
-        value={activeSqlTab(w).sql}
-        onChange={(sql) => {
-          edit((draft) => {
-            const tabs = sqlTabs(draft);
-            const activeId = activeSqlTab(draft).id;
-            const target = tabs.find((t) => t.id === activeId);
-            if (target) target.sql = sql;
-            setSqlTabs(draft, tabs, activeId);
-          });
-        }}
         onRun={(tabId, sql) => void run(tabId, sql)}
         disabled={busy}
         runningTabId={queryTimings.runningTabId}
@@ -288,9 +267,6 @@ export function MultiSqlWorkspace({
             );
           }),
         )}
-        onSelection={(sql, tabId) => {
-          selection.current = { tabId: tabId ?? activeSqlTab(w).id, sql };
-        }}
         newTabSourceId={w.activeSourceId ?? sources[0].id}
         newTabConnectionName={(() => {
           const source =
@@ -371,9 +347,7 @@ export function MultiSqlWorkspace({
                 edit((draft) => updateSource(draft, root.id, { databases }));
             })
             .catch((e) => {
-              if (e instanceof NeedsConnection)
-                requestConnection(w.id, source.id);
-              else setError(pgError(e));
+              if (!(e instanceof NeedsConnection)) setError(pgError(e));
             });
         }}
         onTabDatabaseChange={(tabId, database) => {
@@ -384,7 +358,6 @@ export function MultiSqlWorkspace({
           });
           const source = sourceFor(tabId);
           const root = connectionRoot(w, source);
-          selection.current = { tabId, sql: "" };
           edit((draft) => {
             const sourceId = attachDatabase(draft, root.id, database);
             setSqlTabs(
@@ -398,30 +371,8 @@ export function MultiSqlWorkspace({
             );
             syncActiveSqlSource(draft);
           });
-          const current = useStore.getState().workspace;
-          const target = tabSource(
-            current,
-            sqlTabs(current).find((tab) => tab.id === tabId)!,
-          );
-          void withDatabaseSession(current, target, (session) =>
-            remoteClient(target.connection!.engine).refresh(session.sessionId),
-          )
-            .then((catalog) => {
-              if (useStore.getState().workspace.id === w.id)
-                edit((draft) =>
-                  updateSource(draft, target.id, {
-                    schema: catalogSchema(catalog),
-                  }),
-                );
-            })
-            .catch((e) => {
-              if (e instanceof NeedsConnection)
-                requestConnection(w.id, target.id);
-              else setError(pgError(e));
-            });
         }}
         onTabConnectionChange={(tabId, sourceId) => {
-          selection.current = { tabId, sql: "" };
           setResults((previous) => {
             const next = { ...previous };
             delete next[tabId];

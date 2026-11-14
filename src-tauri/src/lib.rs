@@ -2,12 +2,31 @@ mod columns;
 mod grid;
 mod mssql;
 mod postgres;
+mod sql_files;
+mod terminal;
+use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(postgres::PgState::default())
         .manage(mssql::MsState::default())
+        .manage(terminal::TerminalState::default())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                window.state::<terminal::TerminalState>().close_all();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            terminal::terminal_open,
+            terminal::terminal_profiles,
+            terminal::terminal_write,
+            terminal::terminal_resize,
+            terminal::terminal_close,
+            sql_files::sql_folder,
+            sql_files::list_sql_folder,
+            sql_files::read_sql_file,
+            sql_files::choose_sql_folder,
+            sql_files::autosave_sql_files,
             mssql::ms_connect,
             mssql::ms_databases,
             mssql::ms_open_database,

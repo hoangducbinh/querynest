@@ -32,14 +32,13 @@ import {
   connectionRoot,
   databaseSources,
   ensureSources,
-  sourceSessionKey,
   tabSource,
   updateSource,
   workspaceSources,
 } from "../connections/sources";
-import { listDatabases } from "../connections/databases";
+import { isServerConnected, listDatabases } from "../connections/databases";
 import {
-  getSession,
+  requestConnection,
   useSessionRevision,
 } from "../connections/sessions";
 import { isTauri } from "../postgres/client";
@@ -238,13 +237,6 @@ export function QueryTabs({
     };
   }
 
-  function isRootConnected(root: (typeof rootSources)[number]) {
-    return (
-      !root.connection ||
-      !!getSession(sourceSessionKey(workspace.id, root.id), root.connection)
-    );
-  }
-
   function discoverForTab(tab: SqlTab) {
     if (onDiscoverTabDatabases) {
       onDiscoverTabDatabases(tab.id);
@@ -355,6 +347,7 @@ export function QueryTabs({
       name: candidate,
       sql: tab.sql,
       sourceId: tab.sourceId,
+      disconnectedFrom: tab.disconnectedFrom,
     };
     const idx = tabs.findIndex((item) => item.id === tab.id);
     const next = [...tabs];
@@ -562,7 +555,6 @@ export function QueryTabs({
               event.stopPropagation();
               if (busy) return;
               setDbFilter("");
-              discoverForTab(tab);
               const x = Math.min(event.clientX, window.innerWidth - 240);
               const y = Math.min(event.clientY, window.innerHeight - 310);
               setContextMenu({
@@ -814,6 +806,19 @@ export function QueryTabs({
 
           <hr />
 
+          {contextInfo.isRemote && !isServerConnected(workspace, contextInfo.root) && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setContextMenu(null);
+                requestConnection(workspace.id, contextInfo.source.id, "connect");
+              }}
+            >
+              <span className="sql-tab-ctx-item">Connect this tab</span>
+            </button>
+          )}
+
           <button
             type="button"
             role="menuitem"
@@ -848,7 +853,7 @@ export function QueryTabs({
               {rootSources.map((src) => {
                 const label = src.name || "Database";
                 const isSelected = src.id === contextInfo.root.id;
-                const ready = isRootConnected(src);
+                const ready = isServerConnected(workspace, src);
                 return (
                   <button
                     key={src.id}
@@ -856,9 +861,10 @@ export function QueryTabs({
                     role="menuitemradio"
                     aria-checked={isSelected}
                     className={isSelected ? "is-selected" : undefined}
-                    onClick={() =>
-                      handleChangeTabConnection(contextTab.id, src.id)
-                    }
+                    onClick={() => {
+                      if (isSelected) setContextMenu(null);
+                      else handleChangeTabConnection(contextTab.id, src.id);
+                    }}
                   >
                     <span className="sql-tab-ctx-check">
                       {isSelected && <Check size={11} />}
@@ -885,7 +891,7 @@ export function QueryTabs({
             }
             onClick={() => {
               if (!contextInfo.isRemote) return;
-              discoverForTab(contextTab);
+              if (contextMenu.section !== "database") discoverForTab(contextTab);
               setContextMenu((prev) =>
                 prev
                   ? {

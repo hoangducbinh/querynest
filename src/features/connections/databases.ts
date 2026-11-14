@@ -17,6 +17,24 @@ import {
 } from "./sessions";
 import { remoteClient } from "./client";
 
+export function isServerConnected(
+  workspace: WorkspaceDefinition,
+  root: WorkspaceSource,
+) {
+  const config = root.connection;
+  if (!config) return false;
+  return (
+    databaseSources(workspace, root.id).some(
+      (source) =>
+        source.connection &&
+        getSession(sourceSessionKey(workspace.id, source.id), source.connection),
+    ) ||
+    profileSessions(root.connectionId).some(
+      (session) => session.connected !== false && sameServer(session.config, config),
+    )
+  );
+}
+
 const opening = new Map<string, Promise<void>>();
 export async function ensureDatabaseSession(
   w: WorkspaceDefinition,

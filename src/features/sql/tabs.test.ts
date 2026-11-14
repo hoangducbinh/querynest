@@ -182,7 +182,6 @@ it("applies the new-tab connection only to created tab IDs, including replacemen
     id: "new",
     name: "query.sql",
     sql: "",
-    sourceId: "first",
   };
   expect(bindNewTabs([edited, replacement], [old], "sidebar")).toEqual([
     edited,
@@ -191,5 +190,14 @@ it("applies the new-tab connection only to created tab IDs, including replacemen
   expect(bindNewTabs([edited, replacement], [old])).toEqual([
     edited,
     replacement,
+  ]);
+});
+
+it("keeps the original connection when duplicating a tab on another server", () => {
+  const active = { id: "active", name: "active.sql", sql: "", sourceId: "a" };
+  const copy = { id: "copy", name: "copy.sql", sql: "SELECT 1", sourceId: "b" };
+  expect(bindNewTabs([active, copy], [active], active.sourceId)).toEqual([
+    active,
+    copy,
   ]);
 });

@@ -1,10 +1,12 @@
+import { isTauri } from "@tauri-apps/api/core";
 import { QueryTimer, type QueryTiming } from "./QueryTimer";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Rows3,
   ChevronDown,
   ChevronRight,
   Maximize2,
+  Minimize2,
 } from "lucide-react";
 import {
   useHorizontalWheelScroll,
@@ -24,6 +26,8 @@ import {
 } from "./ResultSetView";
 import type { SqlTabView } from "./view-state";
 
+const SystemTerminal = lazy(() => import("./SystemTerminal"));
+
 export interface ResultEditing {
   getEditableResult?: (
     tabId: string,
@@ -40,6 +44,8 @@ export interface ResultEditing {
 
 export function QueryResults({
   results,
+  panelExpanded,
+  onTogglePanel,
   timing,
   tabId,
   viewKey,
@@ -53,6 +59,8 @@ export function QueryResults({
   onEditingResult,
 }: ResultEditing & {
   results: SqlResult[];
+  panelExpanded?: boolean;
+  onTogglePanel?: () => void;
   timing?: QueryTiming;
   tabId: string;
   viewKey: string;
@@ -62,6 +70,9 @@ export function QueryResults({
   schema?: DatabaseSchema;
   dialect?: SqlDialect;
 }) {
+  const [terminalStarted, setTerminalStarted] = useState(false);
+  const [terminalToolbar, setTerminalToolbar] = useState<HTMLDivElement | null>(null);
+  const [terminalVisible, setTerminalVisible] = useState(false);
   const [dirtySet, setDirtySet] = useState<Set<number>>(new Set());
   const [stackRowLimits, setStackRowLimits] = useState<Record<number, number>>(
     {},
@@ -226,36 +237,37 @@ export function QueryResults({
   useHorizontalWheelScroll(resultsTabsRef);
 
   useEffect(() => {
-    if (mode !== "messages") {
+    if (!terminalVisible && mode !== "messages") {
       scrollActiveTabIntoView(
         resultsTabsRef.current,
         '[role="tab"][aria-selected="true"]',
       );
     }
-  }, [selected, mode]);
+  }, [selected, mode, terminalVisible]);
 
   return (
     <div className="sql-results-pane" aria-busy={busy}>
       <div className="query-output-toolbar unified-results-toolbar">
-        <div className="unified-results-left-strip">
+        <div className="unified-results-left-strip" role="tablist" aria-label="Query output">
           <div
             ref={resultsTabsRef}
             className="unified-results-tabs"
-            role="tablist"
-            aria-label="Query results"
           >
             {results.length ? (
               results.map((result, index) => (
                 <button
                   role="tab"
                   key={index}
-                  aria-selected={mode !== "messages" && index === selected}
+                  aria-selected={!terminalVisible && mode !== "messages" && index === selected}
                   className={result.error ? "is-error-tab" : undefined}
                   title={result.sql}
                   disabled={
                     hasDirty && (mode === "messages" || index !== selected)
                   }
-                  onClick={() => selectResultTab(index)}
+                  onClick={() => {
+                    setTerminalVisible(false);
+                    selectResultTab(index);
+                  }}
                 >
                   <span>
                     {mode === "all"
@@ -267,9 +279,12 @@ export function QueryResults({
             ) : (
               <button
                 role="tab"
-                aria-selected={mode !== "messages"}
+                aria-selected={!terminalVisible && mode !== "messages"}
                 disabled={hasDirty}
-                onClick={() => updateView({ resultsMode: "tabs" })}
+                onClick={() => {
+                  setTerminalVisible(false);
+                  updateView({ resultsMode: "tabs" });
+                }}
               >
                 <span>Results</span>
               </button>
@@ -278,19 +293,36 @@ export function QueryResults({
 
           <button
             role="tab"
-            aria-selected={mode === "messages"}
+            aria-selected={!terminalVisible && mode === "messages"}
             className={
               "unified-messages-tab" + (hasError ? " is-error-tab" : "")
             }
             disabled={hasDirty}
-            onClick={() => updateView({ resultsMode: "messages" })}
+            onClick={() => {
+              setTerminalVisible(false);
+              updateView({ resultsMode: "messages" });
+            }}
           >
             <span>Messages</span>
             {hasError && <span className="status-dot amber" />}
           </button>
+          {isTauri() && (
+            <button
+              role="tab"
+              aria-selected={terminalVisible}
+              className="unified-messages-tab"
+              disabled={hasDirty}
+              onClick={() => {
+                setTerminalStarted(true);
+                setTerminalVisible(true);
+              }}
+            >
+              <span>Terminal</span>
+            </button>
+          )}
         </div>
 
-        <div className="query-output-meta">
+        <div className="query-output-meta" hidden={terminalVisible}>
           {hasDirty ? (
             <span className="muted">
               Apply or discard changes before switching
@@ -327,11 +359,31 @@ export function QueryResults({
               <span>Stack</span>
             </Button>
           )}
-          <QueryTimer timing={timing} />
         </div>
+        {terminalVisible && <div className="system-terminal-toolbar-slot" ref={setTerminalToolbar} />}
+        <QueryTimer timing={timing} />
+        {onTogglePanel && (
+          <Button
+            className="query-panel-toggle"
+            title={panelExpanded ? "Restore panel size" : "Expand panel"}
+            aria-pressed={panelExpanded}
+            onClick={onTogglePanel}
+          >
+            {panelExpanded ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+          </Button>
+        )}
       </div>
 
-      {mode === "messages" ? (
+      {terminalStarted && (
+        <Suspense fallback={terminalVisible ? <div role="status">Loading terminal…</div> : null}>
+          <SystemTerminal
+            visible={terminalVisible}
+            toolbarHost={terminalToolbar}
+            panelExpanded={panelExpanded}
+          />
+        </Suspense>
+      )}
+      {terminalVisible ? null : mode === "messages" ? (
         <pre
           className="query-messages"
           tabIndex={0}

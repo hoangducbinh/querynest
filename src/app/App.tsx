@@ -1,3 +1,5 @@
+import { SQL_FILE_DRAG_TYPE, SqlFilesPanel } from "../features/sql/SqlFilesPanel";
+import { useSqlAutosave } from "../features/sql/use-sql-autosave";
 import { installRunShortcut } from "./run-shortcut";
 import { SnippetSettings } from "../features/sql/SnippetSettings";
 import { useLoadSnippetPreferences } from "../features/sql/snippet-preferences";
@@ -6,6 +8,7 @@ import {
   desktopPlatform,
   useDesktopChrome,
 } from "../lib/platform/desktop-chrome";
+import { SavedConnections } from "../features/connections/SavedConnections";
 import { ConnectionController } from "../features/connections/ConnectionController";
 import { MultiSqlWorkspace } from "../features/connections/MultiSqlWorkspace";
 import {
@@ -22,19 +25,26 @@ import {
   updateSource,
   syncActiveSqlSource,
 } from "../features/connections/sources";
-import { listDatabases, ensureDatabaseSession } from "../features/connections/databases";
+import { listDatabases, ensureDatabaseSession, isServerConnected } from "../features/connections/databases";
 import { catalogSchema } from "../features/postgres/model";
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { restoreSqlLayout, updatePaneTabs } from "../features/sql/panes";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   invalidateSession,
   requestConnection,
   getSession,
+  disconnectProfile,
+  useSessionRevision,
 } from "../features/connections/sessions";
 import { readDarkAppearance, saveDarkAppearance } from "./appearance";
 import {
   Braces,
+  Files,
+  Folder,
+  FolderOpen,
+  Search,
+  Settings,
   Check,
   ChevronDown,
   ChevronRight,
@@ -44,9 +54,7 @@ import {
   KeyRound,
   Link2,
   Moon,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Search,
+  PanelRight,
   Sun,
   Table2,
   Terminal,
@@ -137,6 +145,8 @@ export default function App() {
   useLoadSnippetPreferences();
   const [abbreviations, setAbbreviations] = useState(false);
   const { workspace: w, edit, load } = useStore();
+  const [sqlFilesOpen, setSqlFilesOpen] = useState(true);
+  const [sqlToolbarHost, setSqlToolbarHost] = useState<HTMLDivElement | null>(null);
   const [mode, setMode] = useState<Mode>("sql");
   useLayoutEffect(() => {
     if (mode !== "sql" || !w.sources) return;
@@ -146,18 +156,23 @@ export default function App() {
   }, [mode]);
 
   const [dataTable, setDataTable] = useState("");
+  const [sidebarView, setSidebarView] = useState<"explorer" | "search" | null>("explorer");
+  const searchOpen = sidebarView === "search";
+  const sidebarVisible = sidebarView !== null;
   const [search, setSearch] = useState("");
-  const needle = search.trim().toLowerCase();
+  const deferredSearch = useDeferredValue(search);
+  const needle = search.trim() ? deferredSearch.trim().toLowerCase() : "";
   const [openedSchemas, setOpenedSchemas] = useState<Record<string, boolean>>({});
   const [loadingSchemas, setLoadingSchemas] = useState<Record<string, boolean>>({});
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
   const [sidebarMenu, setSidebarMenu] = useState<SidebarContextMenuState | null>(null);
+  const sidebarMenuTrigger = useRef<HTMLButtonElement | null>(null);
   const sidebarMenuRef = useRef<HTMLDivElement>(null);
   const tableList = useRef<HTMLDivElement>(null);
 
-  const [openConnections, setOpenConnections] = useState<Record<string, boolean>>({});
-  const [closedConnections, setClosedConnections] = useState<Record<string, boolean>>({});
+  const sessionRevision = useSessionRevision();
   const [collapsedConnections, setCollapsedConnections] = useState<Record<string, boolean>>({});
+  const [collapsedDatabaseFolders, setCollapsedDatabaseFolders] = useState<Record<string, boolean>>({});
   const [openDatabases, setOpenDatabases] = useState<Record<string, boolean>>({});
   const [loadingDatabases, setLoadingDatabases] = useState<Record<string, boolean>>({});
 
@@ -168,19 +183,13 @@ export default function App() {
   );
 
   const isConnectionOpen = (rootId: string) => {
-    if (closedConnections[rootId]) return false;
-    if (openConnections[rootId] !== undefined) return openConnections[rootId];
-    const source = sources.find((s) => s.id === rootId);
-    if (source?.connection) {
-      const session = getSession(sourceSessionKey(w.id, rootId), source.connection);
-      return Boolean(session);
-    }
-    return false;
+    const connection = connectionRoots.find((source) => source.id === rootId);
+    return !!connection && isServerConnected(w, connection);
   };
 
   const isConnectionExpanded = (rootId: string) => {
     if (!isConnectionOpen(rootId)) return false;
-    if (needle) return true;
+    if (needle && rootId === root.id) return true;
     return !collapsedConnections[rootId];
   };
 
@@ -242,12 +251,16 @@ export default function App() {
           names.push(name);
         }
       }
+      if (useStore.getState().workspace.id !== w.id) return;
       edit((draft) => {
         ensureSources(draft);
         updateSource(draft, rootItem.id, { databases: names });
       });
-    } catch {
-      // background discovery silent
+    } catch (error) {
+      if (force && useStore.getState().workspace.id === w.id) {
+        setMessage(String(error));
+        setError(true);
+      }
     }
   };
 
@@ -257,7 +270,7 @@ export default function App() {
         void discoverDatabasesForRoot(r);
       }
     }
-  }, [w.id, connectionRoots, openConnections, closedConnections]);
+  }, [w.id, connectionRoots, sessionRevision]);
 
   const handleDatabaseClick = async (rootId: string, dbName: string) => {
     const isCurrent =
@@ -280,7 +293,7 @@ export default function App() {
   };
 
   const isDbOpen = (rootId: string, dbName: string) => {
-    if (needle) return true;
+    if (needle && root.id === rootId && dbName.toLowerCase() === currentDb.toLowerCase()) return true;
     const key = `${rootId}:${dbName}`;
     if (openDatabases[key] !== undefined) return openDatabases[key];
     return root.id === rootId && dbName.toLowerCase() === currentDb.toLowerCase();
@@ -289,20 +302,17 @@ export default function App() {
   const handleCloseConnection = (rootId: string) => {
     const targetRoot = connectionRoots.find((r) => r.id === rootId) ?? root;
     const name = targetRoot.name || "Connection";
-    setClosedConnections((prev) => ({ ...prev, [rootId]: true }));
-    setOpenConnections((prev) => ({ ...prev, [rootId]: false }));
-    for (const item of workspaceSources(w).filter(
-      (s) => s.id === rootId || s.parentSourceId === rootId,
-    )) {
-      invalidateSession(sourceSessionKey(w.id, item.id));
-    }
+    disconnectProfile(
+      targetRoot.connectionId,
+      databaseSources(w, rootId).map((source) => sourceSessionKey(w.id, source.id)),
+    );
     setMessage(`Connection "${name}" closed`);
     setError(false);
   };
 
   const handleOpenConnection = (rootId: string) => {
     setCollapsedConnections((prev) => ({ ...prev, [rootId]: false }));
-    requestConnection(w.id, rootId, "login");
+    requestConnection(w.id, rootId, "connect");
   };
 
   const handleSetConnectionColor = (rootId: string, color?: string) => {
@@ -352,15 +362,11 @@ export default function App() {
 
   useEffect(() => {
     tableList.current?.scrollTo({ top: 0 });
-  }, [search, w.id, w.activeSourceId]);
+  }, [needle, w.id, w.activeSourceId]);
 
   const defaultSchema = w.mssql ? "dbo" : "public";
 
   const { schemaGroups, totalObjectsCount } = useMemo(() => {
-    if (!w.postgres && !w.mssql) {
-      return { schemaGroups: [], totalObjectsCount: 0 };
-    }
-
     const map = new Map<
       string,
       {
@@ -455,7 +461,7 @@ export default function App() {
       schemaGroups: groups,
       totalObjectsCount: totalObjects,
     };
-  }, [w.schema.schemas, w.schema.tables, w.schema.functions, w.postgres, w.mssql, needle, defaultSchema]);
+  }, [w.schema.schemas, w.schema.tables, w.schema.functions, needle, defaultSchema]);
 
   function isSchemaOpen(schemaKey: string, schemaName: string): boolean {
     if (needle) return true;
@@ -555,9 +561,8 @@ export default function App() {
   }
 
   const [expandedTables, setExpandedTables] = useState<string[]>([]);
-  const [left, setLeft] = useState(true);
   const [connectionRevision, setConnectionRevision] = useState(0);
-  const [sidebarWidth, setSidebarWidth] = useState(190);
+  const [sidebarWidth, setSidebarWidth] = useState(246);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const resizeSidebar = (width: number) => {
     const available = workspaceRef.current?.clientWidth ?? 1000;
@@ -577,7 +582,6 @@ export default function App() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const remoteRun = useRef<() => void>(() => { });
 
   useEffect(() => {
     if (!sidebarMenu) return;
@@ -586,11 +590,15 @@ export default function App() {
         sidebarMenuRef.current &&
         !sidebarMenuRef.current.contains(e.target as Node)
       ) {
+        sidebarMenuTrigger.current = null;
         setSidebarMenu(null);
       }
     };
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setSidebarMenu(null);
+      if (e.key === "Escape") {
+        setSidebarMenu(null);
+        sidebarMenuTrigger.current?.focus();
+      }
     };
     window.addEventListener("mousedown", handleDown);
     window.addEventListener("keydown", handleKey);
@@ -624,6 +632,7 @@ export default function App() {
     query: string,
     tabName?: string,
     target?: string | { rootId?: string; database?: string; sourceId?: string },
+    filePath?: string,
   ) {
     edit((draft) => {
       ensureSources(draft);
@@ -648,7 +657,10 @@ export default function App() {
         name,
         sql: query,
         sourceId: boundSourceId,
+        filePath,
+        fileFolder: filePath ? sqlAutosave.folder ?? undefined : undefined,
       };
+      if (filePath) sqlAutosave.rememberFile(draft.id, newTab);
       const layout = restoreSqlLayout(tabs, active.id, draft.sqlLayout);
       const index = Math.max(
         0,
@@ -671,6 +683,34 @@ export default function App() {
       syncActiveSqlSource(draft);
     });
     setMode("sql");
+  }
+
+  async function openFolderSqlFile(relative: string) {
+    const { workspace } = useStore.getState();
+    const folder = sqlAutosave.folder;
+    if (!folder) return;
+    try {
+      const file = await invoke<{ name: string; sql: string; tabId: string | null }>("read_sql_file", {
+        relative,
+        workspaceId: workspace.id,
+        tabIds: sqlTabs(workspace).map((tab) => tab.id),
+      });
+      const current = useStore.getState().workspace;
+      if (current.id !== workspace.id) return;
+      const tabs = sqlTabs(current);
+      const existing = tabs.find((tab) => tab.id === file.tabId || (tab.filePath === relative && tab.fileFolder === folder));
+      if (existing) {
+        edit((draft) => {
+          setSqlTabs(draft, sqlTabs(draft), existing.id);
+          syncActiveSqlSource(draft);
+        });
+      } else {
+        openSqlWithQuery(file.sql, file.name, current.activeSourceId, relative);
+      }
+    } catch (error) {
+      setMessage(String(error));
+      setError(true);
+    }
   }
 
   function openFunctionCode(
@@ -1001,9 +1041,8 @@ export default function App() {
       : `-- Backup / Restore Data for Table ${qName}\nINSERT INTO ${qName} (${cols})\nVALUES\n  (${placeholders});\n`;
   }
 
-  const remote = !!(w.postgres || w.mssql);
+  const searchButton = useRef<HTMLButtonElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
-  const runRef = useRef<() => void>(() => { });
   const tablesById = useMemo(
     () => new Map(w.schema.tables.map((table) => [table.id, table])),
     [w.schema.tables],
@@ -1477,16 +1516,22 @@ export default function App() {
     };
   }, []);
 
+  function openObjectSearch() {
+    setSidebarView("search");
+    requestAnimationFrame(() => searchInput.current?.focus());
+  }
+
+  function closeObjectSearch() {
+    setSearch("");
+    setSidebarView("explorer");
+  }
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (document.activeElement?.closest(".system-terminal")) return;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        setLeft(true);
-        requestAnimationFrame(() => searchInput.current?.focus());
-      }
-      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-        e.preventDefault();
-        runRef.current();
+        openObjectSearch();
       }
       if (
         (e.metaKey || e.ctrlKey) &&
@@ -1541,10 +1586,16 @@ export default function App() {
       return false;
     return true;
   }
+  const sqlAutosave = useSqlAutosave(w, ready, (error) => {
+    setMessage(`SQL autosave: ${String(error)}`);
+    setError(true);
+  });
+  const requiresSqlFolder = sqlAutosave.desktop && !sqlAutosave.folder;
   useDesktopClose(
     async () => {
       if (!ready || !(await leaveDraft())) return false;
-      await saveWorkspace(w);
+      await sqlAutosave.flush();
+      await saveWorkspace(useStore.getState().workspace);
       return true;
     },
     (error) => {
@@ -1625,22 +1676,6 @@ export default function App() {
       setDataTable(targetId);
     }
   }
-  runRef.current = () => {
-    if (mode === "sql" && (remote || w.sources)) {
-      remoteRun.current();
-    }
-  };
-  async function selectConnection(sourceId: string) {
-    if (sourceId === (w.activeSourceId ?? "primary")) return true;
-    if (!(await leaveDraft())) return false;
-    edit((draft) => {
-      ensureSources(draft);
-      activateSource(draft, sourceId);
-    });
-    setDataTable("");
-    setSearch("");
-    return true;
-  }
   async function selectWorkspaceDatabase(rootId: string, database: string) {
     if (!(await leaveDraft())) return;
     let targetSourceId = "";
@@ -1718,17 +1753,17 @@ export default function App() {
   }
   async function detachWorkspaceConnection(sourceId: string) {
     if (isConnectionOpen(sourceId)) {
-      setMessage("Please close the connection before deleting it.");
+      setMessage("Close the connection before removing it from this workspace.");
       setError(true);
       return;
     }
     const targetRoot = connectionRoots.find((r) => r.id === sourceId) ?? root;
     const targetName = targetRoot.name || connectionName;
     const confirmed = await confirmAction(
-      `Are you sure you want to delete connection "${targetName}" from the workspace?`,
+      `Remove "${targetName}" and its databases from this workspace? You can add it again from Saved if a profile exists.`,
       {
-        title: "Delete Connection",
-        confirmLabel: "Delete",
+        title: "Remove connection from workspace?",
+        confirmLabel: "Remove",
         destructive: true,
       },
     );
@@ -1738,17 +1773,7 @@ export default function App() {
     ))
       invalidateSession(sourceSessionKey(w.id, item.id));
     edit((draft) => removeSource(draft, sourceId));
-    setClosedConnections((prev) => {
-      const next = { ...prev };
-      delete next[sourceId];
-      return next;
-    });
-    setOpenConnections((prev) => {
-      const next = { ...prev };
-      delete next[sourceId];
-      return next;
-    });
-    setMessage(`Connection "${targetName}" deleted successfully.`);
+    setMessage(`Connection "${targetName}" removed from this workspace.`);
     setError(false);
     setDataTable("");
     setSearch("");
@@ -2323,33 +2348,20 @@ export default function App() {
       )}
       <header className="app-header" data-tauri-drag-region>
         <div className="titlebar-left brand" data-tauri-drag-region>
-          <ConnectionController
-            onAttach={addWorkspaceConnection}
-            workspace={w}
-            busy={busy}
-            onDisconnect={detachWorkspaceConnection}
-            onBeforeAction={leaveDraft}
-            onConnected={async (sourceId) => {
-              if (sourceId) {
-                setClosedConnections((prev) => ({ ...prev, [sourceId]: false }));
-                setOpenConnections((prev) => ({ ...prev, [sourceId]: true }));
-              }
-              const current = useStore.getState().workspace;
-              const active = workspaceSources(current).find(
-                (source) => source.id === current.activeSourceId,
-              );
-              if (
-                sourceId &&
-                (!active || connectionRoot(current, active).id !== sourceId)
-              )
-                await selectConnection(sourceId);
-              setConnectionRevision((revision) => revision + 1);
-            }}
-            onError={(error) => {
-              setMessage(String(error));
-              setError(true);
-            }}
-          />
+          {!requiresSqlFolder && (
+            <ConnectionController
+              onAttach={addWorkspaceConnection}
+              workspace={w}
+              busy={busy}
+              onDisconnect={detachWorkspaceConnection}
+              onBeforeAction={leaveDraft}
+              onConnected={() => setConnectionRevision((revision) => revision + 1)}
+              onError={(error) => {
+                setMessage(String(error));
+                setError(true);
+              }}
+            />
+          )}
           <div
             className="titlebar-active-info"
             title={activeInfo.tooltip}
@@ -2376,364 +2388,648 @@ export default function App() {
           </div>
         </div>
         <div className="titlebar-right" data-tauri-drag-region>
-          <nav className="mode-switch" aria-label="View" data-tauri-drag-region>
-            {modes.map((item) => {
-              const isActive = mode === item.id;
-              return (
-                <button
-                  key={item.id}
-                  aria-current={isActive ? "page" : undefined}
-                  onClick={() => void changeMode(item.id)}
-                >
-                  <item.icon size={13} aria-hidden="true" />
-                  <span>{item.label}</span>
-                  {isActive && (
-                    <span className="mode-active-dot" aria-hidden="true" />
-                  )}
-                </button>
-              );
-            })}
-          </nav>
-          <div className="header-actions" data-tauri-drag-region>
+          <div id="titlebar-sql-actions" ref={setSqlToolbarHost} />
+          {mode === "sql" && sqlAutosave.folder && (
             <Button
-              title={left ? "Hide sidebar" : "Show sidebar"}
-              aria-expanded={left}
-              aria-controls="table-explorer"
-              onClick={() => setLeft((visible) => !visible)}
+              className={"sql-icon-button titlebar-files-toggle" + (sqlFilesOpen ? " is-active" : "")}
+              title={sqlFilesOpen ? "Hide files" : "Show files"}
+              aria-label="SQL files"
+              aria-expanded={sqlFilesOpen}
+              onClick={() => setSqlFilesOpen((open) => !open)}
             >
-              {left ? (
-                <PanelLeftClose size={15} />
-              ) : (
-                <PanelLeftOpen size={15} />
-              )}
+              <PanelRight size={14} aria-hidden="true" />
             </Button>
-            <Button
-              title={dark ? "Light appearance" : "Dark appearance"}
-              onClick={() => setDark(!dark)}
-            >
-              {dark ? <Sun size={15} /> : <Moon size={15} />}
-            </Button>
-            <details
-              className="workspace-menu"
-              onClick={(e) => {
-                if ((e.target as HTMLElement).closest("button"))
-                  e.currentTarget.removeAttribute("open");
-              }}
-            >
-              <summary aria-label="App settings">
-                <Ellipsis size={17} />
-              </summary>
-              <div>
-                <Button onClick={() => setAbbreviations(true)}>
-                  <Braces size={15} />
-                  SQL abbreviations
-                </Button>
-              </div>
-            </details>
-          </div>
+          )}
         </div>
       </header>
       {platform === "windows" && <WindowControls />}
       <div className="workspace" ref={workspaceRef}>
-        {left && (
-          <aside
-            id="table-explorer"
-            className="explorer"
-            style={{ width: sidebarWidth }}
-          >
-            <div className="search">
-              <Search size={15} />
-              <input
-                ref={searchInput}
-                aria-label="Search tables"
-                placeholder="Search tables"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
-              <kbd>⌘ K</kbd>
+        {requiresSqlFolder ? (
+          <section className="connection-empty" aria-labelledby="sql-folder-title">
+            <div className="connection-empty-mark" aria-hidden="true">
+              <Folder size={24} />
             </div>
-            <div className="section-heading">
-              <span>EXPLORER</span>
+            <h2 id="sql-folder-title">Choose a SQL script folder</h2>
+            <p>Choose where SQL scripts are saved before connecting or opening SQL tabs.</p>
+            <Button
+              variant="primary"
+              disabled={!ready || sqlAutosave.choosing}
+              onClick={() => void sqlAutosave.chooseFolder()}
+            >
+              <FolderOpen size={14} />
+              {sqlAutosave.choosing ? "Choosing folder…" : "Choose folder…"}
+            </Button>
+          </section>
+        ) : (
+          <>
+            <nav className="activity-bar" aria-label="Workspace views">
               <button
                 type="button"
-                className="tree-new-schema-btn"
-                style={{ marginLeft: "auto" }}
-                title="New Connection..."
-                onClick={handleCreateNewConnection}
+                title="Object Explorer"
+                aria-label="Object Explorer"
+                aria-expanded={sidebarView === "explorer"}
+                aria-controls={sidebarVisible ? "table-explorer" : undefined}
+                onClick={() => {
+                  if (searchOpen) closeObjectSearch();
+                  else setSidebarView(sidebarView === "explorer" ? null : "explorer");
+                }}
               >
-                <Plus size={12} />
+                <Files className="sidebar-glyph" aria-hidden="true" />
               </button>
-            </div>
-            <div
-              className="table-list"
-              ref={tableList}
-              onContextMenu={(e) => {
-                if ((e.target as HTMLElement).closest(".tree-connection-header-row, .tree-database-header-row, .tree-schema-header-row, .tree-table-row, .tree-view-row, .tree-func-row, .tree-category-header")) {
-                  return;
-                }
-                e.preventDefault();
-                const x = Math.min(e.clientX, window.innerWidth - 220);
-                const y = Math.min(e.clientY, window.innerHeight - 280);
-                setSidebarMenu({
-                  x,
-                  y,
-                  type: "empty_area",
-                });
-              }}
-            >
-              {connectionRoots.length > 0 ? (
-                connectionRoots.map((connRoot) => {
-                  const connOpen = isConnectionOpen(connRoot.id);
-                  const connExpanded = isConnectionExpanded(connRoot.id);
-                  const connDatabases = getDatabasesForRoot(connRoot);
-                  const connName =
-                    connRoot.name ||
-                    (connRoot.connection
-                      ? `${connRoot.connection.engine === "mssql" ? "SQL Server" : "PostgreSQL"} (${connRoot.connection.config.host})`
-                      : "Database Server");
-                  const isConnActive = root.id === connRoot.id;
-
-                  return (
-                    <div key={connRoot.id} className="tree-connection-group">
-                      <div
-                        className={`tree-connection-header-row ${connOpen ? "is-open" : "is-closed"} ${isConnActive ? "is-active-root" : ""}`}
-                        onContextMenu={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          const x = Math.min(e.clientX, window.innerWidth - 220);
-                          const y = Math.min(e.clientY, window.innerHeight - 280);
-                          setSidebarMenu({
-                            x,
-                            y,
-                            type: "connection",
-                            connectionRootId: connRoot.id,
-                            connectionName: connName,
-                          });
-                        }}
-                      >
-                        <button
-                          type="button"
-                          className="tree-connection-header"
-                          onClick={() => {
-                            if (!connOpen) return;
-                            setCollapsedConnections((prev) => ({
-                              ...prev,
-                              [connRoot.id]: !prev[connRoot.id],
-                            }));
-                          }}
-                          onDoubleClick={() => {
-                            if (!connOpen) {
-                              handleOpenConnection(connRoot.id);
-                            }
-                          }}
-                          title={
-                            connOpen
-                              ? `Connection: ${connName} · ${connExpanded ? "Expanded (click to collapse)" : "Collapsed (click to expand)"}`
-                              : `Connection: ${connName} · Closed (double-click or right-click to enter password & reconnect)`
-                          }
-                          aria-expanded={connExpanded}
-                        >
-                          {connOpen ? (
-                            <span className="tree-schema-arrow">
-                              {connExpanded ? (
-                                <ChevronDown size={12} />
-                              ) : (
-                                <ChevronRight size={12} />
-                              )}
-                            </span>
-                          ) : (
-                            <span className="tree-schema-arrow-placeholder" />
-                          )}
-                          <span
-                            className={`tree-connection-icon ${connOpen ? "is-open" : "is-closed"}`}
-                          >
-                            <Server size={13.5} />
-                            {connOpen && <span className="schema-status-dot" />}
-                          </span>
-                          <span className="tree-connection-label">
-                            <strong>{connName}</strong>
-                          </span>
-                          {connRoot.color && (
-                            <span
-                              className="tree-connection-color-dot"
-                              style={{ backgroundColor: connRoot.color }}
-                              title={`Connection color: ${connRoot.color}`}
-                              aria-hidden="true"
-                            />
-                          )}
-                        </button>
-                      </div>
-
-                      {connOpen && connExpanded && (
-                        <div className="tree-connection-content">
-                          {connDatabases.map((dbName) => {
-                            const isCurrent =
-                              isConnActive && dbName.toLowerCase() === currentDb.toLowerCase();
-                            const isOpen = isDbOpen(connRoot.id, dbName);
-                            const isLoading = Boolean(
-                              loadingDatabases[`${connRoot.id}:${dbName}`],
-                            );
-
-                            return (
-                              <div key={dbName} className="tree-database-group">
-                                <div
-                                  className={`tree-database-header-row ${isCurrent ? "is-active" : ""}`}
-                                  onContextMenu={(e) => {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    const x = Math.min(e.clientX, window.innerWidth - 220);
-                                    const y = Math.min(e.clientY, window.innerHeight - 280);
-                                    setSidebarMenu({
-                                      x,
-                                      y,
-                                      type: "database",
-                                      connectionRootId: connRoot.id,
-                                      databaseName: dbName,
-                                    });
-                                  }}
-                                >
-                                  <button
-                                    type="button"
-                                    className={`tree-database-header ${isCurrent ? "is-active" : ""}`}
-                                    onClick={() => void handleDatabaseClick(connRoot.id, dbName)}
-                                    title={`Database: ${dbName}${isCurrent ? " (active)" : " (click to switch & explore)"}`}
-                                    aria-expanded={isOpen}
-                                  >
-                                    <span className="tree-schema-arrow">
-                                      {isLoading ? (
-                                        <Loader2 size={11} className="animate-spin" />
-                                      ) : isOpen ? (
-                                        <ChevronDown size={11} />
-                                      ) : (
-                                        <ChevronRight size={11} />
-                                      )}
-                                    </span>
-                                    <span className={`tree-database-icon ${isCurrent ? "is-active" : ""}`}>
-                                      <Database size={13} />
-                                      {isCurrent && <span className="schema-status-dot" />}
-                                    </span>
-                                    <span className="tree-database-label">
-                                      <strong>{dbName}</strong>
-                                    </span>
-                                  </button>
-                                </div>
-
-                                {isOpen && isCurrent && (
-                                  <div className="tree-database-content">
-                                    <div
-                                      className="tree-schemas-section-header"
-                                      onContextMenu={(e) => {
-                                        e.preventDefault();
-                                        e.stopPropagation();
-                                        const x = Math.min(e.clientX, window.innerWidth - 220);
-                                        const y = Math.min(e.clientY, window.innerHeight - 280);
-                                        setSidebarMenu({
-                                          x,
-                                          y,
-                                          type: "schemas_header",
-                                        });
-                                      }}
-                                    >
-                                      <span>SCHEMAS ({schemaGroups.length})</span>
-                                    </div>
-                                    {renderSchemaGroups()}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })
-              ) : (
-                <div className="sidebar-no-connection">
-                  <div className="sidebar-no-connection-icon">
-                    <Server size={22} />
-                  </div>
-                  <p className="sidebar-no-connection-title">No connections</p>
-                  <p className="sidebar-no-connection-desc">
-                    Connect to a SQL Server or PostgreSQL database.
-                  </p>
-                  <button
-                    type="button"
-                    className="sidebar-new-connection-btn"
-                    onClick={handleCreateNewConnection}
-                  >
-                    <Plus size={13} />
-                    <span>New Connection</span>
-                  </button>
-                  {w.schema.tables.length > 0 && renderSchemaGroups()}
-                </div>
-              )}
-              {needle && totalObjectsCount === 0 && (
-                <p className="sidebar-empty">No matching objects.</p>
-              )}
-            </div>
-            {sidebarMenu && (
-              <div
-                ref={sidebarMenuRef}
-                className="sidebar-context-menu"
-                style={{ left: sidebarMenu.x, top: sidebarMenu.y }}
-                role="menu"
+              <button
+                type="button"
+                ref={searchButton}
+                title={`Search database objects (${/Mac/i.test(navigator.platform) ? "⌘K" : "Ctrl+K"})`}
+                aria-label="Search database objects"
+                className="activity-search"
+                aria-expanded={searchOpen}
+                aria-controls={searchOpen ? "object-search" : undefined}
+                onClick={searchOpen ? closeObjectSearch : openObjectSearch}
               >
-                {sidebarMenu.type === "empty_area" && (
-                  <>
-                    <div className="sidebar-context-header">
-                      <strong>Explorer</strong>
-                      <small>Connections</small>
-                    </div>
+                <Search className="sidebar-glyph" aria-hidden="true" />
+              </button>
+              {modes.map(({ id, label, icon: Icon }) => (
+                <button
+                  key={id}
+                  type="button"
+                  title={label}
+                  aria-label={label}
+                  aria-current={mode === id ? "page" : undefined}
+                  onClick={() => void changeMode(id)}
+                >
+                  <Icon className="sidebar-glyph" aria-hidden="true" />
+                </button>
+              ))}
+              <details
+                className="workspace-menu activity-settings"
+                onClick={(e) => {
+                  if ((e.target as HTMLElement).closest("button"))
+                    e.currentTarget.removeAttribute("open");
+                }}
+              >
+                <summary aria-label="App settings" title="App settings">
+                  <Settings className="sidebar-glyph" aria-hidden="true" />
+                </summary>
+                <div>
+                  <Button onClick={() => setDark((value) => !value)}>
+                    {dark ? <Sun size={15} /> : <Moon size={15} />}
+                    {dark ? "Light" : "Dark"}
+                  </Button>
+                  {sqlAutosave.desktop && (
+                    <Button
+                      disabled={sqlAutosave.choosing}
+                      title={sqlAutosave.folder ?? "Open Folder"}
+                      onClick={() => void sqlAutosave.chooseFolder()}
+                    >
+                      <Folder size={15} />
+                      {sqlAutosave.folder ? "Open Folder" : "Open Folder"}
+                    </Button>
+                  )}
+                  <Button onClick={() => setAbbreviations(true)}>
+                    <Braces size={15} />
+                    SQL abbreviations
+                  </Button>
+                </div>
+              </details>
+            </nav>
+            {sidebarVisible && (
+              <aside
+                id="table-explorer"
+                className="explorer"
+                style={{ width: sidebarWidth }}
+              >
+                <div className="sidebar-heading">
+                  <h2>Object Explorer</h2>
+                  <div className="sidebar-toolbar" role="group" aria-label="Object Explorer actions">
                     <button
                       type="button"
-                      onClick={() => {
-                        setSidebarMenu(null);
-                        handleCreateNewConnection();
-                      }}
+                      className="sidebar-icon-button"
+                      title="New connection"
+                      aria-label="New connection"
+                      disabled={busy}
+                      onClick={handleCreateNewConnection}
                     >
-                      <Plus size={13} />
-                      <span>New Connection...</span>
+                      <Plug className="sidebar-glyph" aria-hidden="true" />
                     </button>
-                  </>
+                    <SavedConnections workspace={w} disabled={busy} />
+                    <button
+                      type="button"
+                      className="sidebar-icon-button"
+                      title="Refresh databases on the active server"
+                      aria-label="Refresh databases on the active server"
+                      disabled={busy || !isConnectionAccessible}
+                      data-unavailable={!isConnectionAccessible || undefined}
+                      onClick={() => void discoverDatabasesForRoot(root, true)}
+                    >
+                      <RotateCw className="sidebar-glyph" aria-hidden="true" />
+                    </button>
+                  </div>
+                </div>
+                {searchOpen && (
+                  <div className="search" id="object-search">
+                    <input
+                      ref={searchInput}
+                      aria-label={hasActiveConnection ? `Filter objects in ${currentDb}` : "Filter database objects"}
+                      placeholder="Filter database objects"
+                      title={hasActiveConnection ? `Search in ${currentDb}` : undefined}
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          event.stopPropagation();
+                          closeObjectSearch();
+                          searchButton.current?.focus();
+                        }
+                      }}
+                    />
+                    {search && (
+                      <button
+                        type="button"
+                        className="sidebar-icon-button"
+                        aria-label="Clear object filter"
+                        onClick={() => {
+                          setSearch("");
+                          searchInput.current?.focus();
+                        }}
+                      >
+                        <X size={13} />
+                      </button>
+                    )}
+                  </div>
                 )}
-                {sidebarMenu.type === "connection" && (() => {
-                  const targetRootId = sidebarMenu.connectionRootId || root.id;
-                  const targetRoot = connectionRoots.find((r) => r.id === targetRootId) ?? root;
-                  const targetName = sidebarMenu.connectionName || targetRoot.name || "Server Connection";
-                  const isMssql = targetRoot.connection?.engine === "mssql";
-                  const isOpen = isConnectionOpen(targetRoot.id);
+                {needle && hasActiveConnection && (
+                  <p className="sidebar-filter-scope" role="status">
+                    {totalObjectsCount} {totalObjectsCount === 1 ? "match" : "matches"} in {currentDb}
+                  </p>
+                )}
+                <div
+                  className="table-list"
+                  ref={tableList}
+                  onContextMenu={(e) => {
+                    if ((e.target as HTMLElement).closest(".tree-connection-header-row, .tree-database-header-row, .tree-schema-header-row, .tree-table-row, .tree-view-row, .tree-func-row, .tree-category-header")) {
+                      return;
+                    }
+                    e.preventDefault();
+                    const x = Math.min(e.clientX, window.innerWidth - 220);
+                    const y = Math.min(e.clientY, window.innerHeight - 280);
+                    setSidebarMenu({
+                      x,
+                      y,
+                      type: "empty_area",
+                    });
+                  }}
+                >
+                  {connectionRoots.length > 0 ? (
+                    connectionRoots.map((connRoot) => {
+                      const connOpen = isConnectionOpen(connRoot.id);
+                      const connExpanded = isConnectionExpanded(connRoot.id);
+                      const connDatabases = getDatabasesForRoot(connRoot);
+                      const folderKey = `${w.id}:${connRoot.id}`;
+                      const databaseFolderOpen =
+                        (Boolean(needle) && root.id === connRoot.id) ||
+                        !collapsedDatabaseFolders[folderKey];
+                      const connName =
+                        connRoot.name ||
+                        (connRoot.connection
+                          ? `${connRoot.connection.engine === "mssql" ? "SQL Server" : "PostgreSQL"} (${connRoot.connection.config.host})`
+                          : "Database Server");
+                      const isConnActive = root.id === connRoot.id;
 
-                  return (
-                    <>
-                      <div className="sidebar-context-header">
-                        <strong>{targetName}</strong>
-                        <small>Server Connection</small>
+                      return (
+                        <div key={connRoot.id} className="tree-connection-group">
+                          <div
+                            className={`tree-connection-header-row ${connOpen ? "is-open" : "is-closed"} ${isConnActive ? "is-active-root" : ""}`}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              const x = Math.min(e.clientX, window.innerWidth - 220);
+                              const y = Math.min(e.clientY, window.innerHeight - 280);
+                              setSidebarMenu({
+                                x,
+                                y,
+                                type: "connection",
+                                connectionRootId: connRoot.id,
+                                connectionName: connName,
+                              });
+                            }}
+                          >
+                            <button
+                              type="button"
+                              className="tree-connection-header"
+                              onClick={() => {
+                                if (!connOpen) {
+                                  handleOpenConnection(connRoot.id);
+                                  return;
+                                }
+                                setCollapsedConnections((prev) => ({
+                                  ...prev,
+                                  [connRoot.id]: !prev[connRoot.id],
+                                }));
+                              }}
+                              disabled={!connOpen && busy}
+                              title={`${connOpen ? connName : `Connect to ${connName}`} · ${connRoot.connection?.config.host}`}
+                              aria-label={connOpen ? `${connName}, connected` : `Connect to ${connName}`}
+                              aria-expanded={connOpen ? connExpanded : undefined}
+                            >
+                              <span className="tree-schema-arrow" aria-hidden="true">
+                                {connOpen && (connExpanded ? <ChevronDown /> : <ChevronRight />)}
+                              </span>
+                              <span
+                                className="tree-connection-icon"
+                                style={connRoot.color ? { color: connRoot.color } : undefined}
+                                aria-hidden="true"
+                              >
+                                <Server />
+                                {connOpen && <span className="schema-status-dot" />}
+                              </span>
+                              <span className="tree-connection-label">
+                                <strong>{connName}</strong>
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              className="sidebar-icon-button"
+                              aria-label={`Actions for ${connName}`}
+                              aria-expanded={
+                                sidebarMenu?.type === "connection" &&
+                                sidebarMenu.connectionRootId === connRoot.id
+                              }
+                              title="Connection actions"
+                              onClick={(event) => {
+                                sidebarMenuTrigger.current = event.currentTarget;
+                                const bounds = event.currentTarget.getBoundingClientRect();
+                                setSidebarMenu({
+                                  x: Math.max(0, Math.min(bounds.right - 220, window.innerWidth - 220)),
+                                  y: Math.max(0, Math.min(bounds.bottom + 4, window.innerHeight - 360)),
+                                  type: "connection",
+                                  connectionRootId: connRoot.id,
+                                  connectionName: connName,
+                                });
+                                requestAnimationFrame(() =>
+                                  sidebarMenuRef.current?.querySelector("button")?.focus(),
+                                );
+                              }}
+                            >
+                              <Ellipsis size={15} />
+                            </button>
+                          </div>
+
+                          {connOpen && connExpanded && (
+                            <div className="tree-connection-content">
+                              <button
+                                type="button"
+                                className="tree-database-folder"
+                                aria-expanded={databaseFolderOpen}
+                                onClick={() =>
+                                  setCollapsedDatabaseFolders((previous) => ({
+                                    ...previous,
+                                    [folderKey]: !previous[folderKey],
+                                  }))
+                                }
+                              >
+                                <span className="tree-schema-arrow" aria-hidden="true">
+                                  {databaseFolderOpen ? <ChevronDown /> : <ChevronRight />}
+                                </span>
+                                <span className="tree-folder-icon" aria-hidden="true">
+                                  {databaseFolderOpen ? <FolderOpen /> : <Folder />}
+                                </span>
+                                <span>Databases</span>
+                                <small>{connDatabases.length}</small>
+                              </button>
+                              {databaseFolderOpen && (
+                                <div className="tree-database-list">
+                                  {connDatabases.map((dbName) => {
+                                    const isCurrent =
+                                      isConnActive && dbName.toLowerCase() === currentDb.toLowerCase();
+                                    const isOpen = isDbOpen(connRoot.id, dbName);
+                                    const isLoading = Boolean(
+                                      loadingDatabases[`${connRoot.id}:${dbName}`],
+                                    );
+
+                                    return (
+                                      <div key={dbName} className="tree-database-group">
+                                        <div
+                                          className={`tree-database-header-row ${isCurrent ? "is-active" : ""}`}
+                                          onContextMenu={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            const x = Math.min(e.clientX, window.innerWidth - 220);
+                                            const y = Math.min(e.clientY, window.innerHeight - 280);
+                                            setSidebarMenu({
+                                              x,
+                                              y,
+                                              type: "database",
+                                              connectionRootId: connRoot.id,
+                                              databaseName: dbName,
+                                            });
+                                          }}
+                                        >
+                                          <button
+                                            type="button"
+                                            className={`tree-database-header ${isCurrent ? "is-active" : ""}`}
+                                            onClick={() => void handleDatabaseClick(connRoot.id, dbName)}
+                                            title={`Database: ${dbName}${isCurrent ? " (active)" : " (click to switch & explore)"}`}
+                                            aria-expanded={isCurrent && isOpen}
+                                            aria-current={isCurrent ? "true" : undefined}
+                                            aria-busy={isLoading || undefined}
+                                          >
+                                            <span className="tree-schema-arrow" aria-hidden="true">
+                                              {isLoading ? (
+                                                <Loader2 className="animate-spin" />
+                                              ) : isCurrent && isOpen ? (
+                                                <ChevronDown />
+                                              ) : (
+                                                <ChevronRight />
+                                              )}
+                                            </span>
+                                            <span className={`tree-database-icon ${isCurrent ? "is-active" : ""}`} aria-hidden="true">
+                                              <Database />
+                                            </span>
+                                            <span className="tree-database-label">
+                                              <strong>{dbName}</strong>
+                                            </span>
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="sidebar-icon-button tree-database-query"
+                                            title={`New query in ${dbName}`}
+                                            aria-label={`New query in ${dbName}`}
+                                            disabled={busy}
+                                            onClick={() =>
+                                              openSqlWithQuery("", `${dbName}.sql`, {
+                                                rootId: connRoot.id,
+                                                database: dbName,
+                                              })
+                                            }
+                                          >
+                                            <SquareTerminal size={13} />
+                                          </button>
+                                        </div>
+
+                                        {isOpen && isCurrent && (
+                                          <div className="tree-database-content">
+                                            <div
+                                              className="tree-schemas-section-header"
+                                              onContextMenu={(e) => {
+                                                e.preventDefault();
+                                                e.stopPropagation();
+                                                const x = Math.min(e.clientX, window.innerWidth - 220);
+                                                const y = Math.min(e.clientY, window.innerHeight - 280);
+                                                setSidebarMenu({
+                                                  x,
+                                                  y,
+                                                  type: "schemas_header",
+                                                });
+                                              }}
+                                            >
+                                              <span>SCHEMAS ({schemaGroups.length})</span>
+                                            </div>
+                                            {renderSchemaGroups()}
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="sidebar-no-connection">
+                      <div className="sidebar-no-connection-icon">
+                        <Server size={22} />
                       </div>
-                      {isOpen ? (
+                      <p className="sidebar-no-connection-title">No connections</p>
+                      <p className="sidebar-no-connection-desc">
+                        Connect to a SQL Server or PostgreSQL database.
+                      </p>
+                      {w.schema.tables.length > 0 && renderSchemaGroups()}
+                    </div>
+                  )}
+                  {needle && !hasActiveConnection && totalObjectsCount === 0 && (
+                    <p className="sidebar-empty">No matching objects.</p>
+                  )}
+                </div>
+                {sidebarMenu && (
+                  <div
+                    ref={sidebarMenuRef}
+                    className="sidebar-context-menu"
+                    style={{ left: sidebarMenu.x, top: sidebarMenu.y }}
+                    role="menu"
+                  >
+                    {sidebarMenu.type === "empty_area" && (
+                      <>
+                        <div className="sidebar-context-header">
+                          <strong>Explorer</strong>
+                          <small>Connections</small>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSidebarMenu(null);
+                            handleCreateNewConnection();
+                          }}
+                        >
+                          <Plus size={13} />
+                          <span>New Connection...</span>
+                        </button>
+                      </>
+                    )}
+                    {sidebarMenu.type === "connection" && (() => {
+                      const targetRootId = sidebarMenu.connectionRootId || root.id;
+                      const targetRoot = connectionRoots.find((r) => r.id === targetRootId) ?? root;
+                      const targetName = sidebarMenu.connectionName || targetRoot.name || "Server Connection";
+                      const isMssql = targetRoot.connection?.engine === "mssql";
+                      const isOpen = isConnectionOpen(targetRoot.id);
+
+                      return (
                         <>
+                          <div className="sidebar-context-header">
+                            <strong>{targetName}</strong>
+                            <small>{isOpen ? "Connected" : "Disconnected"} · {isMssql ? "SQL Server" : "PostgreSQL"}</small>
+                          </div>
+                          {isOpen ? (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSidebarMenu(null);
+                                  openSqlWithQuery(
+                                    generateNewDatabaseTemplate(isMssql),
+                                    "new-database.sql",
+                                    { rootId: targetRoot.id },
+                                  );
+                                }}
+                              >
+                                <Plus size={13} />
+                                <span>New Database...</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSidebarMenu(null);
+                                  void discoverDatabasesForRoot(targetRoot, true);
+                                }}
+                              >
+                                <RotateCw size={13} />
+                                <span>Refresh Databases</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSidebarMenu(null);
+                                  openSqlWithQuery(
+                                    "",
+                                    "query.sql",
+                                    { rootId: targetRoot.id },
+                                  );
+                                }}
+                              >
+                                <SquareTerminal size={13} />
+                                <span>New Query in Server</span>
+                              </button>
+                              <div className="sidebar-context-divider" />
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => {
+                                  setSidebarMenu(null);
+                                  handleCloseConnection(targetRoot.id);
+                                }}
+                              >
+                                <Unplug size={13} />
+                                <span>Close Connection</span>
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSidebarMenu(null);
+                                  handleOpenConnection(targetRoot.id);
+                                }}
+                              >
+                                <Plug size={13} />
+                                <span>Open Connection</span>
+                              </button>
+                              <button
+                                type="button"
+                                className="danger"
+                                onClick={() => {
+                                  setSidebarMenu(null);
+                                  void detachWorkspaceConnection(targetRoot.id);
+                                }}
+                              >
+                                <Trash2 size={13} />
+                                <span>Remove from workspace…</span>
+                              </button>
+                            </>
+                          )}
+                          <div className="sidebar-context-divider" />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              requestConnection(w.id, targetRoot.id, "edit");
+                            }}
+                          >
+                            <Pencil size={13} />
+                            <span>Connection settings…</span>
+                          </button>
+                          <div className="sidebar-color-picker-section">
+                            <div className="sidebar-color-picker-header">
+                              <span>Connection Color</span>
+                            </div>
+                            <div className="sidebar-color-palette">
+                              {CONNECTION_COLORS.map((c) => {
+                                const isSelected =
+                                  (!c.color && !targetRoot.color) || c.color === targetRoot.color;
+                                return (
+                                  <button
+                                    key={c.label}
+                                    type="button"
+                                    className={`sidebar-color-dot ${!c.color ? "is-none" : ""} ${isSelected ? "is-selected" : ""}`}
+                                    style={c.color ? { backgroundColor: c.color } : undefined}
+                                    title={c.label}
+                                    onClick={() => {
+                                      setSidebarMenu(null);
+                                      handleSetConnectionColor(targetRoot.id, c.color);
+                                    }}
+                                  >
+                                    {!c.color && <span>✕</span>}
+                                  </button>
+                                );
+                              })}
+                              <label className="sidebar-color-custom-btn" title="Custom color...">
+                                <input
+                                  type="color"
+                                  value={targetRoot.color || "#3b82f6"}
+                                  onChange={(e) => {
+                                    setSidebarMenu(null);
+                                    handleSetConnectionColor(targetRoot.id, e.target.value);
+                                  }}
+                                />
+                              </label>
+                            </div>
+                          </div>
+                          <div className="sidebar-context-divider" />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              copyText(targetName, "Connection Name");
+                            }}
+                          >
+                            <Copy size={13} />
+                            <span>Copy Connection Name</span>
+                          </button>
+                        </>
+                      );
+                    })()}
+
+                    {sidebarMenu.type === "database" && sidebarMenu.databaseName && (() => {
+                      const dbName = sidebarMenu.databaseName;
+                      const targetRootId = sidebarMenu.connectionRootId || root.id;
+                      const targetRoot = connectionRoots.find((r) => r.id === targetRootId) ?? root;
+                      const isCurrent =
+                        root.id === targetRootId &&
+                        dbName.toLowerCase() === currentDb.toLowerCase();
+                      const isMssql = targetRoot.connection?.engine === "mssql";
+                      return (
+                        <>
+                          <div className="sidebar-context-header">
+                            <strong>{dbName}</strong>
+                            <small>Database {isCurrent ? "(Active)" : ""}</small>
+                          </div>
+                          {!isCurrent && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSidebarMenu(null);
+                                void handleDatabaseClick(targetRoot.id, dbName);
+                              }}
+                            >
+                              <Database size={13} />
+                              <span>Switch to Database</span>
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => {
                               setSidebarMenu(null);
                               openSqlWithQuery(
-                                generateNewDatabaseTemplate(isMssql),
-                                "new-database.sql",
-                                { rootId: targetRoot.id },
+                                generateNewSchemaTemplate(dbName, isMssql),
+                                `new-schema-${dbName}.sql`,
+                                { rootId: targetRoot.id, database: dbName },
                               );
                             }}
                           >
                             <Plus size={13} />
-                            <span>New Database...</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSidebarMenu(null);
-                              void discoverDatabasesForRoot(targetRoot, true);
-                            }}
-                          >
-                            <RotateCw size={13} />
-                            <span>Refresh Databases</span>
+                            <span>New Schema in Database...</span>
                           </button>
                           <button
                             type="button"
@@ -2741,1132 +3037,1007 @@ export default function App() {
                               setSidebarMenu(null);
                               openSqlWithQuery(
                                 "",
-                                "query.sql",
-                                { rootId: targetRoot.id },
+                                `${dbName}.sql`,
+                                { rootId: targetRoot.id, database: dbName },
                               );
                             }}
                           >
                             <SquareTerminal size={13} />
-                            <span>New Query in Server</span>
+                            <span>New Query in Database</span>
+                          </button>
+                          <div className="sidebar-context-divider" />
+                          {isMssql ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSidebarMenu(null);
+                                openSqlWithQuery(
+                                  generateMssqlDatabaseBackupScript(dbName),
+                                  `backup-${dbName}.sql`,
+                                  { rootId: targetRoot.id, database: dbName },
+                                );
+                              }}
+                            >
+                              <HardDrive size={13} />
+                              <span>Backup Database (.bak Script)...</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSidebarMenu(null);
+                                openSqlWithQuery(
+                                  generatePostgresBackupScript(dbName),
+                                  `backup-${dbName}.sql`,
+                                  { rootId: targetRoot.id, database: dbName },
+                                );
+                              }}
+                            >
+                              <HardDrive size={13} />
+                              <span>Backup Database (pg_dump Script)...</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="danger"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              openSqlWithQuery(
+                                generateDropDatabaseScript(dbName, Boolean(w.mssql)),
+                                `drop-${dbName}.sql`,
+                                { rootId: targetRoot.id, database: dbName },
+                              );
+                            }}
+                          >
+                            <Trash2 size={13} />
+                            <span>Drop Database (Script)...</span>
                           </button>
                           <div className="sidebar-context-divider" />
                           <button
                             type="button"
                             onClick={() => {
                               setSidebarMenu(null);
-                              handleCloseConnection(targetRoot.id);
+                              copyText(dbName, "Database Name");
                             }}
                           >
-                            <Unplug size={13} />
-                            <span>Close Connection</span>
+                            <Copy size={13} />
+                            <span>Copy Database Name</span>
                           </button>
                         </>
-                      ) : (
+                      );
+                    })()}
+
+                    {sidebarMenu.type === "schemas_header" && (
+                      <>
+                        <div className="sidebar-context-header">
+                          <strong>Schemas</strong>
+                          <small>Catalog ({schemaGroups.length})</small>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSidebarMenu(null);
+                            openSqlWithQuery(
+                              generateNewSchemaTemplate(currentDb, Boolean(w.mssql)),
+                              `new-schema-${currentDb}.sql`,
+                              { rootId: root.id, database: currentDb },
+                            );
+                          }}
+                        >
+                          <Plus size={13} />
+                          <span>New Schema...</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSidebarMenu(null);
+                            for (const g of schemaGroups) {
+                              const key = `${w.id}:${w.activeSourceId ?? "primary"}:${g.name}`;
+                              refreshSchema(key, g.name);
+                            }
+                          }}
+                        >
+                          <RotateCw size={13} />
+                          <span>Refresh All Schemas</span>
+                        </button>
+                      </>
+                    )}
+
+                    {sidebarMenu.type === "schema" && (
+                      <>
+                        <div className="sidebar-context-header">
+                          <strong>{sidebarMenu.schemaName}</strong>
+                          <small>Schema</small>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const key = sidebarMenu.schemaKey!;
+                            const name = sidebarMenu.schemaName!;
+                            setSidebarMenu(null);
+                            toggleSchema(key, name);
+                          }}
+                        >
+                          {isSchemaOpen(sidebarMenu.schemaKey!, sidebarMenu.schemaName!) ? (
+                            <>
+                              <ChevronRight size={13} />
+                              <span>Collapse Schema</span>
+                            </>
+                          ) : (
+                            <>
+                              <ChevronDown size={13} />
+                              <span>Open Schema</span>
+                            </>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const key = sidebarMenu.schemaKey!;
+                            const name = sidebarMenu.schemaName!;
+                            setSidebarMenu(null);
+                            refreshSchema(key, name);
+                          }}
+                        >
+                          <RotateCw size={13} />
+                          <span>Refresh Schema</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const name = sidebarMenu.schemaName!;
+                            setSidebarMenu(null);
+                            openSqlWithQuery(
+                              w.mssql
+                                ? `USE [${currentDb}];\nGO\n\n-- Query in schema [${name}]\n`
+                                : `SET search_path TO "${name}", public;\n\n`,
+                              `${name}-query.sql`,
+                              { rootId: root.id, database: currentDb },
+                            );
+                          }}
+                        >
+                          <SquareTerminal size={13} />
+                          <span>New Query in Schema</span>
+                        </button>
+                        <div className="sidebar-context-divider" />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const name = sidebarMenu.schemaName!;
+                            setSidebarMenu(null);
+                            openSqlWithQuery(
+                              generateNewTableTemplate(name, Boolean(w.mssql)),
+                              `new-table-${name}.sql`,
+                              { rootId: root.id, database: currentDb },
+                            );
+                          }}
+                        >
+                          <Plus size={13} />
+                          <span>New Table...</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSidebarMenu(null);
+                            openSqlWithQuery(
+                              generateNewSchemaTemplate(currentDb, Boolean(w.mssql)),
+                              `new-schema-${currentDb}.sql`,
+                              { rootId: root.id, database: currentDb },
+                            );
+                          }}
+                        >
+                          <Plus size={13} />
+                          <span>New Schema...</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const name = sidebarMenu.schemaName!;
+                            setSidebarMenu(null);
+                            openSqlWithQuery(
+                              generateNewViewTemplate(name, Boolean(w.mssql)),
+                              `new-view-${name}.sql`,
+                              { rootId: root.id, database: currentDb },
+                            );
+                          }}
+                        >
+                          <Plus size={13} />
+                          <span>New View...</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const name = sidebarMenu.schemaName!;
+                            setSidebarMenu(null);
+                            openSqlWithQuery(
+                              generateNewFunctionTemplate(name, Boolean(w.mssql)),
+                              `new-routine-${name}.sql`,
+                              { rootId: root.id, database: currentDb },
+                            );
+                          }}
+                        >
+                          <Plus size={13} />
+                          <span>New Function / Procedure...</span>
+                        </button>
+                        <div className="sidebar-context-divider" />
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const name = sidebarMenu.schemaName!;
+                            setSidebarMenu(null);
+                            const group = schemaGroups.find((g) => g.name === name);
+                            const ddl = generateSchemaBackupDdl(
+                              name,
+                              Boolean(w.mssql),
+                              group ? group.tables : [],
+                              group ? group.views : [],
+                              group ? group.functions : [],
+                            );
+                            const dateStr = new Date().toISOString().slice(0, 10);
+                            const ok = await saveExportFile(
+                              `${name}_backup_${dateStr}`,
+                              "sql",
+                              ddl,
+                            );
+                            if (ok) {
+                              setMessage(`Schema "${name}" backup exported successfully`);
+                              setError(false);
+                            }
+                          }}
+                        >
+                          <Download size={13} />
+                          <span>Backup Schema to SQL File...</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const name = sidebarMenu.schemaName!;
+                            setSidebarMenu(null);
+                            const group = schemaGroups.find((g) => g.name === name);
+                            const ddl = generateSchemaBackupDdl(
+                              name,
+                              Boolean(w.mssql),
+                              group ? group.tables : [],
+                              group ? group.views : [],
+                              group ? group.functions : [],
+                            );
+                            openSqlWithQuery(ddl, `${name}-backup.sql`, {
+                              rootId: root.id,
+                              database: currentDb,
+                            });
+                          }}
+                        >
+                          <HardDrive size={13} />
+                          <span>Backup Schema (SQL Script)...</span>
+                        </button>
+                        {w.mssql && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const db = w.mssql?.database || "database";
+                              setSidebarMenu(null);
+                              openSqlWithQuery(
+                                generateMssqlDatabaseBackupScript(db),
+                                `backup-${db}.sql`,
+                                { rootId: root.id, database: currentDb },
+                              );
+                            }}
+                          >
+                            <HardDrive size={13} />
+                            <span>Backup Database (.bak Script)...</span>
+                          </button>
+                        )}
+                        {w.postgres && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const db = w.postgres?.database || "database";
+                              const name = sidebarMenu.schemaName;
+                              setSidebarMenu(null);
+                              openSqlWithQuery(
+                                generatePostgresBackupScript(db, name),
+                                `backup-${db}.sql`,
+                                { rootId: root.id, database: currentDb },
+                              );
+                            }}
+                          >
+                            <HardDrive size={13} />
+                            <span>Backup Database (pg_dump Script)...</span>
+                          </button>
+                        )}
+                        <div className="sidebar-context-divider" />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const name = sidebarMenu.schemaName!;
+                            setSidebarMenu(null);
+                            copyText(name, "Schema Name");
+                          }}
+                        >
+                          <Copy size={13} />
+                          <span>Copy Schema Name</span>
+                        </button>
+                      </>
+                    )}
+
+                    {sidebarMenu.type === "folder" && (
+                      <>
+                        <div className="sidebar-context-header">
+                          <strong>
+                            {sidebarMenu.schemaName} / {sidebarMenu.category}
+                          </strong>
+                          <small>Category Folder</small>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const key = sidebarMenu.schemaKey!;
+                            const cat = sidebarMenu.category!;
+                            const count = sidebarMenu.categoryCount ?? 0;
+                            setSidebarMenu(null);
+                            toggleFolder(key, cat, count);
+                          }}
+                        >
+                          {isFolderOpen(
+                            sidebarMenu.schemaKey!,
+                            sidebarMenu.category!,
+                            sidebarMenu.categoryCount ?? 0,
+                          ) ? (
+                            <>
+                              <ChevronRight size={13} />
+                              <span>Collapse Folder</span>
+                            </>
+                          ) : (
+                            <>
+                              <ChevronDown size={13} />
+                              <span>Expand Folder</span>
+                            </>
+                          )}
+                        </button>
+                        {sidebarMenu.category === "tables" && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const name = sidebarMenu.schemaName!;
+                              setSidebarMenu(null);
+                              openSqlWithQuery(
+                                generateNewTableTemplate(name, Boolean(w.mssql)),
+                                `new-table-${name}.sql`,
+                                { rootId: root.id, database: currentDb },
+                              );
+                            }}
+                          >
+                            <Plus size={13} />
+                            <span>New Table...</span>
+                          </button>
+                        )}
+                        {sidebarMenu.category === "views" && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const name = sidebarMenu.schemaName!;
+                              setSidebarMenu(null);
+                              openSqlWithQuery(
+                                generateNewViewTemplate(name, Boolean(w.mssql)),
+                                `new-view-${name}.sql`,
+                                { rootId: root.id, database: currentDb },
+                              );
+                            }}
+                          >
+                            <Plus size={13} />
+                            <span>New View...</span>
+                          </button>
+                        )}
+                        {sidebarMenu.category === "functions" && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const name = sidebarMenu.schemaName!;
+                              setSidebarMenu(null);
+                              openSqlWithQuery(
+                                generateNewFunctionTemplate(name, Boolean(w.mssql)),
+                                `new-routine-${name}.sql`,
+                                { rootId: root.id, database: currentDb },
+                              );
+                            }}
+                          >
+                            <Plus size={13} />
+                            <span>New Function / Procedure...</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const key = sidebarMenu.schemaKey!;
+                            const name = sidebarMenu.schemaName!;
+                            setSidebarMenu(null);
+                            refreshSchema(key, name);
+                          }}
+                        >
+                          <RotateCw size={13} />
+                          <span>Refresh</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const name = sidebarMenu.schemaName!;
+                            setSidebarMenu(null);
+                            openSqlWithQuery(
+                              w.mssql
+                                ? `USE [${currentDb}];\nGO\n\n-- Query in schema [${name}]\n`
+                                : `SET search_path TO "${name}", public;\n\n`,
+                              `${name}-query.sql`,
+                              { rootId: root.id, database: currentDb },
+                            );
+                          }}
+                        >
+                          <SquareTerminal size={13} />
+                          <span>New Query</span>
+                        </button>
+                      </>
+                    )}
+
+                    {sidebarMenu.type === "table" && sidebarMenu.table && (() => {
+                      const t = sidebarMenu.table;
+                      const qName = t.namespace
+                        ? w.mssql
+                          ? `[${t.namespace}].[${t.name}]`
+                          : `"${t.namespace}"."${t.name}"`
+                        : w.mssql
+                          ? `[${t.name}]`
+                          : `"${t.name}"`;
+                      const selectQuery = w.mssql
+                        ? `SELECT TOP 1000 *\nFROM ${qName};`
+                        : `SELECT *\nFROM ${qName}\nLIMIT 1000;`;
+                      const colList = t.columns
+                        .map((c) => (w.mssql ? `[${c.name}]` : `"${c.name}"`))
+                        .join(", ");
+                      return (
                         <>
+                          <div className="sidebar-context-header">
+                            <strong>{t.name}</strong>
+                            <small>Table · {t.namespace ?? "default"}</small>
+                          </div>
                           <button
                             type="button"
                             onClick={() => {
                               setSidebarMenu(null);
-                              handleOpenConnection(targetRoot.id);
+                              void openTableData(t.id);
                             }}
                           >
-                            <Plug size={13} />
-                            <span>Open Connection</span>
+                            <Table2 size={13} />
+                            <span>Open Table Data</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              openSqlWithQuery(selectQuery, `${t.name}.sql`, {
+                                rootId: root.id,
+                                database: currentDb,
+                              });
+                            }}
+                          >
+                            <Play size={13} />
+                            <span>Select Top 1000 Rows</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              openSqlWithQuery(
+                                generateTableDdl(t, Boolean(w.mssql)),
+                                `${t.name}-ddl.sql`,
+                                { rootId: root.id, database: currentDb },
+                              );
+                            }}
+                          >
+                            <FileCode size={13} />
+                            <span>Design / View Table DDL</span>
+                          </button>
+                          <div className="sidebar-context-divider" />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              openSqlWithQuery(
+                                generateAlterTableTemplate(t, Boolean(w.mssql)),
+                                `alter-${t.name}.sql`,
+                                { rootId: root.id, database: currentDb },
+                              );
+                            }}
+                          >
+                            <Pencil size={13} />
+                            <span>Alter Table (DDL Script)...</span>
                           </button>
                           <button
                             type="button"
                             className="danger"
                             onClick={() => {
                               setSidebarMenu(null);
-                              void detachWorkspaceConnection(targetRoot.id);
+                              openSqlWithQuery(
+                                generateDropTableScript(t, Boolean(w.mssql)),
+                                `drop-${t.name}.sql`,
+                                { rootId: root.id, database: currentDb },
+                              );
                             }}
                           >
                             <Trash2 size={13} />
-                            <span>Delete Connection</span>
+                            <span>Drop Table (Script)...</span>
+                          </button>
+                          <div className="sidebar-context-divider" />
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setSidebarMenu(null);
+                              const ddl = generateTableDdl(t, Boolean(w.mssql));
+                              const dateStr = new Date().toISOString().slice(0, 10);
+                              const ok = await saveExportFile(
+                                `${t.name}_backup_${dateStr}`,
+                                "sql",
+                                ddl,
+                              );
+                              if (ok) {
+                                setMessage(
+                                  `Table "${t.name}" backup exported successfully`,
+                                );
+                                setError(false);
+                              }
+                            }}
+                          >
+                            <Download size={13} />
+                            <span>Backup Table to SQL File...</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              openSqlWithQuery(
+                                generateTableDataBackupTemplate(
+                                  t,
+                                  Boolean(w.mssql),
+                                ),
+                                `backup-data-${t.name}.sql`,
+                                { rootId: root.id, database: currentDb },
+                              );
+                            }}
+                          >
+                            <HardDrive size={13} />
+                            <span>Backup Table Data (INSERT Script)...</span>
+                          </button>
+                          <div className="sidebar-context-divider" />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              copyText(t.name, "Table Name");
+                            }}
+                          >
+                            <Copy size={13} />
+                            <span>Copy Table Name</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              copyText(qName, "Full Qualified Name");
+                            }}
+                          >
+                            <Copy size={13} />
+                            <span>Copy Qualified Name</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              copyText(colList, "Column Names");
+                            }}
+                          >
+                            <Copy size={13} />
+                            <span>Copy Column Names</span>
                           </button>
                         </>
-                      )}
-                      <div className="sidebar-context-divider" />
-                      <div className="sidebar-color-picker-section">
-                        <div className="sidebar-color-picker-header">
-                          <span>Connection Color</span>
-                        </div>
-                        <div className="sidebar-color-palette">
-                          {CONNECTION_COLORS.map((c) => {
-                            const isSelected =
-                              (!c.color && !targetRoot.color) || c.color === targetRoot.color;
-                            return (
-                              <button
-                                key={c.label}
-                                type="button"
-                                className={`sidebar-color-dot ${!c.color ? "is-none" : ""} ${isSelected ? "is-selected" : ""}`}
-                                style={c.color ? { backgroundColor: c.color } : undefined}
-                                title={c.label}
-                                onClick={() => {
-                                  setSidebarMenu(null);
-                                  handleSetConnectionColor(targetRoot.id, c.color);
-                                }}
-                              >
-                                {!c.color && <span>✕</span>}
-                              </button>
-                            );
-                          })}
-                          <label className="sidebar-color-custom-btn" title="Custom color...">
-                            <input
-                              type="color"
-                              value={targetRoot.color || "#3b82f6"}
-                              onChange={(e) => {
-                                setSidebarMenu(null);
-                                handleSetConnectionColor(targetRoot.id, e.target.value);
-                              }}
-                            />
-                          </label>
-                        </div>
-                      </div>
-                      <div className="sidebar-context-divider" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          copyText(targetName, "Connection Name");
-                        }}
-                      >
-                        <Copy size={13} />
-                        <span>Copy Connection Name</span>
-                      </button>
-                    </>
-                  );
-                })()}
+                      );
+                    })()}
 
-                {sidebarMenu.type === "database" && sidebarMenu.databaseName && (() => {
-                  const dbName = sidebarMenu.databaseName;
-                  const targetRootId = sidebarMenu.connectionRootId || root.id;
-                  const targetRoot = connectionRoots.find((r) => r.id === targetRootId) ?? root;
-                  const isCurrent =
-                    root.id === targetRootId &&
-                    dbName.toLowerCase() === currentDb.toLowerCase();
-                  const isMssql = targetRoot.connection?.engine === "mssql";
-                  return (
-                    <>
-                      <div className="sidebar-context-header">
-                        <strong>{dbName}</strong>
-                        <small>Database {isCurrent ? "(Active)" : ""}</small>
-                      </div>
-                      {!isCurrent && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSidebarMenu(null);
-                            void handleDatabaseClick(targetRoot.id, dbName);
-                          }}
-                        >
-                          <Database size={13} />
-                          <span>Switch to Database</span>
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            generateNewSchemaTemplate(dbName, isMssql),
-                            `new-schema-${dbName}.sql`,
-                            { rootId: targetRoot.id, database: dbName },
-                          );
-                        }}
-                      >
-                        <Plus size={13} />
-                        <span>New Schema in Database...</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            "",
-                            `${dbName}.sql`,
-                            { rootId: targetRoot.id, database: dbName },
-                          );
-                        }}
-                      >
-                        <SquareTerminal size={13} />
-                        <span>New Query in Database</span>
-                      </button>
-                      <div className="sidebar-context-divider" />
-                      {isMssql ? (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSidebarMenu(null);
-                            openSqlWithQuery(
-                              generateMssqlDatabaseBackupScript(dbName),
-                              `backup-${dbName}.sql`,
-                              { rootId: targetRoot.id, database: dbName },
-                            );
-                          }}
-                        >
-                          <HardDrive size={13} />
-                          <span>Backup Database (.bak Script)...</span>
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSidebarMenu(null);
-                            openSqlWithQuery(
-                              generatePostgresBackupScript(dbName),
-                              `backup-${dbName}.sql`,
-                              { rootId: targetRoot.id, database: dbName },
-                            );
-                          }}
-                        >
-                          <HardDrive size={13} />
-                          <span>Backup Database (pg_dump Script)...</span>
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="danger"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            generateDropDatabaseScript(dbName, Boolean(w.mssql)),
-                            `drop-${dbName}.sql`,
-                            { rootId: targetRoot.id, database: dbName },
-                          );
-                        }}
-                      >
-                        <Trash2 size={13} />
-                        <span>Drop Database (Script)...</span>
-                      </button>
-                      <div className="sidebar-context-divider" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          copyText(dbName, "Database Name");
-                        }}
-                      >
-                        <Copy size={13} />
-                        <span>Copy Database Name</span>
-                      </button>
-                    </>
-                  );
-                })()}
+                    {sidebarMenu.type === "view" && sidebarMenu.view && (() => {
+                      const v = sidebarMenu.view;
+                      const qName = v.namespace
+                        ? w.mssql
+                          ? `[${v.namespace}].[${v.name}]`
+                          : `"${v.namespace}"."${v.name}"`
+                        : w.mssql
+                          ? `[${v.name}]`
+                          : `"${v.name}"`;
+                      const selectQuery = w.mssql
+                        ? `SELECT TOP 1000 *\nFROM ${qName};`
+                        : `SELECT *\nFROM ${qName}\nLIMIT 1000;`;
+                      const colList = v.columns
+                        .map((c) => (w.mssql ? `[${c.name}]` : `"${c.name}"`))
+                        .join(", ");
+                      return (
+                        <>
+                          <div className="sidebar-context-header">
+                            <strong>{v.name}</strong>
+                            <small>View · {v.namespace ?? "default"}</small>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              void openTableData(v.id);
+                            }}
+                          >
+                            <Eye size={13} />
+                            <span>Open View Data</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              openSqlWithQuery(selectQuery, `${v.name}.sql`, {
+                                rootId: root.id,
+                                database: currentDb,
+                              });
+                            }}
+                          >
+                            <Play size={13} />
+                            <span>Select Top 1000 Rows</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              openSqlWithQuery(
+                                generateViewDdl(v, Boolean(w.mssql)),
+                                `${v.name}-ddl.sql`,
+                                { rootId: root.id, database: currentDb },
+                              );
+                            }}
+                          >
+                            <FileCode size={13} />
+                            <span>Design / View View DDL</span>
+                          </button>
+                          <div className="sidebar-context-divider" />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              openSqlWithQuery(
+                                generateViewDdl(v, Boolean(w.mssql)),
+                                `alter-${v.name}.sql`,
+                                { rootId: root.id, database: currentDb },
+                              );
+                            }}
+                          >
+                            <Pencil size={13} />
+                            <span>Alter View (DDL Script)...</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="danger"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              openSqlWithQuery(
+                                generateDropViewScript(v, Boolean(w.mssql)),
+                                `drop-${v.name}.sql`,
+                                { rootId: root.id, database: currentDb },
+                              );
+                            }}
+                          >
+                            <Trash2 size={13} />
+                            <span>Drop View (Script)...</span>
+                          </button>
+                          <div className="sidebar-context-divider" />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              copyText(v.name, "View Name");
+                            }}
+                          >
+                            <Copy size={13} />
+                            <span>Copy View Name</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              copyText(qName, "Full Qualified Name");
+                            }}
+                          >
+                            <Copy size={13} />
+                            <span>Copy Qualified Name</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              copyText(colList, "Column Names");
+                            }}
+                          >
+                            <Copy size={13} />
+                            <span>Copy Column Names</span>
+                          </button>
+                        </>
+                      );
+                    })()}
 
-                {sidebarMenu.type === "schemas_header" && (
-                  <>
-                    <div className="sidebar-context-header">
-                      <strong>Schemas</strong>
-                      <small>Catalog ({schemaGroups.length})</small>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSidebarMenu(null);
-                        openSqlWithQuery(
-                          generateNewSchemaTemplate(currentDb, Boolean(w.mssql)),
-                          `new-schema-${currentDb}.sql`,
-                          { rootId: root.id, database: currentDb },
-                        );
-                      }}
-                    >
-                      <Plus size={13} />
-                      <span>New Schema...</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSidebarMenu(null);
-                        for (const g of schemaGroups) {
-                          const key = `${w.id}:${w.activeSourceId ?? "primary"}:${g.name}`;
-                          refreshSchema(key, g.name);
-                        }
-                      }}
-                    >
-                      <RotateCw size={13} />
-                      <span>Refresh All Schemas</span>
-                    </button>
-                  </>
+                    {sidebarMenu.type === "function" && sidebarMenu.func && (() => {
+                      const fn = sidebarMenu.func;
+                      const schemaPrefix = fn.namespace ? `${fn.namespace}.` : "";
+                      const isProc = fn.kind === "procedure";
+                      const argStr = fn.arguments ? `/* ${fn.arguments} */` : "";
+                      const invocation = isProc
+                        ? w.mssql
+                          ? `EXEC ${schemaPrefix}${fn.name} ${argStr};`
+                          : `CALL ${schemaPrefix}${fn.name}(${argStr});`
+                        : `SELECT ${schemaPrefix}${fn.name}(${argStr});`;
+                      const fullSig = `${schemaPrefix}${fn.name}(${fn.arguments ?? ""})${fn.resultType ? " : " + fn.resultType : ""}`;
+                      return (
+                        <>
+                          <div className="sidebar-context-header">
+                            <strong>{fn.name}</strong>
+                            <small>
+                              {fn.kind ?? "function"} · {fn.namespace ?? "default"}
+                            </small>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              openFunctionCode(fn, {
+                                rootId: root.id,
+                                database: currentDb,
+                              });
+                            }}
+                          >
+                            <FileCode size={13} />
+                            <span>View / Design Function Code</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              openSqlWithQuery(
+                                invocation,
+                                `${fn.name}-call.sql`,
+                                { rootId: root.id, database: currentDb },
+                              );
+                            }}
+                          >
+                            <Play size={13} />
+                            <span>Call / Execute Snippet</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              handleFunctionClick(fn);
+                            }}
+                          >
+                            <SquareTerminal size={13} />
+                            <span>Insert Call Snippet into Active Tab</span>
+                          </button>
+                          <div className="sidebar-context-divider" />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              openFunctionCode(fn, {
+                                rootId: root.id,
+                                database: currentDb,
+                              });
+                            }}
+                          >
+                            <Pencil size={13} />
+                            <span>Alter Routine (Script)...</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="danger"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              openSqlWithQuery(
+                                generateDropFuncScript(fn, Boolean(w.mssql)),
+                                `drop-${fn.name}.sql`,
+                                { rootId: root.id, database: currentDb },
+                              );
+                            }}
+                          >
+                            <Trash2 size={13} />
+                            <span>Drop Routine (Script)...</span>
+                          </button>
+                          <div className="sidebar-context-divider" />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              copyText(fn.name, "Function Name");
+                            }}
+                          >
+                            <Copy size={13} />
+                            <span>Copy Function Name</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              copyText(fullSig, "Signature");
+                            }}
+                          >
+                            <Copy size={13} />
+                            <span>Copy Signature</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSidebarMenu(null);
+                              copyText(invocation, "Call Statement");
+                            }}
+                          >
+                            <Copy size={13} />
+                            <span>Copy Call Statement</span>
+                          </button>
+                        </>
+                      );
+                    })()}
+                  </div>
                 )}
-
-                {sidebarMenu.type === "schema" && (
-                  <>
-                    <div className="sidebar-context-header">
-                      <strong>{sidebarMenu.schemaName}</strong>
-                      <small>Schema</small>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const key = sidebarMenu.schemaKey!;
-                        const name = sidebarMenu.schemaName!;
-                        setSidebarMenu(null);
-                        toggleSchema(key, name);
-                      }}
-                    >
-                      {isSchemaOpen(sidebarMenu.schemaKey!, sidebarMenu.schemaName!) ? (
-                        <>
-                          <ChevronRight size={13} />
-                          <span>Collapse Schema</span>
-                        </>
-                      ) : (
-                        <>
-                          <ChevronDown size={13} />
-                          <span>Open Schema</span>
-                        </>
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const key = sidebarMenu.schemaKey!;
-                        const name = sidebarMenu.schemaName!;
-                        setSidebarMenu(null);
-                        refreshSchema(key, name);
-                      }}
-                    >
-                      <RotateCw size={13} />
-                      <span>Refresh Schema</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const name = sidebarMenu.schemaName!;
-                        setSidebarMenu(null);
-                        openSqlWithQuery(
-                          w.mssql
-                            ? `USE [${currentDb}];\nGO\n\n-- Query in schema [${name}]\n`
-                            : `SET search_path TO "${name}", public;\n\n`,
-                          `${name}-query.sql`,
-                          { rootId: root.id, database: currentDb },
-                        );
-                      }}
-                    >
-                      <SquareTerminal size={13} />
-                      <span>New Query in Schema</span>
-                    </button>
-                    <div className="sidebar-context-divider" />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const name = sidebarMenu.schemaName!;
-                        setSidebarMenu(null);
-                        openSqlWithQuery(
-                          generateNewTableTemplate(name, Boolean(w.mssql)),
-                          `new-table-${name}.sql`,
-                          { rootId: root.id, database: currentDb },
-                        );
-                      }}
-                    >
-                      <Plus size={13} />
-                      <span>New Table...</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSidebarMenu(null);
-                        openSqlWithQuery(
-                          generateNewSchemaTemplate(currentDb, Boolean(w.mssql)),
-                          `new-schema-${currentDb}.sql`,
-                          { rootId: root.id, database: currentDb },
-                        );
-                      }}
-                    >
-                      <Plus size={13} />
-                      <span>New Schema...</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const name = sidebarMenu.schemaName!;
-                        setSidebarMenu(null);
-                        openSqlWithQuery(
-                          generateNewViewTemplate(name, Boolean(w.mssql)),
-                          `new-view-${name}.sql`,
-                          { rootId: root.id, database: currentDb },
-                        );
-                      }}
-                    >
-                      <Plus size={13} />
-                      <span>New View...</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const name = sidebarMenu.schemaName!;
-                        setSidebarMenu(null);
-                        openSqlWithQuery(
-                          generateNewFunctionTemplate(name, Boolean(w.mssql)),
-                          `new-routine-${name}.sql`,
-                          { rootId: root.id, database: currentDb },
-                        );
-                      }}
-                    >
-                      <Plus size={13} />
-                      <span>New Function / Procedure...</span>
-                    </button>
-                    <div className="sidebar-context-divider" />
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const name = sidebarMenu.schemaName!;
-                        setSidebarMenu(null);
-                        const group = schemaGroups.find((g) => g.name === name);
-                        const ddl = generateSchemaBackupDdl(
-                          name,
-                          Boolean(w.mssql),
-                          group ? group.tables : [],
-                          group ? group.views : [],
-                          group ? group.functions : [],
-                        );
-                        const dateStr = new Date().toISOString().slice(0, 10);
-                        const ok = await saveExportFile(
-                          `${name}_backup_${dateStr}`,
-                          "sql",
-                          ddl,
-                        );
-                        if (ok) {
-                          setMessage(`Schema "${name}" backup exported successfully`);
-                          setError(false);
-                        }
-                      }}
-                    >
-                      <Download size={13} />
-                      <span>Backup Schema to SQL File...</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const name = sidebarMenu.schemaName!;
-                        setSidebarMenu(null);
-                        const group = schemaGroups.find((g) => g.name === name);
-                        const ddl = generateSchemaBackupDdl(
-                          name,
-                          Boolean(w.mssql),
-                          group ? group.tables : [],
-                          group ? group.views : [],
-                          group ? group.functions : [],
-                        );
-                        openSqlWithQuery(ddl, `${name}-backup.sql`, {
-                          rootId: root.id,
-                          database: currentDb,
-                        });
-                      }}
-                    >
-                      <HardDrive size={13} />
-                      <span>Backup Schema (SQL Script)...</span>
-                    </button>
-                    {w.mssql && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const db = w.mssql?.database || "database";
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            generateMssqlDatabaseBackupScript(db),
-                            `backup-${db}.sql`,
-                            { rootId: root.id, database: currentDb },
-                          );
-                        }}
-                      >
-                        <HardDrive size={13} />
-                        <span>Backup Database (.bak Script)...</span>
-                      </button>
-                    )}
-                    {w.postgres && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const db = w.postgres?.database || "database";
-                          const name = sidebarMenu.schemaName;
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            generatePostgresBackupScript(db, name),
-                            `backup-${db}.sql`,
-                            { rootId: root.id, database: currentDb },
-                          );
-                        }}
-                      >
-                        <HardDrive size={13} />
-                        <span>Backup Database (pg_dump Script)...</span>
-                      </button>
-                    )}
-                    <div className="sidebar-context-divider" />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const name = sidebarMenu.schemaName!;
-                        setSidebarMenu(null);
-                        copyText(name, "Schema Name");
-                      }}
-                    >
-                      <Copy size={13} />
-                      <span>Copy Schema Name</span>
-                    </button>
-                  </>
-                )}
-
-                {sidebarMenu.type === "folder" && (
-                  <>
-                    <div className="sidebar-context-header">
-                      <strong>
-                        {sidebarMenu.schemaName} / {sidebarMenu.category}
-                      </strong>
-                      <small>Category Folder</small>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const key = sidebarMenu.schemaKey!;
-                        const cat = sidebarMenu.category!;
-                        const count = sidebarMenu.categoryCount ?? 0;
-                        setSidebarMenu(null);
-                        toggleFolder(key, cat, count);
-                      }}
-                    >
-                      {isFolderOpen(
-                        sidebarMenu.schemaKey!,
-                        sidebarMenu.category!,
-                        sidebarMenu.categoryCount ?? 0,
-                      ) ? (
-                        <>
-                          <ChevronRight size={13} />
-                          <span>Collapse Folder</span>
-                        </>
-                      ) : (
-                        <>
-                          <ChevronDown size={13} />
-                          <span>Expand Folder</span>
-                        </>
-                      )}
-                    </button>
-                    {sidebarMenu.category === "tables" && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const name = sidebarMenu.schemaName!;
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            generateNewTableTemplate(name, Boolean(w.mssql)),
-                            `new-table-${name}.sql`,
-                            { rootId: root.id, database: currentDb },
-                          );
-                        }}
-                      >
-                        <Plus size={13} />
-                        <span>New Table...</span>
-                      </button>
-                    )}
-                    {sidebarMenu.category === "views" && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const name = sidebarMenu.schemaName!;
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            generateNewViewTemplate(name, Boolean(w.mssql)),
-                            `new-view-${name}.sql`,
-                            { rootId: root.id, database: currentDb },
-                          );
-                        }}
-                      >
-                        <Plus size={13} />
-                        <span>New View...</span>
-                      </button>
-                    )}
-                    {sidebarMenu.category === "functions" && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const name = sidebarMenu.schemaName!;
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            generateNewFunctionTemplate(name, Boolean(w.mssql)),
-                            `new-routine-${name}.sql`,
-                            { rootId: root.id, database: currentDb },
-                          );
-                        }}
-                      >
-                        <Plus size={13} />
-                        <span>New Function / Procedure...</span>
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const key = sidebarMenu.schemaKey!;
-                        const name = sidebarMenu.schemaName!;
-                        setSidebarMenu(null);
-                        refreshSchema(key, name);
-                      }}
-                    >
-                      <RotateCw size={13} />
-                      <span>Refresh</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const name = sidebarMenu.schemaName!;
-                        setSidebarMenu(null);
-                        openSqlWithQuery(
-                          w.mssql
-                            ? `USE [${currentDb}];\nGO\n\n-- Query in schema [${name}]\n`
-                            : `SET search_path TO "${name}", public;\n\n`,
-                          `${name}-query.sql`,
-                          { rootId: root.id, database: currentDb },
-                        );
-                      }}
-                    >
-                      <SquareTerminal size={13} />
-                      <span>New Query</span>
-                    </button>
-                  </>
-                )}
-
-                {sidebarMenu.type === "table" && sidebarMenu.table && (() => {
-                  const t = sidebarMenu.table;
-                  const qName = t.namespace
-                    ? w.mssql
-                      ? `[${t.namespace}].[${t.name}]`
-                      : `"${t.namespace}"."${t.name}"`
-                    : w.mssql
-                      ? `[${t.name}]`
-                      : `"${t.name}"`;
-                  const selectQuery = w.mssql
-                    ? `SELECT TOP 1000 *\nFROM ${qName};`
-                    : `SELECT *\nFROM ${qName}\nLIMIT 1000;`;
-                  const colList = t.columns
-                    .map((c) => (w.mssql ? `[${c.name}]` : `"${c.name}"`))
-                    .join(", ");
-                  return (
-                    <>
-                      <div className="sidebar-context-header">
-                        <strong>{t.name}</strong>
-                        <small>Table · {t.namespace ?? "default"}</small>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          void openTableData(t.id);
-                        }}
-                      >
-                        <Table2 size={13} />
-                        <span>Open Table Data</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openSqlWithQuery(selectQuery, `${t.name}.sql`, {
-                            rootId: root.id,
-                            database: currentDb,
-                          });
-                        }}
-                      >
-                        <Play size={13} />
-                        <span>Select Top 1000 Rows</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            generateTableDdl(t, Boolean(w.mssql)),
-                            `${t.name}-ddl.sql`,
-                            { rootId: root.id, database: currentDb },
-                          );
-                        }}
-                      >
-                        <FileCode size={13} />
-                        <span>Design / View Table DDL</span>
-                      </button>
-                      <div className="sidebar-context-divider" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            generateAlterTableTemplate(t, Boolean(w.mssql)),
-                            `alter-${t.name}.sql`,
-                            { rootId: root.id, database: currentDb },
-                          );
-                        }}
-                      >
-                        <Pencil size={13} />
-                        <span>Alter Table (DDL Script)...</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="danger"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            generateDropTableScript(t, Boolean(w.mssql)),
-                            `drop-${t.name}.sql`,
-                            { rootId: root.id, database: currentDb },
-                          );
-                        }}
-                      >
-                        <Trash2 size={13} />
-                        <span>Drop Table (Script)...</span>
-                      </button>
-                      <div className="sidebar-context-divider" />
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          setSidebarMenu(null);
-                          const ddl = generateTableDdl(t, Boolean(w.mssql));
-                          const dateStr = new Date().toISOString().slice(0, 10);
-                          const ok = await saveExportFile(
-                            `${t.name}_backup_${dateStr}`,
-                            "sql",
-                            ddl,
-                          );
-                          if (ok) {
-                            setMessage(
-                              `Table "${t.name}" backup exported successfully`,
-                            );
-                            setError(false);
-                          }
-                        }}
-                      >
-                        <Download size={13} />
-                        <span>Backup Table to SQL File...</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            generateTableDataBackupTemplate(
-                              t,
-                              Boolean(w.mssql),
-                            ),
-                            `backup-data-${t.name}.sql`,
-                            { rootId: root.id, database: currentDb },
-                          );
-                        }}
-                      >
-                        <HardDrive size={13} />
-                        <span>Backup Table Data (INSERT Script)...</span>
-                      </button>
-                      <div className="sidebar-context-divider" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          copyText(t.name, "Table Name");
-                        }}
-                      >
-                        <Copy size={13} />
-                        <span>Copy Table Name</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          copyText(qName, "Full Qualified Name");
-                        }}
-                      >
-                        <Copy size={13} />
-                        <span>Copy Qualified Name</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          copyText(colList, "Column Names");
-                        }}
-                      >
-                        <Copy size={13} />
-                        <span>Copy Column Names</span>
-                      </button>
-                    </>
-                  );
-                })()}
-
-                {sidebarMenu.type === "view" && sidebarMenu.view && (() => {
-                  const v = sidebarMenu.view;
-                  const qName = v.namespace
-                    ? w.mssql
-                      ? `[${v.namespace}].[${v.name}]`
-                      : `"${v.namespace}"."${v.name}"`
-                    : w.mssql
-                      ? `[${v.name}]`
-                      : `"${v.name}"`;
-                  const selectQuery = w.mssql
-                    ? `SELECT TOP 1000 *\nFROM ${qName};`
-                    : `SELECT *\nFROM ${qName}\nLIMIT 1000;`;
-                  const colList = v.columns
-                    .map((c) => (w.mssql ? `[${c.name}]` : `"${c.name}"`))
-                    .join(", ");
-                  return (
-                    <>
-                      <div className="sidebar-context-header">
-                        <strong>{v.name}</strong>
-                        <small>View · {v.namespace ?? "default"}</small>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          void openTableData(v.id);
-                        }}
-                      >
-                        <Eye size={13} />
-                        <span>Open View Data</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openSqlWithQuery(selectQuery, `${v.name}.sql`, {
-                            rootId: root.id,
-                            database: currentDb,
-                          });
-                        }}
-                      >
-                        <Play size={13} />
-                        <span>Select Top 1000 Rows</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            generateViewDdl(v, Boolean(w.mssql)),
-                            `${v.name}-ddl.sql`,
-                            { rootId: root.id, database: currentDb },
-                          );
-                        }}
-                      >
-                        <FileCode size={13} />
-                        <span>Design / View View DDL</span>
-                      </button>
-                      <div className="sidebar-context-divider" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            generateViewDdl(v, Boolean(w.mssql)),
-                            `alter-${v.name}.sql`,
-                            { rootId: root.id, database: currentDb },
-                          );
-                        }}
-                      >
-                        <Pencil size={13} />
-                        <span>Alter View (DDL Script)...</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="danger"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            generateDropViewScript(v, Boolean(w.mssql)),
-                            `drop-${v.name}.sql`,
-                            { rootId: root.id, database: currentDb },
-                          );
-                        }}
-                      >
-                        <Trash2 size={13} />
-                        <span>Drop View (Script)...</span>
-                      </button>
-                      <div className="sidebar-context-divider" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          copyText(v.name, "View Name");
-                        }}
-                      >
-                        <Copy size={13} />
-                        <span>Copy View Name</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          copyText(qName, "Full Qualified Name");
-                        }}
-                      >
-                        <Copy size={13} />
-                        <span>Copy Qualified Name</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          copyText(colList, "Column Names");
-                        }}
-                      >
-                        <Copy size={13} />
-                        <span>Copy Column Names</span>
-                      </button>
-                    </>
-                  );
-                })()}
-
-                {sidebarMenu.type === "function" && sidebarMenu.func && (() => {
-                  const fn = sidebarMenu.func;
-                  const schemaPrefix = fn.namespace ? `${fn.namespace}.` : "";
-                  const isProc = fn.kind === "procedure";
-                  const argStr = fn.arguments ? `/* ${fn.arguments} */` : "";
-                  const invocation = isProc
-                    ? w.mssql
-                      ? `EXEC ${schemaPrefix}${fn.name} ${argStr};`
-                      : `CALL ${schemaPrefix}${fn.name}(${argStr});`
-                    : `SELECT ${schemaPrefix}${fn.name}(${argStr});`;
-                  const fullSig = `${schemaPrefix}${fn.name}(${fn.arguments ?? ""})${fn.resultType ? " : " + fn.resultType : ""}`;
-                  return (
-                    <>
-                      <div className="sidebar-context-header">
-                        <strong>{fn.name}</strong>
-                        <small>
-                          {fn.kind ?? "function"} · {fn.namespace ?? "default"}
-                        </small>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openFunctionCode(fn, {
-                            rootId: root.id,
-                            database: currentDb,
-                          });
-                        }}
-                      >
-                        <FileCode size={13} />
-                        <span>View / Design Function Code</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            invocation,
-                            `${fn.name}-call.sql`,
-                            { rootId: root.id, database: currentDb },
-                          );
-                        }}
-                      >
-                        <Play size={13} />
-                        <span>Call / Execute Snippet</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          handleFunctionClick(fn);
-                        }}
-                      >
-                        <SquareTerminal size={13} />
-                        <span>Insert Call Snippet into Active Tab</span>
-                      </button>
-                      <div className="sidebar-context-divider" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openFunctionCode(fn, {
-                            rootId: root.id,
-                            database: currentDb,
-                          });
-                        }}
-                      >
-                        <Pencil size={13} />
-                        <span>Alter Routine (Script)...</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="danger"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          openSqlWithQuery(
-                            generateDropFuncScript(fn, Boolean(w.mssql)),
-                            `drop-${fn.name}.sql`,
-                            { rootId: root.id, database: currentDb },
-                          );
-                        }}
-                      >
-                        <Trash2 size={13} />
-                        <span>Drop Routine (Script)...</span>
-                      </button>
-                      <div className="sidebar-context-divider" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          copyText(fn.name, "Function Name");
-                        }}
-                      >
-                        <Copy size={13} />
-                        <span>Copy Function Name</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          copyText(fullSig, "Signature");
-                        }}
-                      >
-                        <Copy size={13} />
-                        <span>Copy Signature</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSidebarMenu(null);
-                          copyText(invocation, "Call Statement");
-                        }}
-                      >
-                        <Copy size={13} />
-                        <span>Copy Call Statement</span>
-                      </button>
-                    </>
-                  );
-                })()}
-              </div>
+              </aside>
             )}
-          </aside>
-        )}
-        {left && (
-          <div
-            className="sidebar-divider"
-            role="separator"
-            aria-label="Resize sidebar"
-            aria-orientation="vertical"
-            aria-valuemin={160}
-            aria-valuemax={480}
-            aria-valuenow={sidebarWidth}
-            tabIndex={0}
-            onPointerDown={(event) => {
-              event.preventDefault();
-              event.currentTarget.setPointerCapture(event.pointerId);
-            }}
-            onPointerMove={(event) => {
-              if (!event.currentTarget.hasPointerCapture(event.pointerId))
-                return;
-              resizeSidebar(
-                event.clientX -
-                workspaceRef.current!.getBoundingClientRect().left,
-              );
-            }}
-            onPointerUp={(event) => {
-              if (event.currentTarget.hasPointerCapture(event.pointerId))
-                event.currentTarget.releasePointerCapture(event.pointerId);
-            }}
-            onKeyDown={(event) => {
-              if (
-                !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
-              )
-                return;
-              event.preventDefault();
-              resizeSidebar(
-                event.key === "Home"
-                  ? 160
-                  : event.key === "End"
-                    ? 480
-                    : sidebarWidth + (event.key === "ArrowLeft" ? -16 : 16),
-              );
-            }}
-          />
-        )}
-        <main className={"main-view mode-" + mode}>
-          {isConnectionAccessible && mode === "sql" ? (
-            <MultiSqlWorkspace
-              key={w.id}
-              workspace={w}
-              dark={dark}
-              busy={busy}
-              onBusy={setBusy}
-              runRef={remoteRun}
-            />
-          ) : isConnectionAccessible ? (
-            <RemoteWorkspace
-              key={
-                w.id +
-                connectionRevision +
-                (w.activeSourceId ?? "") +
-                JSON.stringify(w.postgres ?? w.mssql ?? activeSource.connection?.config)
-              }
-              sessionKey={
-                w.activeSourceId
-                  ? sourceSessionKey(w.id, w.activeSourceId)
-                  : w.id
-              }
-              workspace={
-                !w.postgres && !w.mssql && activeSource.connection
-                  ? {
-                    ...w,
-                    postgres:
-                      activeSource.connection.engine === "postgres"
-                        ? activeSource.connection.config
-                        : undefined,
-                    mssql:
-                      activeSource.connection.engine === "mssql"
-                        ? activeSource.connection.config
-                        : undefined,
-                  }
-                  : w
-              }
-              mode={mode}
-              dark={dark}
-              activeTable={activeTable}
-              openTables={openDataTables}
-              dataLayout={dataLayout}
-              onDataLayoutChange={setDataLayout}
-              onSelectTable={(id) => void chooseTable(id)}
-              onReorderTables={setOpenDataTableIds}
-              onCloseTable={(id) => void closeDataTable(id)}
-              onCloseTables={(ids, nextActive) =>
-                void closeDataTablesBatch(ids, nextActive)
-              }
-              runRef={remoteRun}
-              onBusy={setBusy}
-              onDirty={setDirty}
-            />
-          ) : (
-            <section
-              className="connection-empty"
-              aria-labelledby="connection-empty-title"
+            {sidebarVisible && (
+              <div
+                className="sidebar-divider"
+                role="separator"
+                aria-label="Resize sidebar"
+                aria-orientation="vertical"
+                aria-valuemin={160}
+                aria-valuemax={480}
+                aria-valuenow={sidebarWidth}
+                tabIndex={0}
+                onPointerDown={(event) => {
+                  event.preventDefault();
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                }}
+                onPointerMove={(event) => {
+                  if (!event.currentTarget.hasPointerCapture(event.pointerId))
+                    return;
+                  resizeSidebar(
+                    event.clientX -
+                    event.currentTarget.previousElementSibling!.getBoundingClientRect().left,
+                  );
+                }}
+                onPointerUp={(event) => {
+                  if (event.currentTarget.hasPointerCapture(event.pointerId))
+                    event.currentTarget.releasePointerCapture(event.pointerId);
+                }}
+                onKeyDown={(event) => {
+                  if (
+                    !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
+                  )
+                    return;
+                  event.preventDefault();
+                  resizeSidebar(
+                    event.key === "Home"
+                      ? 160
+                      : event.key === "End"
+                        ? 480
+                        : sidebarWidth + (event.key === "ArrowLeft" ? -16 : 16),
+                  );
+                }}
+              />
+            )}
+            <main
+              className={"main-view mode-" + mode}
+              onDragOverCapture={(event) => {
+                if (mode !== "sql" || !event.dataTransfer.types.includes(SQL_FILE_DRAG_TYPE)) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "copy";
+              }}
+              onDropCapture={(event) => {
+                if (mode !== "sql" || !event.dataTransfer.types.includes(SQL_FILE_DRAG_TYPE)) return;
+                event.preventDefault();
+                event.stopPropagation();
+                const path = event.dataTransfer.getData(SQL_FILE_DRAG_TYPE);
+                if (path) void openFolderSqlFile(path);
+              }}
             >
-              <div className="connection-empty-mark" aria-hidden="true">
-                <Database size={25} />
-              </div>
-              <h2 id="connection-empty-title">
-                {hasActiveConnection && !isConnectionOpen(root.id)
-                  ? `Connect to ${connectionName}`
-                  : "Connect to a database"}
-              </h2>
-              <p>
-                {hasActiveConnection && !isConnectionOpen(root.id)
-                  ? `Connection "${connectionName}" is closed. Open connection to use SQL and Data.`
-                  : "Add a PostgreSQL or SQL Server connection to browse tables and run queries."}
-              </p>
-              {hasActiveConnection && !isConnectionOpen(root.id) ? (
-                <Button
-                  className="button-primary"
-                  onClick={() => handleOpenConnection(root.id)}
-                >
-                  <Plug size={14} />
-                  <span>Open Connection</span>
-                </Button>
+              {mode === "sql" ? (
+                <MultiSqlWorkspace
+                  toolbarHost={sqlToolbarHost}
+                  key={w.id}
+                  workspace={w}
+                  dark={dark}
+                  busy={busy}
+                  onBusy={setBusy}
+                />
+              ) : isConnectionAccessible ? (
+                <RemoteWorkspace
+                  key={
+                    w.id +
+                    connectionRevision +
+                    (w.activeSourceId ?? "") +
+                    JSON.stringify(w.postgres ?? w.mssql ?? activeSource.connection?.config)
+                  }
+                  sessionKey={
+                    w.activeSourceId
+                      ? sourceSessionKey(w.id, w.activeSourceId)
+                      : w.id
+                  }
+                  workspace={
+                    !w.postgres && !w.mssql && activeSource.connection
+                      ? {
+                        ...w,
+                        postgres:
+                          activeSource.connection.engine === "postgres"
+                            ? activeSource.connection.config
+                            : undefined,
+                        mssql:
+                          activeSource.connection.engine === "mssql"
+                            ? activeSource.connection.config
+                            : undefined,
+                      }
+                      : w
+                  }
+                  mode={mode}
+                  dark={dark}
+                  activeTable={activeTable}
+                  openTables={openDataTables}
+                  dataLayout={dataLayout}
+                  onDataLayoutChange={setDataLayout}
+                  onSelectTable={(id) => void chooseTable(id)}
+                  onReorderTables={setOpenDataTableIds}
+                  onCloseTable={(id) => void closeDataTable(id)}
+                  onCloseTables={(ids, nextActive) =>
+                    void closeDataTablesBatch(ids, nextActive)
+                  }
+                  onBusy={setBusy}
+                  onDirty={setDirty}
+                />
               ) : (
-                <Button
-                  className="button-primary"
-                  onClick={handleCreateNewConnection}
+                <section
+                  className="connection-empty"
+                  aria-labelledby="connection-empty-title"
                 >
-                  <Plus size={14} />
-                  <span>New Connection</span>
-                </Button>
+                  <div className="connection-empty-mark" aria-hidden="true">
+                    <Database size={25} />
+                  </div>
+                  <h2 id="connection-empty-title">
+                    {hasActiveConnection && !isConnectionOpen(root.id)
+                      ? `Connect to ${connectionName}`
+                      : "Connect to a database"}
+                  </h2>
+                  <p>
+                    {hasActiveConnection && !isConnectionOpen(root.id)
+                      ? `Connection "${connectionName}" is closed. Open the connection to browse data.`
+                      : "Add a PostgreSQL or SQL Server connection to browse tables and run queries."}
+                  </p>
+                  {hasActiveConnection && !isConnectionOpen(root.id) ? (
+                    <Button
+                      className="button-primary"
+                      onClick={() => handleOpenConnection(root.id)}
+                    >
+                      <Plug size={14} />
+                      <span>Open Connection</span>
+                    </Button>
+                  ) : (
+                    <Button
+                      className="button-primary"
+                      onClick={handleCreateNewConnection}
+                    >
+                      <Plus size={14} />
+                      <span>New Connection</span>
+                    </Button>
+                  )}
+                </section>
               )}
-            </section>
-          )}
-        </main>
+            </main>
+            {mode === "sql" && sqlAutosave.folder && sqlFilesOpen && (
+              <SqlFilesPanel folder={sqlAutosave.folder} onOpenFile={(path) => void openFolderSqlFile(path)} />
+            )}
+          </>
+        )}
       </div>
       {message && (
         <div

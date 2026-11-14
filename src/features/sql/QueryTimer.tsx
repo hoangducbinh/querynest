@@ -30,7 +30,7 @@ export function QueryTimer({ timing }: { timing?: QueryTiming }) {
   const [now, setNow] = useState(() => performance.now());
   useEffect(() => {
     if (!timing || timing.finishedAt !== undefined) return;
-    const timer = setInterval(() => setNow(performance.now()), 100);
+    const timer = setInterval(() => setNow(performance.now()), 1000);
     return () => clearInterval(timer);
   }, [timing]);
   const elapsed = timing
@@ -53,13 +53,11 @@ export function QueryTimer({ timing }: { timing?: QueryTiming }) {
         timing
           ? timing.finishedAt === undefined
             ? "Elapsed time · query running"
-            : `Last query · ${Math.round(elapsed).toLocaleString()} ms`
+            : `Last query · ${clock}`
           : "Query execution time"
       }
     >
-      <span>
-        {clock}.{String(Math.floor(elapsed) % 1000).padStart(3, "0")}
-      </span>
+      <span>{clock}</span>
     </span>
   );
 }

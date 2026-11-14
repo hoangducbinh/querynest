@@ -77,6 +77,8 @@ export interface WorkspaceSource {
   diagramPositions?: Record<string, { x: number; y: number }>;
 }
 export interface SqlTab {
+  filePath?: string;
+  fileFolder?: string;
   disconnectedFrom?: { profileId: string; database: string };
   sourceId?: string;
   pinned?: boolean;

@@ -36,10 +36,7 @@ it.each(["postgres", "mssql"] as const)(
       activeId: "query",
       onTabsChange: vi.fn(),
       onLayoutChange: vi.fn(),
-      onChange: vi.fn(),
       onRun: vi.fn(),
-      onSelection: vi.fn(),
-      value: "SELECT missing FROM customers",
       disabled: false,
       busy: false,
       dark: false,
@@ -82,7 +79,6 @@ it("shows Stop only in the running split pane, even when the other pane is activ
     <SqlWorkspace
       tabs={tabs}
       activeId="right"
-      value="SELECT 2"
       layout={{
         groups: [
           { ids: ["left"], activeId: "left" },
@@ -92,9 +88,7 @@ it("shows Stop only in the running split pane, even when the other pane is activ
       }}
       onTabsChange={vi.fn()}
       onLayoutChange={vi.fn()}
-      onChange={vi.fn()}
       onRun={vi.fn()}
-      onSelection={vi.fn()}
       dark={false}
       busy
       disabled

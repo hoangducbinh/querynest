@@ -13,6 +13,7 @@ import {
 } from "./sources";
 import { defaultRemoteConfig, type RemoteConfig } from "./model";
 import {
+  isServerConnected,
   ensureDatabaseSession,
   listDatabases,
   withDatabaseSession,
@@ -264,3 +265,26 @@ it.each(["postgres", "mssql"] as const)(
     );
   },
 );
+
+it("reports a server from its live child session and allows reconnect after closing", () => {
+  const { w, root, child } = setup("mssql");
+  const sources = workspaceSources(w);
+  const server = sources.find((source) => source.id === root)!;
+  const database = sources.find((source) => source.id === child)!;
+  const key = sourceSessionKey(w.id, child);
+  const session = {
+    config: database.connection!,
+    profileId: server.connectionId,
+    sessionId: "child-before-close",
+    serverVersion: "16",
+    disconnect: vi.fn(async () => {}),
+  };
+  expect(isServerConnected(w, server)).toBe(false);
+  retainSession(key, session);
+  expect(isServerConnected(w, server)).toBe(true);
+  disconnectProfile(server.connectionId, [key]);
+  expect(isServerConnected(w, server)).toBe(false);
+  expect(session.disconnect).toHaveBeenCalledWith(session.sessionId);
+  retainSession(key, { ...session, sessionId: "child-after-close" });
+  expect(isServerConnected(w, server)).toBe(true);
+});

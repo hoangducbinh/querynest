@@ -163,7 +163,6 @@ describe("useHorizontalWheelScroll", () => {
     } as unknown as HTMLElement;
 
     // Simulate hook setup
-    let cleanup: (() => void) | undefined;
 
     // Test runner can test the hook's effect logic directly
     const effect = () => {
@@ -198,7 +197,7 @@ describe("useHorizontalWheelScroll", () => {
       };
     };
 
-    cleanup = effect();
+    const cleanup = effect();
     expect(listeners.wheel).toBeDefined();
     expect(listeners.scroll).toBeDefined();
     expect(classList.has("is-scrolling")).toBe(false);

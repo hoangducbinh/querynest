@@ -6,7 +6,7 @@ export function EmptyResults() {
       <div className="results-empty">
         <Terminal size={22} />
         <p>Run a query to explore your data</p>
-        <small>Results stay in your browser.</small>
+        <small>Press F5 to run the current tab. Select text to run only that selection.</small>
       </div>
     </div>
   );

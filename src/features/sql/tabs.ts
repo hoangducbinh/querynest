@@ -38,5 +38,7 @@ export function bindNewTabs(
 ): SqlTab[] {
   if (!sourceId) return tabs;
   const ids = new Set(existing.map((tab) => tab.id));
-  return tabs.map((tab) => (ids.has(tab.id) ? tab : { ...tab, sourceId }));
+  return tabs.map((tab) =>
+    ids.has(tab.id) || tab.sourceId ? tab : { ...tab, sourceId },
+  );
 }

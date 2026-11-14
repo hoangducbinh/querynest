@@ -1,7 +1,6 @@
 import { reorderTabs, useTabReorder } from "../sql/tab-reorder";
 import { useQueryTimings } from "../sql/QueryTimer";
 import { STACK_DEFAULT_ROWS } from "../sql/ResultSetView";
-import { updateSqlTabView } from "../sql/view-state";
 import { editableResult } from "../sql/editable-result";
 import { saveQueryResult } from "./save-query-result";
 import { currentSource, workspaceSources, connectionRoot } from "./sources";
@@ -27,7 +26,6 @@ import {
   useRef,
   useState,
   startTransition,
-  type MutableRefObject,
 } from "react";
 import {
   LoaderCircle,
@@ -71,7 +69,6 @@ interface Props {
   onReorderTables?: (ids: string[]) => void;
   onCloseTable?: (tableId: string) => void;
   onCloseTables?: (remainingIds: string[], nextActiveId?: string) => void;
-  runRef: MutableRefObject<() => void>;
   onBusy: (busy: boolean) => void;
   onDirty: (dirty: boolean) => void;
 }
@@ -88,7 +85,6 @@ export function RemoteWorkspace({
   onCloseTable,
   onCloseTables,
   onReorderTables,
-  runRef,
   onBusy,
   onDirty,
 }: Props) {
@@ -119,7 +115,6 @@ export function RemoteWorkspace({
   const [results, setResults] = useSqlResults(
     `${w.id}:source:${sessionKey}:${JSON.stringify(currentConfig)}`,
   );
-  const selection = useRef({ id: "", sql: "" });
   const cancelled = useRef(false);
   const sqlRunning = useRef(false);
   const executionId = useRef(0);
@@ -470,21 +465,16 @@ export function RemoteWorkspace({
       });
     }
   }
-  async function run(tabId?: string, suppliedSql?: string) {
+  async function run(tabId: string, sql: string) {
     if (!sessionId || pending || sqlRunning.current) return;
+    const tab = sqlTabs(w).find((item) => item.id === tabId);
+    if (!tab || !sql.trim()) return;
     sqlRunning.current = true;
     cancelled.current = false;
     executionId.current++;
     setQueryRunning(true);
     setCancelPending(false);
-    const tab = sqlTabs(w).find((item) => item.id === tabId) ?? activeSqlTab(w);
-    const sql =
-      suppliedSql ??
-      (selection.current.id === tab.id && selection.current.sql.trim()
-        ? selection.current.sql
-        : tab.sql);
     queryTimings.start(tab.id);
-    updateSqlTabView(`${w.id}:${tab.id}`, { resultsVisible: true });
     try {
       await task(async () => {
         const output = await executeSqlBatch(
@@ -502,9 +492,6 @@ export function RemoteWorkspace({
       setCancelPending(false);
     }
   }
-  runRef.current = () => {
-    if (mode === "sql") void run();
-  };
   const validate = useCallback(
     (sql: string) => remoteClient(engine).validate(sessionId, sql),
     [sessionId, engine],
@@ -678,14 +665,6 @@ export function RemoteWorkspace({
               edit((d) => setSqlTabs(d, tabs, active, layout));
             })
           }
-          value={activeSqlTab(w).sql}
-          onChange={(sql) =>
-            edit((d) => {
-              const tabs = sqlTabs(d);
-              tabs.find((t) => t.id === activeSqlTab(d).id)!.sql = sql;
-              setSqlTabs(d, tabs, activeSqlTab(d).id);
-            })
-          }
           onRun={(tabId, sql) => void run(tabId, sql)}
           disabled={pending}
           runningTabId={queryTimings.runningTabId}
@@ -724,9 +703,6 @@ export function RemoteWorkspace({
           }}
           allResults={results}
           queryResults={results[activeSqlTab(w).id]}
-          onSelection={(sql, tabId) => {
-            selection.current = { id: tabId ?? activeSqlTab(w).id, sql };
-          }}
           validate={validate}
           validationSource={label}
           cancelPending={cancelPending}
